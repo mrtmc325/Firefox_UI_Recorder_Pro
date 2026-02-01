@@ -15,6 +15,8 @@ async function refresh() {
   document.getElementById("idle-sec").value = st.settings?.idleThresholdSec ?? 60;
   document.getElementById("resume-focus").checked = !!st.settings?.resumeOnFocus;
   document.getElementById("prune-inputs").checked = !!st.settings?.pruneInputs;
+  document.getElementById("page-watch").checked = !!st.settings?.pageWatchEnabled;
+  document.getElementById("page-watch-ms").value = st.settings?.pageWatchMs ?? 500;
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -76,6 +78,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("prune-inputs").addEventListener("change", async (e) => {
     await updateSettings({ pruneInputs: !!e.target.checked });
+    await refresh();
+  });
+  document.getElementById("page-watch").addEventListener("change", async (e) => {
+    await updateSettings({ pageWatchEnabled: !!e.target.checked });
+    await refresh();
+  });
+  document.getElementById("page-watch-ms").addEventListener("change", async (e) => {
+    await updateSettings({ pageWatchMs: Math.max(200, Number(e.target.value || 500)) });
     await refresh();
   });
   await refresh();

@@ -124,7 +124,7 @@ function renderTimeline(target, events) {
     col.appendChild(el("div", "timeline-header", title));
     byTab.get(key).forEach(ev => {
       const block = el("div", "timeline-event");
-      block.textContent = `${ev.type || "event"} — ${cleanTitle(ev.label || ev.human || ev.text || "")}`;
+      block.textContent = `${ev.type || "event"} — ${titleFor(ev)}`;
       col.appendChild(block);
     });
     target.appendChild(col);
@@ -314,11 +314,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     return;
   }
 
+  function updateAux() {
+    renderHints(hints, report.events);
+    renderTimeline(timeline, report.events);
+  }
+
   function render() {
     root.innerHTML = "";
     const events = filterEvents(report.events, search.value, typeFilter.value, urlFilter.value);
-    renderHints(hints, report.events);
-    renderTimeline(timeline, report.events);
+    updateAux();
 
     events.forEach((ev, index) => {
       const wrap = el("div", "step");
@@ -329,6 +333,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       titleSpan.addEventListener("blur", async () => {
         ev.editedTitle = titleSpan.textContent.trim();
         await saveReports(reports);
+        updateAux();
       });
       title.appendChild(idxSpan);
       title.appendChild(titleSpan);
@@ -350,6 +355,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         note.addEventListener("blur", async () => {
           ev.text = note.textContent.trim();
           await saveReports(reports);
+          updateAux();
         });
         wrap.appendChild(note);
       }

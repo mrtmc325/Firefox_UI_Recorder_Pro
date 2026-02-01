@@ -14,7 +14,7 @@
         <div class="subtitle">UI workflow capture</div>
       </div>
     </div>
-    <div class="version">v1.1</div>
+    <div class="version">v1.1.1</div>
   </header>
 
   <section class="card actions">
@@ -70,6 +70,14 @@
     <label class="row">
       Prune noisy input steps
       <input id="prune-inputs" type="checkbox" />
+    </label>
+    <label class="row">
+      Page watch (dynamic UI)
+      <input id="page-watch" type="checkbox" />
+    </label>
+    <label class="row">
+      Page watch interval (ms)
+      <input id="page-watch-ms" type="number" min="200" step="100" />
     </label>
     <div class="hint">
       Screenshots are unmodified. Only report text is redacted. Hotkey: Ctrl+Shift+Y.

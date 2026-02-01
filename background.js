@@ -20,6 +20,8 @@ let settings = {
   resumeOnFocus: true,
   pruneInputs: true,
   pruneWindowMs: 1200,
+  pageWatchEnabled: true,
+  pageWatchMs: 500,
 
   redactRules: [
     { name: "shared-secret", pattern: "(shared\\s*secret\\s*[:=]\\s*)([^\\s]+)", replace: "$1[REDACTED]" },
@@ -311,7 +313,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     };
     delete cleaned.typedValue;
 
-    const includeScreenshot = ["click","change","input","submit","nav","outcome"].includes(e.type);
+    const includeScreenshot = ["click","change","input","submit","nav","outcome","ui-change","note"].includes(e.type);
     if (includeScreenshot) {
       const shot = await maybeScreenshot(e);
       cleaned.screenshot = shot.screenshot;

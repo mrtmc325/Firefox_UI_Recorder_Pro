@@ -40,6 +40,90 @@
     const t = lower(text);
     return SENSITIVE_KEYWORDS.some(k => t.includes(k));
   }
+  function detectActionHint(text) {
+    const t = lower(text);
+    for (const h of ACTION_HINTS) {
+      if (h.words.some(w => t.includes(w))) return h.key;
+    }
+    return "";
+  }
+
+  function snapshotSignature() {
+    const body = document.body;
+    if (!body) return "";
+    let text = "";
+    try { text = body.innerText || ""; } catch (_) { text = ""; }
+    text = text.replace(/\s+/g, " ").slice(0, 800);
+    const dialogs = document.querySelectorAll("dialog,[role='dialog'],[aria-modal='true']").length;
+    const inputs = document.querySelectorAll("input,textarea,select,[role='textbox']").length;
+    return `${text}|d${dialogs}|i${inputs}`;
+  }
+
+  function setupPageWatch() {
+    if (window.__uiRecorderPageWatch) return;
+    window.__uiRecorderPageWatch = true;
+    let lastSig = snapshotSignature();
+    let timer = null;
+    let pending = false;
+    window.__uiRecorderPageWatchMs = 500;
+
+    const refreshSettings = async () => {
+      const st = await getState();
+      if (st && st.settings && typeof st.settings.pageWatchMs === "number") {
+        window.__uiRecorderPageWatchMs = st.settings.pageWatchMs;
+      }
+      if (st && st.settings && st.settings.pageWatchEnabled === false) {
+        window.__uiRecorderPageWatchMs = 500;
+      }
+    };
+    refreshSettings();
+    setInterval(refreshSettings, 5000);
+
+    const trigger = async () => {
+      if (pending) return;
+      pending = true;
+      const st = await getState();
+      pending = false;
+      if (!st.isRecording || st.isPaused) return;
+      if (!st.settings?.pageWatchEnabled) return;
+      const sig = snapshotSignature();
+      if (!sig || sig === lastSig) return;
+      lastSig = sig;
+      await sendEvent({
+        type: "ui-change",
+        url: location.href,
+        human: "UI changed",
+        label: "Dynamic content",
+        actionKind: "ui-change",
+        pageIsLogin: findLoginContext().isLogin,
+        pageHasSensitiveText: detectSensitiveTextOrAttrs(),
+        redactRects: collectSensitiveRectsWithFrame().rects,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        forceScreenshot: true
+      });
+    };
+
+    const observer = new MutationObserver(() => {
+      const stMs = (window.__uiRecorderPageWatchMs || 500);
+      clearTimeout(timer);
+      timer = setTimeout(trigger, Math.max(200, stMs));
+    });
+
+    const start = () => {
+      if (!document.body) {
+        setTimeout(start, 300);
+        return;
+      }
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+    };
+    start();
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        lastSig = snapshotSignature();
+      }
+    });
+  }
   function hasLoginPasswordKeyword(text) {
     const t = lower(text);
     return LOGIN_PASSWORD_KEYWORDS.some(k => t.includes(k));
@@ -648,6 +732,7 @@
   window.addEventListener("popstate", () => emitNavIfChanged());
 
   // Initial page: if login, capture a nav step with forced screenshot so you always get the login page in the report.
+  setupPageWatch();
   setTimeout(async () => {
     const st = await getState();
     if (!st.isRecording) return;
@@ -670,10 +755,3 @@
     });
   }, 600);
 })();
-  function detectActionHint(text) {
-    const t = lower(text);
-    for (const h of ACTION_HINTS) {
-      if (h.words.some(w => t.includes(w))) return h.key;
-    }
-    return "";
-  }
