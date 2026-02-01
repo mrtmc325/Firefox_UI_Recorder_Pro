@@ -8,7 +8,7 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.0.0. Capture UI workflows with clean step titles and optional text redaction. Screenshots are always unmodified.</p>
+    <p>Version 1.1.0. Capture UI workflows with clean step titles, text-only redaction, and editable, annotated reports. Screenshots are always unmodified.</p>
 
     <h2>Install (Temporary Add-on)</h2>
     <ul>
@@ -22,18 +22,43 @@
       <li>Click the toolbar icon.</li>
       <li>Press <strong>Start</strong>.</li>
       <li>Perform your workflow.</li>
-      <li>Press <strong>Stop</strong>.</li>
-      <li>Open the report or export JSON / print to PDF.</li>
+      <li>Press <strong>Stop</strong> (the report is saved automatically).</li>
+      <li>Open the report or print to PDF.</li>
     </ol>
 
     <h2>Settings</h2>
     <ul>
       <li><strong>Debounce (ms)</strong>: Delay before a screenshot is captured after an event.</li>
+      <li><strong>Capture mode</strong>: Record all events or clicks/submit/nav only.</li>
       <li><strong>Diff-based screenshots</strong>: Skip duplicate screenshots.</li>
       <li><strong>Redact sensitive text in report</strong>: Masks secrets in report titles/labels/values only.</li>
       <li><strong>Redact usernames on login pages</strong>: Masks usernames in report text only.</li>
+      <li><strong>Auto-pause on idle</strong>: Pause recording when the system is idle.</li>
+      <li><strong>Auto-resume on focus</strong>: Resume recording when you return to the browser.</li>
+      <li><strong>Prune noisy input steps</strong>: Collapse rapid input edits to a single step.</li>
     </ul>
     <p><strong>Note:</strong> Screenshots are never masked. The full page is always captured.</p>
+
+    <h2>Report History</h2>
+    <p>The extension keeps a rolling buffer of the last 3 workflows. Use the report selector to reopen a prior run if you forgot to export or print.</p>
+
+    <h2>Editing & Annotations</h2>
+    <ul>
+      <li>Edit step titles inline.</li>
+      <li>Add notes from the popup.</li>
+      <li>Draw on screenshots with pen, highlight, outline, shapes, and text.</li>
+      <li>Download a standalone HTML report bundle for sharing.</li>
+    </ul>
+
+    <h2>Report Tools</h2>
+    <ul>
+      <li>Search and filter by URL, type, or label.</li>
+      <li>Replay hints checklist (fields + buttons) to guide walkthroughs.</li>
+      <li>Cross-tab timeline to visualize parallel steps.</li>
+    </ul>
+
+    <h2>Keyboard Shortcut</h2>
+    <p>Use <code>Ctrl+Shift+Y</code> to start/stop recording.</p>
 
     <h2>Data & Privacy</h2>
     <p>All data stays in your browser. No external network calls are made.</p>
@@ -42,7 +67,7 @@
     <ul>
       <li><strong>Open report</strong> generates an HTML report with timestamps and screenshots.</li>
       <li><strong>Print to PDF</strong> uses the browser print dialog for a PDF-friendly layout.</li>
-      <li><strong>Export JSON</strong> downloads raw events and metadata for automation.</li>
+      <li><strong>Download bundle</strong> creates a standalone HTML file for sharing.</li>
     </ul>
 
     <h2>Support</h2>

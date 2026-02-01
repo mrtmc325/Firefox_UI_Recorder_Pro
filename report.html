@@ -12,6 +12,45 @@
     <div class="hint noprint">
       Titles are cleaned automatically. Screenshots are unmodified; only report text is redacted.
     </div>
+    <div class="noprint">
+      <div class="toolbar">
+        <label class="row">
+          Report history
+          <select id="report-select"></select>
+        </label>
+        <label class="row">
+          Search
+          <input id="search" type="text" placeholder="URL, label, text..." />
+        </label>
+        <label class="row">
+          Type filter
+          <select id="type-filter">
+            <option value="all">All</option>
+            <option value="click">Click</option>
+            <option value="input">Input</option>
+            <option value="change">Change</option>
+            <option value="submit">Submit</option>
+            <option value="nav">Nav</option>
+            <option value="note">Note</option>
+          </select>
+        </label>
+        <label class="row">
+          URL filter
+          <input id="url-filter" type="text" placeholder="contains..." />
+        </label>
+        <button id="bundle" class="btn noprint">Download bundle</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="report-section noprint">
+    <h2>Replay Hints</h2>
+    <div id="hints"></div>
+  </div>
+
+  <div class="report-section noprint">
+    <h2>Cross-tab Timeline</h2>
+    <div id="timeline" class="timeline"></div>
   </div>
 
   <div id="steps"></div>

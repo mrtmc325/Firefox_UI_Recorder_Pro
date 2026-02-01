@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "UI Workflow Recorder Pro",
-  "version": "1.0.0",
-  "description": "Record UI workflows with clean step titles, optional text redaction, and fast diff-based screenshots.",
+  "version": "1.1.0",
+  "description": "Record UI workflows with clean step titles, text-only redaction, and advanced reporting tools.",
   "icons": {
     "16": "icons/icon.svg",
     "32": "icons/icon.svg",
@@ -14,6 +14,7 @@
     "activeTab",
     "storage",
     "downloads",
+    "idle",
     "<all_urls>"
   ],
   "background": {
@@ -49,6 +50,14 @@
   "applications": {
     "gecko": {
       "id": "ui-recorder-pro@local"
+    }
+  },
+  "commands": {
+    "toggle-recording": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y"
+      },
+      "description": "Start/stop recording"
     }
   }
 }

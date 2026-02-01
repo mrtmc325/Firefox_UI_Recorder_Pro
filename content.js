@@ -23,6 +23,16 @@
   ];
 
   const LOGIN_BUTTON_WORDS = ["log in","login","sign in","signin","continue"];
+  const ACTION_HINTS = [
+    { key: "save", words: ["save", "apply", "update"] },
+    { key: "next", words: ["next", "continue"] },
+    { key: "back", words: ["back", "previous"] },
+    { key: "submit", words: ["submit", "finish"] },
+    { key: "cancel", words: ["cancel", "discard"] },
+    { key: "delete", words: ["delete", "remove"] },
+    { key: "add", words: ["add", "create", "new"] },
+    { key: "login", words: ["login", "log in", "sign in"] }
+  ];
 
   function norm(s) { return String(s || "").trim().replace(/\s+/g, " ").slice(0, 240); }
   function lower(s) { return String(s || "").toLowerCase(); }
@@ -410,6 +420,7 @@
     const t = setTimeout(async () => {
       const st = await getState();
       if (!st.isRecording) return;
+      if (st.settings && st.settings.captureMode === "clicks") return;
 
       const login = findLoginContext();
       const redaction = collectSensitiveRectsWithFrame();
@@ -459,6 +470,7 @@
     const label = getLabelFor(el);
     const actionKind = inferActionKind(el);
     const human = humanize(el);
+    const hint = detectActionHint(label || human || (el && el.innerText) || "");
 
     const clickingSensitive = isSensitiveField(el) || (login.isLogin && st.settings?.redactLoginUsernames && isLoginUsernameField(el)) || hasSensitiveKeyword(label);
 
@@ -474,6 +486,7 @@
       label: clickingSensitive ? "[REDACTED]" : label,
       human,
       actionKind,
+      actionHint: hint,
       selector: "",
       pageIsLogin: login.isLogin,
       pageHasSensitiveText: detectSensitiveTextOrAttrs(),
@@ -492,6 +505,7 @@
         human: "Submit login form",
         label: "Login",
         actionKind: "submit",
+        actionHint: "submit",
         pageIsLogin: true,
         pageHasSensitiveText: detectSensitiveTextOrAttrs(),
         redactRects: submitRedaction.rects,
@@ -507,6 +521,7 @@
   document.addEventListener("change", async (e) => {
     const st = await getState();
     if (!st.isRecording) return;
+    if (st.settings && st.settings.captureMode === "clicks") return;
 
     const el = e.target;
     const login = findLoginContext();
@@ -562,6 +577,7 @@
       human: "Submit login form (Enter)",
       label: "Login",
       actionKind: "submit",
+      actionHint: "submit",
       pageIsLogin: true,
       pageHasSensitiveText: detectSensitiveTextOrAttrs(),
       redactRects: redaction.rects,
@@ -587,6 +603,7 @@
       human: isLoginForm ? "Submit login form" : "Submit form",
       label: isLoginForm ? "Login" : "Submit",
       actionKind: "submit",
+      actionHint: "submit",
       pageIsLogin: !!login.isLogin,
       pageHasSensitiveText: detectSensitiveTextOrAttrs(),
       redactRects: redaction.rects,
@@ -653,3 +670,10 @@
     });
   }, 600);
 })();
+  function detectActionHint(text) {
+    const t = lower(text);
+    for (const h of ACTION_HINTS) {
+      if (h.words.some(w => t.includes(w))) return h.key;
+    }
+    return "";
+  }
