@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>UI Recorder Pro Documentation</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="report">
+  <main class="docs">
+    <h1>UI Recorder Pro — Documentation</h1>
+    <p>Version 1.0.0. Capture UI workflows with clean step titles and optional text redaction. Screenshots are always unmodified.</p>
+
+    <h2>Install (Temporary Add-on)</h2>
+    <ul>
+      <li>Open <code>about:debugging#/runtime/this-firefox</code> in Firefox.</li>
+      <li>Click <strong>Load Temporary Add-on…</strong></li>
+      <li>Select <code>manifest.json</code> from the extension folder.</li>
+    </ul>
+
+    <h2>Quick Start</h2>
+    <ol>
+      <li>Click the toolbar icon.</li>
+      <li>Press <strong>Start</strong>.</li>
+      <li>Perform your workflow.</li>
+      <li>Press <strong>Stop</strong>.</li>
+      <li>Open the report or export JSON / print to PDF.</li>
+    </ol>
+
+    <h2>Settings</h2>
+    <ul>
+      <li><strong>Debounce (ms)</strong>: Delay before a screenshot is captured after an event.</li>
+      <li><strong>Diff-based screenshots</strong>: Skip duplicate screenshots.</li>
+      <li><strong>Redact sensitive text in report</strong>: Masks secrets in report titles/labels/values only.</li>
+      <li><strong>Redact usernames on login pages</strong>: Masks usernames in report text only.</li>
+    </ul>
+    <p><strong>Note:</strong> Screenshots are never masked. The full page is always captured.</p>
+
+    <h2>Data & Privacy</h2>
+    <p>All data stays in your browser. No external network calls are made.</p>
+
+    <h2>Exports</h2>
+    <ul>
+      <li><strong>Open report</strong> generates an HTML report with timestamps and screenshots.</li>
+      <li><strong>Print to PDF</strong> uses the browser print dialog for a PDF-friendly layout.</li>
+      <li><strong>Export JSON</strong> downloads raw events and metadata for automation.</li>
+    </ul>
+
+    <h2>Support</h2>
+    <p>If you see noisy labels, the report title cleaner falls back to a generic label to keep steps readable.</p>
+  </main>
+</body>
+</html>
