@@ -124,7 +124,16 @@ function renderTimeline(target, events) {
     col.appendChild(el("div", "timeline-header", title));
     byTab.get(key).forEach(ev => {
       const block = el("div", "timeline-event");
-      block.textContent = `${ev.type || "event"} — ${titleFor(ev)}`;
+      const stepId = ev && ev.stepId ? ev.stepId : "";
+      const text = `${ev.type || "event"} — ${titleFor(ev)}`;
+      if (stepId) {
+        const link = document.createElement("a");
+        link.href = `#${stepId}`;
+        link.textContent = text;
+        block.appendChild(link);
+      } else {
+        block.textContent = text;
+      }
       col.appendChild(block);
     });
     target.appendChild(col);
@@ -388,7 +397,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateAux();
 
     events.forEach((ev, index) => {
+      ev.stepId = `step-${index + 1}`;
       const wrap = el("div", "step");
+      wrap.id = ev.stepId;
       const title = el("div", "step-title");
       const idxSpan = el("span", "step-index", `${index + 1}. `);
       const titleSpan = el("span", "step-title-text", titleFor(ev));
