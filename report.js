@@ -239,7 +239,10 @@ function setupAnnotationTools(canvas, ev, report, reports, idx, root) {
 }
 
 function buildExportHtml(report) {
-  const title = "UI Workflow Report";
+  const brand = report.brand || {};
+  const title = brand.title || "UI Workflow Report";
+  const subtitle = brand.subtitle || "";
+  const logo = brand.logo || "";
   const rows = (report.events || []).map((ev, i) => {
     const stepTitle = titleFor(ev);
     const img = ev.screenshot ? `<div class="shot"><img src="${ev.screenshot}"></div>` : "";
@@ -255,11 +258,18 @@ body{font-family:Arial,sans-serif;margin:18px;color:#111;background:#fff}
 .step{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
 .step-title{font-weight:bold;margin-bottom:6px}
 .step-meta{font-size:12px;color:#666;margin-bottom:8px}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.brand img{width:48px;height:48px;object-fit:contain;border:1px solid #ddd;border-radius:8px}
+.brand h1{margin:0;font-size:20px}
+.brand p{margin:0;font-size:12px;color:#555}
 .shot-wrap{position:relative;display:inline-block}
 .shot img{max-width:100%;border:1px solid #ddd;border-radius:10px}
 .annot{position:absolute;left:0;top:0;width:100%;height:100%}
 </style></head><body>
-<h1>${title}</h1>
+<div class="brand">
+  ${logo ? `<img src="${logo}" alt="Logo">` : ""}
+  <div><h1>${title}</h1>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
+</div>
 ${rows}
 </body></html>`;
 }
@@ -280,15 +290,68 @@ document.addEventListener("DOMContentLoaded", async () => {
   const hints = document.getElementById("hints");
   const timeline = document.getElementById("timeline");
   const bundleBtn = document.getElementById("bundle");
+  const brandLogo = document.getElementById("brand-logo");
+  const brandTitle = document.getElementById("brand-title");
+  const brandSubtitle = document.getElementById("brand-subtitle");
+  const brandUpload = document.getElementById("brand-upload");
+  const brandRemove = document.getElementById("brand-remove");
 
   const idx = Math.max(0, Math.min(reports.length - 1, Number(idxParam || 0)));
   const report = reports[idx];
+  if (report && !report.brand) report.brand = {};
 
   const shownAt = report && report.createdAt ? new Date(report.createdAt).toLocaleString() : "n/a";
   const shownSteps = report && Array.isArray(report.events) ? report.events.length : 0;
   const sess = report && report.sessionId ? report.sessionId : "n/a";
   document.getElementById("meta").textContent =
     `Saved reports: ${reports.length} | Showing: ${shownAt} | Steps: ${shownSteps} | Session: ${sess}`;
+
+  if (brandTitle) {
+    brandTitle.textContent = (report.brand && report.brand.title) || "UI Workflow Report";
+    brandTitle.addEventListener("blur", async () => {
+      report.brand.title = brandTitle.textContent.trim();
+      await saveReports(reports);
+      updateAux();
+    });
+  }
+  if (brandSubtitle) {
+    brandSubtitle.textContent = (report.brand && report.brand.subtitle) || "Procedure walkthrough";
+    brandSubtitle.addEventListener("blur", async () => {
+      report.brand.subtitle = brandSubtitle.textContent.trim();
+      await saveReports(reports);
+    });
+  }
+  if (brandLogo) {
+    if (report.brand && report.brand.logo) {
+      brandLogo.src = report.brand.logo;
+      brandLogo.style.display = "block";
+    } else {
+      brandLogo.style.display = "none";
+    }
+  }
+  if (brandUpload) {
+    brandUpload.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        report.brand.logo = String(reader.result || "");
+        if (brandLogo) {
+          brandLogo.src = report.brand.logo;
+          brandLogo.style.display = "block";
+        }
+        await saveReports(reports);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+  if (brandRemove) {
+    brandRemove.addEventListener("click", async () => {
+      report.brand.logo = "";
+      if (brandLogo) brandLogo.style.display = "none";
+      await saveReports(reports);
+    });
+  }
 
   if (select) {
     select.innerHTML = "";

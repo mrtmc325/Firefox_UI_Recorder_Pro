@@ -7,7 +7,20 @@
 </head>
 <body class="report">
   <div class="report-header">
-    <h1>UI Workflow Report</h1>
+    <div class="brand-header noprint">
+      <div class="brand-left">
+        <img id="brand-logo" class="brand-logo" alt="Logo" />
+        <div class="brand-text">
+          <div id="brand-title" class="brand-title" contenteditable="true">UI Workflow Report</div>
+          <div id="brand-subtitle" class="brand-subtitle" contenteditable="true">Procedure walkthrough</div>
+        </div>
+      </div>
+      <div class="brand-actions">
+        <input id="brand-upload" type="file" accept="image/*" />
+        <button id="brand-remove" class="btn ghost">Remove logo</button>
+      </div>
+    </div>
+    <h1 class="print-title">UI Workflow Report</h1>
     <div id="meta" class="step-meta"></div>
     <div class="hint noprint">
       Titles are cleaned automatically. Screenshots are unmodified; only report text is redacted.
