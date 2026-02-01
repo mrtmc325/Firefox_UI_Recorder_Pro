@@ -349,6 +349,29 @@ document.addEventListener("DOMContentLoaded", async () => {
       const metaText = `${ev.ts || ""} — ${ev.url || ""} — ${tabLabel}`;
       wrap.appendChild(el("div", "step-meta", metaText));
 
+      const actions = el("div", "step-actions noprint");
+      const deleteStep = el("button", "btn danger", "Delete step");
+      deleteStep.addEventListener("click", async () => {
+        const pos = report.events.indexOf(ev);
+        if (pos >= 0) report.events.splice(pos, 1);
+        await saveReports(reports);
+        render();
+      });
+      actions.appendChild(deleteStep);
+
+      if (ev.screenshot) {
+        const removeShot = el("button", "btn", "Remove screenshot");
+        removeShot.addEventListener("click", async () => {
+          ev.screenshot = null;
+          ev.screenshotSkipped = true;
+          ev.screenshotSkipReason = "removed";
+          await saveReports(reports);
+          render();
+        });
+        actions.appendChild(removeShot);
+      }
+      wrap.appendChild(actions);
+
       if (ev.type === "note") {
         const note = el("div", "step-note", ev.text || "");
         note.contentEditable = "true";

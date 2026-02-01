@@ -316,6 +316,24 @@ body.report {
   font-size: 12px;
 }
 
+.step-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+
+.step-actions .btn {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.btn.danger {
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+
 /* Docs */
 .docs {
   max-width: 900px;
