@@ -6,103 +6,205 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="report">
-  <div class="report-header">
-    <div class="brand-header noprint">
-      <div class="brand-left">
-        <img id="brand-logo" class="brand-logo" alt="Logo" />
-        <div class="brand-text">
-          <div id="brand-title" class="brand-title" contenteditable="true">UI Workflow Report</div>
-          <div id="brand-subtitle" class="brand-subtitle" contenteditable="true">Procedure walkthrough</div>
+  <div class="report-shell">
+    <aside class="report-nav noprint" aria-label="Builder navigation">
+      <div class="report-nav-card">
+        <div class="report-nav-head">
+          <h2>Builder Navigation</h2>
+          <p>Jump between sections and reduce visual noise while editing.</p>
         </div>
+        <div class="report-nav-actions">
+          <button id="expand-sections" class="btn ghost btn-small" type="button">Expand all</button>
+          <button id="collapse-sections" class="btn ghost btn-small" type="button">Collapse all</button>
+        </div>
+        <nav class="report-nav-links">
+          <a class="nav-link" href="#section-controls">Controls</a>
+          <a class="nav-link" href="#section-toc">Table of Contents</a>
+          <a class="nav-link" href="#section-hints">Replay Hints</a>
+          <a class="nav-link" href="#section-timeline">Cross-tab Timeline</a>
+          <a class="nav-link" href="#section-steps">Workflow Steps</a>
+        </nav>
+        <a id="docs-link-nav" class="btn subtle btn-small nav-docs-link" href="docs.html" target="_blank" rel="noopener">Open Docs</a>
       </div>
-      <div class="brand-actions">
-        <input id="brand-upload" type="file" accept="image/*" />
-        <button id="brand-remove" class="btn ghost">Remove logo</button>
-      </div>
-    </div>
-    <h1 class="print-title">UI Workflow Report</h1>
-    <div id="meta" class="step-meta"></div>
-    <div class="hint noprint">
-      Titles are cleaned automatically. Screenshots are unmodified; only report text is redacted.
-    </div>
-    <div class="noprint">
-      <div class="toolbar">
-        <label class="row">
-          Report history
-          <select id="report-select"></select>
-        </label>
-        <label class="row">
-          Search
-          <input id="search" type="text" placeholder="URL, label, text..." />
-        </label>
-        <label class="row">
-          Type filter
-          <select id="type-filter">
-            <option value="all">All</option>
-            <option value="click">Click</option>
-            <option value="input">Input</option>
-            <option value="change">Change</option>
-            <option value="submit">Submit</option>
-            <option value="nav">Nav</option>
-            <option value="note">Note</option>
-          </select>
-        </label>
-        <label class="row">
-          URL filter
-          <input id="url-filter" type="text" placeholder="contains..." />
-        </label>
-        <button
-          id="theme-toggle"
-          class="theme-toggle noprint"
-          type="button"
-          aria-label="Switch to dark"
-          title="Switch to dark"
-          aria-pressed="false"
-          data-theme="light"
-        >
-          <span class="theme-toggle-face theme-toggle-face-light" aria-hidden="true">
-            <span class="theme-icon theme-sun"></span>
-            <span class="theme-cloud theme-cloud-a"></span>
-            <span class="theme-cloud theme-cloud-b"></span>
-          </span>
-          <span class="theme-toggle-face theme-toggle-face-dark" aria-hidden="true">
-            <span class="theme-icon theme-moon"></span>
-            <span class="theme-cloud theme-cloud-a"></span>
-            <span class="theme-cloud theme-cloud-b"></span>
-          </span>
-        </button>
-        <button id="bundle" class="btn noprint">Export HTML bundle</button>
-        <button id="bundle-raw" class="btn noprint">Export raw ZIP</button>
-        <label class="row">
-          Import mode
-          <select id="import-mode">
-            <option value="replace">Import as new report</option>
-            <option value="merge">Merge into current report</option>
-          </select>
-        </label>
-        <button id="bundle-import" class="btn noprint">Import raw ZIP</button>
-        <input id="bundle-import-file" class="file-input" type="file" accept=".zip,application/zip" />
-      </div>
-      <div id="import-status" class="hint noprint"></div>
-    </div>
-  </div>
+    </aside>
 
-  <div class="report-section toc-section">
-    <h2>Table of Contents</h2>
-    <div id="toc"></div>
-  </div>
+    <main class="report-main">
+      <section id="section-controls" class="report-section report-header noprint">
+        <div class="section-heading">
+          <h2>Report Builder</h2>
+          <span class="section-pill">Editor</span>
+        </div>
 
-  <div class="report-section noprint">
-    <h2>Replay Hints</h2>
-    <div id="hints"></div>
-  </div>
+        <div class="brand-header">
+          <div class="brand-left">
+            <img id="brand-logo" class="brand-logo" alt="Logo" />
+            <div class="brand-text">
+              <div id="brand-title" class="brand-title" contenteditable="true">UI Workflow Report</div>
+              <div id="brand-subtitle" class="brand-subtitle" contenteditable="true">Procedure walkthrough</div>
+            </div>
+          </div>
+          <div class="brand-actions">
+            <input id="brand-upload" type="file" accept="image/*" />
+            <button id="brand-remove" class="btn ghost">Remove logo</button>
+          </div>
+        </div>
 
-  <div class="report-section noprint">
-    <h2>Cross-tab Timeline</h2>
-    <div id="timeline" class="timeline"></div>
-  </div>
+        <div id="meta" class="step-meta"></div>
+        <div class="hint">
+          Titles are cleaned automatically. Screenshots are unmodified; only report text is redacted.
+        </div>
 
-  <div id="steps"></div>
+        <div class="toolbar">
+          <label class="row">
+            Report history
+            <select id="report-select"></select>
+          </label>
+          <label class="row">
+            Search
+            <input id="search" type="text" placeholder="URL, label, text..." />
+          </label>
+          <label class="row">
+            Type filter
+            <select id="type-filter">
+              <option value="all">All</option>
+              <option value="click">Click</option>
+              <option value="input">Input</option>
+              <option value="change">Change</option>
+              <option value="submit">Submit</option>
+              <option value="nav">Nav</option>
+              <option value="note">Note</option>
+            </select>
+          </label>
+          <label class="row">
+            URL filter
+            <input id="url-filter" type="text" placeholder="contains..." />
+          </label>
+
+          <button
+            id="theme-toggle"
+            class="theme-toggle"
+            type="button"
+            aria-label="Switch to dark"
+            title="Switch to dark"
+            aria-pressed="false"
+            data-theme="light"
+          >
+            <span class="theme-toggle-face theme-toggle-face-light" aria-hidden="true">
+              <span class="theme-icon theme-sun"></span>
+              <span class="theme-cloud theme-cloud-a"></span>
+              <span class="theme-cloud theme-cloud-b"></span>
+            </span>
+            <span class="theme-toggle-face theme-toggle-face-dark" aria-hidden="true">
+              <span class="theme-icon theme-moon"></span>
+              <span class="theme-cloud theme-cloud-a"></span>
+              <span class="theme-cloud theme-cloud-b"></span>
+            </span>
+          </button>
+
+          <button id="bundle" class="btn">Export HTML bundle</button>
+          <button id="bundle-raw" class="btn">Export raw ZIP</button>
+          <a id="docs-link" class="btn ghost docs-link-inline" href="docs.html" target="_blank" rel="noopener">Docs</a>
+
+          <label class="row">
+            Import mode
+            <select id="import-mode">
+              <option value="replace">Import as new report</option>
+              <option value="merge">Merge into current report</option>
+            </select>
+          </label>
+          <button id="bundle-import" class="btn">Import raw ZIP</button>
+          <input id="bundle-import-file" class="file-input" type="file" accept=".zip,application/zip" />
+        </div>
+        <div class="export-theme-controls">
+          <div class="export-theme-title">Export theme</div>
+          <div class="export-theme-grid">
+            <label class="row">
+              Palette
+              <select id="export-theme-preset">
+                <option value="extension">Extension light</option>
+                <option value="mist">Cool mist</option>
+                <option value="slate">Slate calm</option>
+              </select>
+            </label>
+            <label class="row">
+              Font
+              <select id="export-theme-font">
+                <option value="trebuchet">Trebuchet sans</option>
+                <option value="system">System sans</option>
+                <option value="serif">Readable serif</option>
+                <option value="mono">Mono technical</option>
+              </select>
+            </label>
+            <label class="row">
+              TOC layout
+              <select id="export-theme-layout">
+                <option value="grid">Compact cards</option>
+                <option value="list">Single list</option>
+                <option value="minimal">Minimal numbers</option>
+              </select>
+            </label>
+            <label class="row">
+              TOC details
+              <select id="export-theme-meta">
+                <option value="host">Host only</option>
+                <option value="url">Compact URL</option>
+                <option value="none">Title only</option>
+              </select>
+            </label>
+            <label class="row">
+              Accent
+              <input id="export-theme-accent" type="color" value="#0ea5e9" />
+            </label>
+            <button id="export-theme-reset" class="btn ghost export-theme-reset" type="button">Reset export theme</button>
+          </div>
+          <div class="hint">These settings apply to exported HTML bundles only.</div>
+        </div>
+        <div id="import-status" class="hint"></div>
+      </section>
+
+      <h1 class="print-title">UI Workflow Report</h1>
+
+      <details id="section-toc" class="report-section report-panel toc-section" open>
+        <summary class="panel-summary">
+          <span class="panel-title">Table of Contents</span>
+          <span id="toc-count" class="panel-meta-count"></span>
+        </summary>
+        <div class="panel-body">
+          <div id="toc"></div>
+        </div>
+      </details>
+
+      <details id="section-hints" class="report-section report-panel noprint" open>
+        <summary class="panel-summary">
+          <span class="panel-title">Replay Hints</span>
+          <span id="hints-count" class="panel-meta-count"></span>
+        </summary>
+        <div class="panel-body">
+          <div id="hints"></div>
+        </div>
+      </details>
+
+      <details id="section-timeline" class="report-section report-panel noprint" open>
+        <summary class="panel-summary">
+          <span class="panel-title">Cross-tab Timeline</span>
+          <span id="timeline-count" class="panel-meta-count"></span>
+        </summary>
+        <div class="panel-body">
+          <div id="timeline" class="timeline"></div>
+        </div>
+      </details>
+
+      <details id="section-steps" class="report-section report-panel" open>
+        <summary class="panel-summary">
+          <span class="panel-title">Workflow Steps</span>
+          <span id="steps-count" class="panel-meta-count"></span>
+        </summary>
+        <div class="panel-body">
+          <div id="steps"></div>
+        </div>
+      </details>
+    </main>
+  </div>
 
   <script src="report.js"></script>
 </body>

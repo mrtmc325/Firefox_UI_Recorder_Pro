@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.8.0 - 2026-02-07
+
+### Added
+- Report builder navigation rail with quick section jump links.
+- Expand-all / collapse-all controls for report editor panels.
+- In-editor quick docs link for fast config/reference access.
+- Export theme profile controls:
+  - Palette
+  - Font stack
+  - TOC layout mode
+  - TOC detail mode
+  - Accent color
+
+### Changed
+- Report editor UI refactored into collapsible, cleaner sections for lower visual noise.
+- Exported HTML theme rendering now consistently uses selected theme variables across TOC, metadata chips, and brand header.
+- TOC density and spacing tuned for large reports (100+ steps) while remaining compact for short reports.
+- Step metadata presentation in exports updated to professional formatting:
+  - human-readable timestamp chip
+  - compact URL link label derived from host/route
+
+### Fixed
+- Export row metadata token chip removed to prevent right-side visual clutter.
+- URL link chip sizing reduced to avoid oversized row metadata blocks.
+- Export styling drift corrected so generated reports remain aligned to base extension visual language.
+
 ## v1.7.0 - 2026-02-07
 
 ### Added

@@ -1,4 +1,4 @@
-UI Workflow Recorder Pro (Firefox) - v1.7.0
+UI Workflow Recorder Pro (Firefox) - v1.8.0
 
 This file is kept for legacy packaging. Please see README.md for the full documentation.
-Summary: release v1.7.0 adds report reordering workflows, timeline drag/drop + draw actions, theme-toggle improvements, and annotation memory lifecycle hardening.
+Summary: release v1.8.0 adds the redesigned report builder navigation flow, compact and theme-consistent export styling controls, and cleaner professional metadata formatting.

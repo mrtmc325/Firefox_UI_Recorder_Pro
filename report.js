@@ -27,6 +27,50 @@ function safeDataImageUrl(value) {
 const RAW_BUNDLE_FORMAT = "uir-report-bundle";
 const RAW_BUNDLE_VERSION = 1;
 const REPORT_THEME_STORAGE_KEY = "__uiRecorderReportTheme";
+const EXPORT_THEME_DEFAULTS = Object.freeze({
+  preset: "extension",
+  font: "trebuchet",
+  tocLayout: "grid",
+  tocMeta: "host",
+  accentColor: "#0ea5e9"
+});
+
+const EXPORT_THEME_PRESETS = Object.freeze({
+  extension: Object.freeze({
+    ink: "#0f172a",
+    muted: "#64748b",
+    paper: "#f8fafc",
+    panel: "#ffffff",
+    edge: "#e2e8f0",
+    accent2: "#22c55e",
+    bg: "radial-gradient(circle at 10% 10%, #e0f2fe 0%, #f8fafc 45%, #ecfeff 100%)"
+  }),
+  mist: Object.freeze({
+    ink: "#102238",
+    muted: "#5f738c",
+    paper: "#f5fbff",
+    panel: "#ffffff",
+    edge: "#d9e6f2",
+    accent2: "#06b6d4",
+    bg: "radial-gradient(circle at 12% 8%, #dbeafe 0%, #f5fbff 50%, #ecfeff 100%)"
+  }),
+  slate: Object.freeze({
+    ink: "#111827",
+    muted: "#6b7280",
+    paper: "#f3f4f6",
+    panel: "#ffffff",
+    edge: "#d1d5db",
+    accent2: "#4b5563",
+    bg: "radial-gradient(circle at 10% 10%, #e5e7eb 0%, #f5f6f8 50%, #edf2f7 100%)"
+  })
+});
+
+const EXPORT_THEME_FONT_STACKS = Object.freeze({
+  trebuchet: "\"Trebuchet MS\",\"Gill Sans\",\"Segoe UI\",sans-serif",
+  system: "-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif",
+  serif: "Georgia,\"Times New Roman\",Times,serif",
+  mono: "\"JetBrains Mono\",\"SFMono-Regular\",Menlo,Consolas,\"Liberation Mono\",monospace"
+});
 
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -34,6 +78,30 @@ function isPlainObject(value) {
 
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function normalizeHexColor(value, fallback) {
+  const s = String(value || "").trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+  return String(fallback || "#0ea5e9");
+}
+
+function normalizeExportTheme(raw) {
+  const incoming = isPlainObject(raw) ? raw : {};
+  const preset = Object.prototype.hasOwnProperty.call(EXPORT_THEME_PRESETS, incoming.preset)
+    ? incoming.preset
+    : EXPORT_THEME_DEFAULTS.preset;
+  const font = Object.prototype.hasOwnProperty.call(EXPORT_THEME_FONT_STACKS, incoming.font)
+    ? incoming.font
+    : EXPORT_THEME_DEFAULTS.font;
+  const tocLayout = incoming.tocLayout === "list" || incoming.tocLayout === "minimal"
+    ? incoming.tocLayout
+    : EXPORT_THEME_DEFAULTS.tocLayout;
+  const tocMeta = incoming.tocMeta === "url" || incoming.tocMeta === "none"
+    ? incoming.tocMeta
+    : EXPORT_THEME_DEFAULTS.tocMeta;
+  const accentColor = normalizeHexColor(incoming.accentColor, EXPORT_THEME_DEFAULTS.accentColor);
+  return { preset, font, tocLayout, tocMeta, accentColor };
 }
 
 function encodeText(value) {
@@ -226,6 +294,7 @@ function normalizeImportedReport(rawReport) {
   const imported = cloneJson(rawReport);
   if (!Array.isArray(imported.events)) imported.events = [];
   if (!isPlainObject(imported.brand)) imported.brand = {};
+  imported.exportTheme = normalizeExportTheme(imported.exportTheme);
   imported.id = `rpt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   imported.createdAt = imported.createdAt || new Date().toISOString();
   imported.sessionId = imported.sessionId || null;
@@ -324,6 +393,99 @@ function hostFromUrl(value) {
     return new URL(raw).host || "";
   } catch (_) {
     return "";
+  }
+}
+
+function shortenText(value, maxLen) {
+  const s = String(value || "").trim();
+  if (!s) return "";
+  const limit = Number(maxLen) || 0;
+  if (limit <= 0 || s.length <= limit) return s;
+  return `${s.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+function compactUrlForDisplay(value, maxLen = 64) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    const path = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : "";
+    const hasQuery = parsed.search ? " ?" : "";
+    return shortenText(`${parsed.host}${path}${hasQuery}`, maxLen);
+  } catch (_) {
+    return shortenText(raw, maxLen);
+  }
+}
+
+function formatExportTimestamp(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw;
+  try {
+    return parsed.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  } catch (_) {
+    return parsed.toISOString();
+  }
+}
+
+function simpleStableToken(value) {
+  const input = String(value || "");
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36).slice(0, 6).toUpperCase();
+}
+
+function cleanPathToken(value) {
+  const s = String(value || "").trim().toLowerCase();
+  if (!s) return "";
+  return s.replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function parseExportUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { raw: "", host: "", shortLabel: "", fullLabel: "", safeHref: "", genericLabel: "", uniqueRef: "" };
+  try {
+    const parsed = new URL(raw);
+    const path = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : "/";
+    const queryHint = parsed.search ? " ?params" : "";
+    const fullLabel = `${parsed.host}${path}${queryHint}`;
+    const shortLabel = shortenText(fullLabel, 58);
+    const safeHref = (parsed.protocol === "http:" || parsed.protocol === "https:") ? parsed.toString() : "";
+    const hostLabel = String(parsed.host || "")
+      .replace(/^www\./i, "")
+      .split(".")
+      .filter(Boolean)[0] || "page";
+    const segments = String(parsed.pathname || "/")
+      .split("/")
+      .map((part) => cleanPathToken(part))
+      .filter(Boolean);
+    const routeToken = segments.length ? segments[segments.length - 1] : "";
+    const normalizedRoute = routeToken && routeToken !== hostLabel ? shortenText(routeToken, 22) : "";
+    const genericLabel = normalizedRoute ? `${hostLabel} · ${normalizedRoute}` : hostLabel;
+    const uniqueRef = simpleStableToken(`${parsed.pathname || "/"}${parsed.search || ""}`);
+    return { raw, host: parsed.host, shortLabel, fullLabel, safeHref, genericLabel, uniqueRef };
+  } catch (_) {
+    const shortLabel = compactUrlForDisplay(raw, 58);
+    return {
+      raw,
+      host: "",
+      shortLabel,
+      fullLabel: raw,
+      safeHref: "",
+      genericLabel: shortenText(shortLabel || "page", 32),
+      uniqueRef: simpleStableToken(raw)
+    };
   }
 }
 
@@ -460,10 +622,14 @@ function renderTableOfContents(target, events) {
     const link = document.createElement("a");
     const stepId = ev && ev.stepId ? ev.stepId : `step-${index + 1}`;
     link.href = `#${stepId}`;
-    link.textContent = `${index + 1}. ${titleFor(ev)}`;
+    const heading = `${index + 1}. ${shortenText(titleFor(ev), 88)}`;
+    link.textContent = heading;
+    link.title = `${index + 1}. ${titleFor(ev)}`;
     item.appendChild(link);
     if (ev && ev.url) {
-      item.appendChild(el("span", "toc-meta", ev.url));
+      const meta = el("span", "toc-meta", compactUrlForDisplay(ev.url, 82));
+      meta.title = ev.url;
+      item.appendChild(meta);
     }
     list.appendChild(item);
   });
@@ -1197,88 +1363,121 @@ function buildExportHtml(report) {
   const subtitle = escapeHtml(brand.subtitle || "");
   const logo = safeDataImageUrl(brand.logo || "");
   const events = Array.isArray(report.events) ? report.events : [];
-  const shorten = (value, maxLen) => {
-    const s = String(value || "").trim();
-    if (!s) return "";
-    if (s.length <= maxLen) return s;
-    return `${s.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
+  const exportTheme = normalizeExportTheme(report.exportTheme);
+  const preset = EXPORT_THEME_PRESETS[exportTheme.preset] || EXPORT_THEME_PRESETS.extension;
+  const fontStack = EXPORT_THEME_FONT_STACKS[exportTheme.font] || EXPORT_THEME_FONT_STACKS.trebuchet;
+  const themeAccent = normalizeHexColor(exportTheme.accentColor, EXPORT_THEME_DEFAULTS.accentColor);
+  const tocLayoutClass = exportTheme.tocLayout === "list"
+    ? "toc-layout-list"
+    : (exportTheme.tocLayout === "minimal" ? "toc-layout-minimal" : "toc-layout-grid");
+  const tocClass = `toc ${tocLayoutClass}${events.length >= 100 ? " toc-dense" : ""}`;
+  const tocMetaFor = (ev) => {
+    if (exportTheme.tocMeta === "none") return "";
+    if (exportTheme.tocMeta === "url") return compactUrlForDisplay(ev && ev.url, 56);
+    return hostFromUrl(ev && ev.url);
   };
 
   const tocRows = events.map((ev, i) => {
-    const stepTitle = escapeHtml(shorten(titleFor(ev), 52));
-    const metaHost = escapeHtml(hostFromUrl(ev.url || ""));
-    return `<li><a href="#step-${i + 1}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaHost ? `<span>${metaHost}</span>` : ""}</li>`;
+    const stepTitle = escapeHtml(shortenText(titleFor(ev), 46));
+    const metaText = escapeHtml(tocMetaFor(ev));
+    return `<li><a href="#step-${i + 1}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaText ? `<span>${metaText}</span>` : ""}</li>`;
   }).join("\n");
 
   const rows = events.map((ev, i) => {
     const stepTitle = escapeHtml(titleFor(ev));
-    const metaTs = escapeHtml(ev.ts || "");
-    const metaUrl = escapeHtml(ev.url || "");
+    const metaTs = escapeHtml(formatExportTimestamp(ev.ts || ""));
+    const parsedUrl = parseExportUrl(ev.url || "");
+    const metaUrlLabel = escapeHtml(parsedUrl.genericLabel || parsedUrl.shortLabel || "Open page");
+    const metaUrlTitle = escapeHtml(parsedUrl.fullLabel || parsedUrl.raw || "");
+    const metaUrlHref = escapeHtml(parsedUrl.safeHref || "");
     const screenshot = safeDataImageUrl(ev.screenshot || "");
     const annotation = safeDataImageUrl(ev.annotation || "");
     const img = screenshot ? `<div class="shot"><img src="${screenshot}" alt="Step screenshot"></div>` : "";
     const ann = screenshot && annotation ? `<img class="annot" src="${annotation}" alt="Step annotation">` : "";
     const wrap = screenshot ? `<div class="shot-wrap">${img}${ann}</div>` : "";
-    return `<div id="step-${i + 1}" class="step"><div class="step-title">${i + 1}. ${stepTitle}</div><div class="step-meta">${metaTs} — ${metaUrl}</div>${wrap}</div>`;
+    const urlChip = metaUrlHref
+      ? `<a class="meta-chip meta-url" href="${metaUrlHref}" target="_blank" rel="noopener noreferrer" title="${metaUrlTitle}">${metaUrlLabel}</a>`
+      : `<span class="meta-chip meta-url" title="${metaUrlTitle}">${metaUrlLabel}</span>`;
+    const meta = `<div class="step-meta"><span class="meta-chip meta-time">${metaTs || "Time n/a"}</span>${urlChip}</div>`;
+    return `<div id="step-${i + 1}" class="step"><div class="step-title">${i + 1}. ${stepTitle}</div>${meta}${wrap}</div>`;
   }).join("\n");
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${title}</title>
 <style>
 :root{
-  --ink:#0b1220;
-  --muted:#64748b;
-  --paper:#f8fafc;
-  --panel:#ffffff;
-  --edge:#e2e8f0;
-  --accent:#22c55e;
-  --accent-2:#0ea5e9;
-  --shadow:0 12px 32px rgba(15,23,42,0.12);
-  --radius:14px;
+  --ink:${preset.ink};
+  --muted:${preset.muted};
+  --paper:${preset.paper};
+  --panel:${preset.panel};
+  --edge:${preset.edge};
+  --accent:${themeAccent};
+  --accent-2:${preset.accent2};
+  --shadow:0 8px 18px rgba(15,23,42,0.12);
+  --radius:12px;
 }
 *{box-sizing:border-box}
 body{
-  font-family:"Trebuchet MS","Gill Sans","Segoe UI",sans-serif;
-  margin:16px;
+  font-family:${fontStack};
+  margin:12px;
   color:var(--ink);
-  background:radial-gradient(circle at 10% 10%, #e0f2fe 0%, #f8fafc 45%, #ecfeff 100%);
+  background:${preset.bg};
+  line-height:1.35;
 }
 .toc{
   border:1px solid var(--edge);
-  border-radius:12px;
-  padding:8px 10px;
-  background:#f8fbff;
-  margin:8px 0 12px;
+  border-radius:10px;
+  padding:6px 8px;
+  background:linear-gradient(180deg,var(--panel),var(--paper));
+  margin:6px 0 10px;
   box-shadow:var(--shadow);
 }
 .toc h2{
-  margin:0 0 6px;
-  font-size:13px;
-  letter-spacing:.4px;
+  margin:0 0 4px;
+  font-size:11px;
+  letter-spacing:.35px;
   text-transform:uppercase;
-  color:#334155;
+  color:var(--muted);
 }
 .toc ol{
   margin:0;
-  padding-left:0;
+  padding:0;
   list-style:none;
-  display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
-  gap:4px;
 }
+.toc.toc-layout-grid ol{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+  gap:3px 5px;
+}
+.toc.toc-layout-list ol{display:block}
+.toc.toc-layout-list li{margin:0 0 4px}
+.toc.toc-layout-list li:last-child{margin-bottom:0}
+.toc.toc-layout-minimal{
+  background:transparent;
+  box-shadow:none;
+  border-color:var(--edge);
+}
+.toc.toc-layout-minimal ol{display:block}
+.toc.toc-layout-minimal li{
+  border:none;
+  border-bottom:1px dashed var(--edge);
+  border-radius:0;
+  background:transparent;
+  padding:3px 0;
+}
+.toc.toc-layout-minimal li:last-child{border-bottom:none}
 .toc li{
   border:1px solid var(--edge);
-  border-radius:8px;
-  padding:4px 6px;
+  border-radius:7px;
+  padding:3px 5px;
   background:var(--panel);
-  min-height:34px;
 }
 .toc a{
   display:block;
   font-weight:600;
-  color:#0f172a;
+  color:var(--ink);
   text-decoration:none;
-  font-size:11px;
+  font-size:10.5px;
   line-height:1.2;
   white-space:nowrap;
   overflow:hidden;
@@ -1288,42 +1487,78 @@ body{
 .toc span{
   display:block;
   color:var(--muted);
-  font-size:10px;
+  font-size:9.5px;
   font-weight:400;
-  margin-top:1px;
+  margin-top:0;
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
 }
+.toc.toc-dense{padding:5px 6px}
+.toc.toc-dense ol{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:2px 4px}
+.toc.toc-dense li{padding:2px 4px}
+.toc.toc-dense a{font-size:10px}
+.toc.toc-dense span{font-size:9px}
 .step{
   border:1px solid var(--edge);
   border-radius:var(--radius);
-  padding:12px;
-  margin:10px 0;
+  padding:10px;
+  margin:8px 0;
   background:var(--panel);
   box-shadow:var(--shadow);
 }
-.step-title{font-weight:700;margin-bottom:6px}
-.step-meta{font-size:12px;color:var(--muted);margin-bottom:8px}
+.step-title{font-weight:700;margin-bottom:4px}
+.step-meta{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin-bottom:8px;
+}
+.meta-chip{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  max-width:100%;
+  padding:1px 6px;
+  border:1px solid var(--edge);
+  border-radius:999px;
+  background:linear-gradient(180deg,var(--paper),var(--panel));
+  color:var(--muted);
+  font-size:10px;
+  line-height:1.25;
+}
+.meta-time{font-variant-numeric:tabular-nums}
+.meta-time{flex:0 0 auto}
+.meta-url{
+  flex:0 1 172px;
+  color:var(--ink);
+  text-decoration:none;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.meta-url:hover{text-decoration:underline}
 .brand{
   display:flex;
   align-items:center;
-  gap:12px;
-  margin-bottom:10px;
+  gap:10px;
+  margin-bottom:8px;
   border:1px solid var(--edge);
-  border-radius:16px;
-  padding:10px 12px;
-  background:var(--panel);
+  border-left:4px solid var(--accent);
+  border-radius:14px;
+  padding:8px 10px;
+  background:linear-gradient(180deg,var(--panel),var(--paper));
   box-shadow:var(--shadow);
 }
-.brand img{width:48px;height:48px;object-fit:contain;border:1px solid var(--edge);border-radius:10px;background:#f1f5f9}
-.brand h1{margin:0;font-size:20px}
-.brand p{margin:0;font-size:12px;color:var(--muted)}
+.brand img{width:44px;height:44px;object-fit:contain;border:1px solid var(--edge);border-radius:10px;background:var(--paper)}
+.brand h1{margin:0;font-size:18px}
+.brand p{margin:0;font-size:11px;color:var(--muted)}
 .shot-wrap{position:relative;display:inline-block}
 .shot img{max-width:100%;border:1px solid var(--edge);border-radius:10px}
 .annot{position:absolute;left:0;top:0;width:100%;height:100%}
 @media print {
-  body{margin:0.5in;background:#fff}
+  body{margin:0.45in;background:#fff}
   .toc{page-break-inside:avoid}
   .step{page-break-inside:avoid;box-shadow:none}
 }
@@ -1332,7 +1567,7 @@ body{
   ${logo ? `<img src="${logo}" alt="Logo">` : ""}
   <div><h1>${title}</h1>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
 </div>
-<section class="toc">
+<section class="${tocClass}">
   <h2>Table of Contents</h2>
   <ol>${tocRows || "<li>No steps captured.</li>"}</ol>
 </section>
@@ -1368,6 +1603,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   const brandSubtitle = document.getElementById("brand-subtitle");
   const brandUpload = document.getElementById("brand-upload");
   const brandRemove = document.getElementById("brand-remove");
+  const exportThemePreset = document.getElementById("export-theme-preset");
+  const exportThemeFont = document.getElementById("export-theme-font");
+  const exportThemeLayout = document.getElementById("export-theme-layout");
+  const exportThemeMeta = document.getElementById("export-theme-meta");
+  const exportThemeAccent = document.getElementById("export-theme-accent");
+  const exportThemeReset = document.getElementById("export-theme-reset");
+  const tocCount = document.getElementById("toc-count");
+  const hintsCount = document.getElementById("hints-count");
+  const timelineCount = document.getElementById("timeline-count");
+  const stepsCount = document.getElementById("steps-count");
+  const stepsPanel = document.getElementById("section-steps");
+  const expandSectionsBtn = document.getElementById("expand-sections");
+  const collapseSectionsBtn = document.getElementById("collapse-sections");
+  const collapsiblePanels = Array.from(document.querySelectorAll(".report-panel"));
 
   const idx = Math.max(0, Math.min(reports.length - 1, Number(idxParam || 0)));
   const report = reports[idx];
@@ -1386,6 +1635,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   refreshMeta();
 
   const hasReport = !!(report && Array.isArray(report.events) && report.events.length);
+  const DENSE_LAYOUT_THRESHOLD = 100;
   const ANNOTATION_SESSION_IDLE_MS = 15_000;
   let activeAnnotationTeardown = null;
 
@@ -1527,11 +1777,27 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function openAnnotationEditorForStep(stepId) {
     if (!stepId) return;
+    if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
     const stepNode = document.getElementById(stepId);
     if (!stepNode) return;
     stepNode.scrollIntoView({ behavior: "smooth", block: "center" });
     const trigger = stepNode.querySelector(".annot-enable-btn");
     if (trigger) trigger.click();
+  }
+
+  function updatePanelMeta(eventsOverride) {
+    const visibleEvents = Array.isArray(eventsOverride) ? eventsOverride : getVisibleEvents();
+    const stepCount = visibleEvents.length;
+    const totalSteps = hasReport && Array.isArray(report.events) ? report.events.length : 0;
+    const dense = stepCount >= DENSE_LAYOUT_THRESHOLD || totalSteps >= DENSE_LAYOUT_THRESHOLD;
+    document.body.classList.toggle("report-dense", dense);
+    const tabKeys = new Set(
+      visibleEvents.map((ev) => `${ev && ev.tabId !== undefined ? ev.tabId : "none"}|${ev && ev.tabTitle ? ev.tabTitle : ""}`)
+    );
+    if (tocCount) tocCount.textContent = `${stepCount} step${stepCount === 1 ? "" : "s"}`;
+    if (hintsCount) hintsCount.textContent = `${stepCount} visible`;
+    if (timelineCount) timelineCount.textContent = `${tabKeys.size} tab${tabKeys.size === 1 ? "" : "s"}`;
+    if (stepsCount) stepsCount.textContent = `${stepCount} step${stepCount === 1 ? "" : "s"}`;
   }
 
   function setTypeFilterValue(value) {
@@ -1571,14 +1837,42 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   if (!hasReport) {
+    document.body.classList.remove("report-dense");
     root.appendChild(el("p", null, "No saved reports yet. Record a workflow and press Stop to save it, or import a raw ZIP bundle."));
     if (toc) {
       toc.innerHTML = "";
       toc.appendChild(el("div", "hint", "Import a raw ZIP or record a workflow to build a table of contents."));
     }
+    updatePanelMeta([]);
   }
 
   if (hasReport && !report.brand) report.brand = {};
+  if (hasReport) report.exportTheme = normalizeExportTheme(report.exportTheme);
+
+  const exportThemeControls = [
+    exportThemePreset,
+    exportThemeFont,
+    exportThemeLayout,
+    exportThemeMeta,
+    exportThemeAccent,
+    exportThemeReset
+  ].filter(Boolean);
+  if (!hasReport) {
+    exportThemeControls.forEach((node) => { node.disabled = true; });
+  }
+
+  function syncExportThemeControls() {
+    if (!hasReport) return;
+    const active = normalizeExportTheme(report.exportTheme);
+    report.exportTheme = active;
+    if (exportThemePreset) exportThemePreset.value = active.preset;
+    if (exportThemeFont) exportThemeFont.value = active.font;
+    if (exportThemeLayout) exportThemeLayout.value = active.tocLayout;
+    if (exportThemeMeta) exportThemeMeta.value = active.tocMeta;
+    if (exportThemeAccent) exportThemeAccent.value = active.accentColor;
+  }
+
+  syncExportThemeControls();
 
   if (hasReport && brandTitle) {
     brandTitle.textContent = (report.brand && report.brand.title) || "UI Workflow Report";
@@ -1627,6 +1921,42 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  async function persistExportThemeFromControls(useDefaults) {
+    if (!hasReport) return;
+    const next = useDefaults
+      ? normalizeExportTheme(EXPORT_THEME_DEFAULTS)
+      : normalizeExportTheme({
+          preset: exportThemePreset ? exportThemePreset.value : undefined,
+          font: exportThemeFont ? exportThemeFont.value : undefined,
+          tocLayout: exportThemeLayout ? exportThemeLayout.value : undefined,
+          tocMeta: exportThemeMeta ? exportThemeMeta.value : undefined,
+          accentColor: exportThemeAccent ? exportThemeAccent.value : undefined
+        });
+    report.exportTheme = next;
+    syncExportThemeControls();
+    await saveReports(reports);
+  }
+
+  if (hasReport && exportThemePreset) {
+    exportThemePreset.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeFont) {
+    exportThemeFont.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeLayout) {
+    exportThemeLayout.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeMeta) {
+    exportThemeMeta.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeAccent) {
+    exportThemeAccent.addEventListener("input", () => { persistExportThemeFromControls(false); });
+    exportThemeAccent.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeReset) {
+    exportThemeReset.addEventListener("click", () => { persistExportThemeFromControls(true); });
+  }
+
   function getVisibleEvents() {
     if (!hasReport) return [];
     return filterEvents(
@@ -1640,6 +1970,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function updateAux(eventsOverride) {
     const visibleEvents = Array.isArray(eventsOverride) ? eventsOverride : getVisibleEvents();
     assignStepIds(visibleEvents);
+    updatePanelMeta(visibleEvents);
     renderHints(hints, visibleEvents, {
       currentTypeFilter: typeFilter ? typeFilter.value : "all",
       currentUrlFilter: urlFilter ? urlFilter.value : "",
@@ -1665,6 +1996,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       },
       jumpToStepId: (stepId) => {
         if (!stepId) return;
+        if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
         const node = document.getElementById(stepId);
         if (!node) return;
         node.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -2033,6 +2365,73 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   if (hasReport) render();
+  if (expandSectionsBtn) {
+    expandSectionsBtn.addEventListener("click", () => {
+      collapsiblePanels.forEach((panel) => { panel.open = true; });
+    });
+  }
+  if (collapseSectionsBtn) {
+    collapseSectionsBtn.addEventListener("click", () => {
+      collapsiblePanels.forEach((panel) => { panel.open = false; });
+    });
+  }
+  const navAnchorLinks = Array.from(document.querySelectorAll(".report-nav-links .nav-link[href^=\"#\"]"));
+  const navTargets = navAnchorLinks
+    .map((link) => {
+      const href = String(link.getAttribute("href") || "");
+      const id = href.startsWith("#") ? href.slice(1) : "";
+      return { link, id, target: id ? document.getElementById(id) : null };
+    })
+    .filter((entry) => !!entry.target);
+
+  function setActiveNavLink(sectionId) {
+    navTargets.forEach((entry) => {
+      entry.link.classList.toggle("active", entry.id === sectionId);
+    });
+  }
+
+  function refreshActiveNavByViewport() {
+    if (!navTargets.length) return;
+    let best = navTargets[0];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    navTargets.forEach((entry) => {
+      const rect = entry.target.getBoundingClientRect();
+      const distance = Math.abs(rect.top - 128);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = entry;
+      }
+    });
+    setActiveNavLink(best.id);
+  }
+
+  let navScrollTick = false;
+  function scheduleNavRefresh() {
+    if (navScrollTick) return;
+    navScrollTick = true;
+    requestAnimationFrame(() => {
+      navScrollTick = false;
+      refreshActiveNavByViewport();
+    });
+  }
+
+  navTargets.forEach((entry) => {
+    entry.link.addEventListener("click", () => {
+      if (entry.target && entry.target.tagName === "DETAILS" && typeof entry.target.open === "boolean") {
+        entry.target.open = true;
+      }
+      setActiveNavLink(entry.id);
+    });
+  });
+
+  if (navTargets.length) {
+    const hashId = location.hash && location.hash.startsWith("#") ? location.hash.slice(1) : "";
+    if (hashId && navTargets.some((entry) => entry.id === hashId)) setActiveNavLink(hashId);
+    else setActiveNavLink(navTargets[0].id);
+    window.addEventListener("scroll", scheduleNavRefresh, { passive: true });
+    window.addEventListener("resize", scheduleNavRefresh);
+    setTimeout(() => scheduleNavRefresh(), 40);
+  }
   if (search) search.addEventListener("input", () => scheduleRender());
   if (typeFilter) typeFilter.addEventListener("change", () => { if (hasReport) render(); });
   if (urlFilter) urlFilter.addEventListener("input", () => scheduleRender());
@@ -2159,5 +2558,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  if (isPrint) setTimeout(() => window.print(), 450);
+  if (isPrint) {
+    collapsiblePanels.forEach((panel) => { panel.open = true; });
+    setTimeout(() => window.print(), 450);
+  }
 });
