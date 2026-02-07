@@ -1,73 +1,99 @@
-# UI Workflow Recorder Pro (Firefox) v1.1.4
+# UI Workflow Recorder Pro (Firefox) v1.6.0
 
-UI Recorder Pro captures click, input, change, submit, and navigation steps with clean titles, optional text redaction, and editable annotated reports. Screenshots are always unmodified so you can see the full page.
+UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline, hints, and export/import tooling.
+
+## Current Release
+- Version: `1.6.0`
+- Release notes: `CHANGELOG.md`
 
 ## Highlights
-- Clean, readable step titles with noise removed
-- Text-only redaction for sensitive labels/values in the report
-- Diff-based screenshots for faster, smaller reports
-- Login workflows captured (input + submit + navigation)
-- Editable titles, notes, and screenshot annotations
-- Search, filters, replay hints, and cross-tab timeline
-- Local export bundle (self-contained HTML)
+- Canonical submit capture with dedupe (click + Enter + native submit).
+- Start/stop hardening with added runtime/storage diagnostics.
+- Dynamic UI watch with memory-safe observer lifecycle.
+- Dynamic UI screenshot forcing interval:
+  - Enabled only when `Page watch interval (ms) < 10000`
+  - Interval formula: `max(4567.38ms, pageWatchMs * 1.34562)`
+- Report Table of Contents (in UI and exported HTML).
+- Raw ZIP export/import/merge for future re-editing.
+- Annotation upgrades: live preview overlays, sizing labels, screenshot-based obfuscation, improved undo.
+- Screenshot compaction for long sessions to reduce memory pressure.
 
 ## Install (Temporary Add-on)
 1. Open `about:debugging#/runtime/this-firefox` in Firefox.
 2. Click **Load Temporary Add-on…**
 3. Select `manifest.json` from this folder.
 
-## How To Use
-1. Click the toolbar icon.
-2. Press **Start**.
-3. Perform your workflow.
-4. Press **Stop** (the report is saved automatically).
-5. Open the report or print to PDF.
+## Quick Start
+1. Open extension popup.
+2. Click **Start**.
+3. Perform workflow.
+4. Click **Stop**.
+5. Click **Open report**.
+6. Export as HTML bundle or raw ZIP if needed.
 
-## Settings
-- **Debounce (ms)**: Delay before a screenshot is captured after an event.
-- **Capture mode**: Record all events or clicks/submit/nav only.
-- **Diff-based screenshots**: Skip identical screenshots to reduce noise.
-- **Redact sensitive text in report**: Masks secrets in report titles/labels/values.
-- **Redact usernames on login pages**: Hides usernames in report text only.
-- **Auto-pause on idle**: Pause recording when the system is idle.
-- **Auto-resume on focus**: Resume when you return to the browser.
-- **Prune noisy input steps**: Collapse rapid input edits to a single step.
-- **Page watch (dynamic UI)**: Capture screenshots when dialogs/forms appear without URL changes.
+## How-To Templates (Configuration Profiles)
 
-> Screenshots are never masked. Redaction applies only to report text.
+### 1) Dynamic Dashboard / SPA Capture
+Use when UI updates without URL changes.
 
-## Report History (Buffer)
-- The last 3 workflows are saved automatically in extension storage.
-- Use the report selector to open a previous run if you forgot to export or print.
+- `Capture mode`: `All events`
+- `Page watch (dynamic UI)`: `On`
+- `Page watch interval (ms)`: `500` to `1200`
+- `Diff-based screenshots`: `On`
+- `Debounce (ms)`: `700` to `1000`
+- `Prune noisy input steps`: `On`
 
-## Editing & Annotations
-- Step titles are editable inline.
-- Add notes from the popup or edit them in the report.
-- Draw on screenshots with pen, highlight, outline, shapes, and text.
-- Download a standalone HTML report bundle for sharing.
+Expected behavior:
+- Frequent `ui-change` steps with periodic forced screenshots based on the dynamic interval formula.
 
-## Report Tools
-- Search and filter by URL, type, or label.
-- Replay hints checklist for fields and actions.
-- Cross-tab timeline to visualize parallel steps.
+### 2) Login + Security Change Procedure
+Use for auth flows and sensitive config walkthroughs.
 
-## Keyboard Shortcut
-- `Ctrl+Shift+Y` toggles recording.
+- `Capture mode`: `All events`
+- `Redact sensitive text in report`: `On`
+- `Redact usernames on login pages`: `On`
+- `Page watch (dynamic UI)`: `On`
+- `Page watch interval (ms)`: `600` to `1000`
+- `Diff-based screenshots`: `On`
+
+Expected behavior:
+- Single canonical login submit step, redacted text fields, unmodified screenshots.
+
+### 3) Long Session / Low-Memory Capture
+Use for long operations with many screen transitions.
+
+- `Capture mode`: `Clicks + submit + nav only`
+- `Diff-based screenshots`: `On`
+- `Debounce (ms)`: `900` to `1400`
+- `Page watch (dynamic UI)`: `On` only if needed
+- `Page watch interval (ms)`: `1500` to `3000`
+- `Prune noisy input steps`: `On`
+
+Expected behavior:
+- Lower event volume, fewer screenshots, background screenshot compaction on very long runs.
+
+## Report & Export
+- HTML export includes TOC and direct step anchors.
+- Raw ZIP export includes editable payload:
+  - `manifest.json`
+  - `report.json`
+  - `README.txt`
+- Raw ZIP can be imported as:
+  - New report
+  - Merge into current report
 
 ## Privacy
-- All data is stored locally in the browser.
-- No network calls or external services are used.
+- Data remains local in browser storage.
+- No external API/network service calls are required.
+- Redaction applies to report text fields; screenshots are not masked automatically.
+
+## Keyboard Shortcut
+- `Ctrl+Shift+Y` toggles start/stop recording.
 
 ## Files
-- `content.js` — event capture and labeling
-- `background.js` — recording, screenshot capture, and export
-- `popup.html` / `popup.js` — UI controls
-- `report.html` / `report.js` — report rendering
-- `styles.css` — UI theme
-
-## Troubleshooting
-- **No screenshots?** Ensure Firefox allows tab capture and you granted the extension permissions.
-- **Titles are noisy?** The title cleaner falls back to a generic label when text is missing.
-
-## License
-MIT (see `LICENSE` if present)
+- `content.js` capture + page watch + event shaping
+- `background.js` recording state + screenshot policy + persistence
+- `popup.html` / `popup.js` control UI
+- `report.html` / `report.js` report editor/export/import
+- `docs.html` in-extension docs
+- `CHANGELOG.md` release history

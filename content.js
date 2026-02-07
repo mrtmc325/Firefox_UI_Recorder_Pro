@@ -1,4 +1,4 @@
-// content.js - v1.0.0
+// content.js - v1.6.0
 // Clean capture with optional text redaction and readable step naming.
 
 (function () {
@@ -23,6 +23,11 @@
   ];
 
   const LOGIN_BUTTON_WORDS = ["log in","login","sign in","signin","continue"];
+  const CONTENT_DEBUG = true;
+  const UI_CHANGE_MIN_INTERVAL_MS = 1500;
+  const UI_CHANGE_SCREENSHOT_MAX_PAGEWATCH_MS = 10_000;
+  const UI_CHANGE_SCREENSHOT_MULTIPLIER = 1.34562;
+  const UI_CHANGE_SCREENSHOT_INACTIVITY_MS = 4567.38;
   const ACTION_HINTS = [
     { key: "save", words: ["save", "apply", "update"] },
     { key: "next", words: ["next", "continue"] },
@@ -33,6 +38,13 @@
     { key: "add", words: ["add", "create", "new"] },
     { key: "login", words: ["login", "log in", "sign in"] }
   ];
+
+  function contentLog(message, data) {
+    if (!CONTENT_DEBUG) return;
+    const prefix = `[UIR CONTENT ${new Date().toISOString()}]`;
+    if (data === undefined) console.log(prefix, message);
+    else console.log(prefix, message, data);
+  }
 
   function norm(s) { return String(s || "").trim().replace(/\s+/g, " ").slice(0, 240); }
   function lower(s) { return String(s || "").toLowerCase(); }
@@ -59,70 +71,201 @@
     return `${text}|d${dialogs}|i${inputs}`;
   }
 
+  function stopPageWatch(reason) {
+    const ctl = window.__uiRecorderPageWatchCtl;
+    if (!ctl || !ctl.active) return;
+    ctl.active = false;
+    if (ctl.timerId) {
+      clearTimeout(ctl.timerId);
+      ctl.timerId = null;
+    }
+    if (ctl.intervalId) {
+      clearInterval(ctl.intervalId);
+      ctl.intervalId = null;
+    }
+    if (ctl.statePollId) {
+      clearInterval(ctl.statePollId);
+      ctl.statePollId = null;
+    }
+    if (ctl.startTimerId) {
+      clearTimeout(ctl.startTimerId);
+      ctl.startTimerId = null;
+    }
+    if (ctl.observer) {
+      try { ctl.observer.disconnect(); } catch (_) {}
+      ctl.observer = null;
+    }
+    if (ctl.onVisibilityChange) {
+      try { document.removeEventListener("visibilitychange", ctl.onVisibilityChange); } catch (_) {}
+      ctl.onVisibilityChange = null;
+    }
+    if (ctl.onLifecycleCleanup) {
+      try { window.removeEventListener("pagehide", ctl.onLifecycleCleanup, true); } catch (_) {}
+      try { window.removeEventListener("beforeunload", ctl.onLifecycleCleanup, true); } catch (_) {}
+      ctl.onLifecycleCleanup = null;
+    }
+    window.__uiRecorderPageWatch = false;
+    window.__uiRecorderPageWatchCtl = null;
+    contentLog("pageWatch:stopped", { reason: reason || "unknown" });
+  }
+
   function setupPageWatch() {
-    if (window.__uiRecorderPageWatch) return;
-    window.__uiRecorderPageWatch = true;
-    let lastSig = snapshotSignature();
-    let timer = null;
-    let pending = false;
-    window.__uiRecorderPageWatchMs = 500;
-
-    const refreshSettings = async () => {
-      const st = await getState();
-      if (st && st.settings && typeof st.settings.pageWatchMs === "number") {
-        window.__uiRecorderPageWatchMs = st.settings.pageWatchMs;
-      }
-      if (st && st.settings && st.settings.pageWatchEnabled === false) {
-        window.__uiRecorderPageWatchMs = 500;
-      }
-    };
-    refreshSettings();
-    setInterval(refreshSettings, 5000);
-
-    const trigger = async () => {
-      if (pending) return;
-      pending = true;
-      const st = await getState();
-      pending = false;
-      if (!st.isRecording || st.isPaused) return;
-      if (!st.settings?.pageWatchEnabled) return;
-      const sig = snapshotSignature();
-      if (!sig || sig === lastSig) return;
-      lastSig = sig;
-      await sendEvent({
-        type: "ui-change",
-        url: location.href,
-        human: "UI changed",
-        label: "Dynamic content",
-        actionKind: "ui-change",
-        pageIsLogin: findLoginContext().isLogin,
-        pageHasSensitiveText: detectSensitiveTextOrAttrs(),
-        redactRects: collectSensitiveRectsWithFrame().rects,
-        devicePixelRatio: window.devicePixelRatio || 1,
-        forceScreenshot: true
-      });
-    };
-
-    const observer = new MutationObserver(() => {
-      const stMs = (window.__uiRecorderPageWatchMs || 500);
-      clearTimeout(timer);
-      timer = setTimeout(trigger, Math.max(200, stMs));
-    });
-
-    const start = () => {
-      if (!document.body) {
-        setTimeout(start, 300);
+    try {
+      if (window.top !== window.self) {
+        contentLog("pageWatch:skip-frame");
         return;
       }
-      observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
-    };
-    start();
+    } catch (_) {}
 
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        lastSig = snapshotSignature();
+    if (window.__uiRecorderPageWatchCtl && window.__uiRecorderPageWatchCtl.active) return;
+    window.__uiRecorderPageWatch = true;
+    const ctl = {
+      active: true,
+      lastSig: snapshotSignature(),
+      pending: false,
+      observing: false,
+      timerId: null,
+      intervalId: null,
+      statePollId: null,
+      startTimerId: null,
+      pageWatchMs: 500,
+      lastUiChangeAt: 0,
+      lastUiChangeScreenshotAt: 0,
+      observer: null,
+      isRecording: false,
+      isPaused: false,
+      pageWatchEnabled: true,
+      onVisibilityChange: null,
+      onLifecycleCleanup: null
+    };
+    window.__uiRecorderPageWatchCtl = ctl;
+
+    function stopObserving(reason) {
+      if (!ctl.observing) return;
+      ctl.observing = false;
+      if (ctl.timerId) {
+        clearTimeout(ctl.timerId);
+        ctl.timerId = null;
       }
+      if (ctl.observer) {
+        try { ctl.observer.disconnect(); } catch (_) {}
+      }
+      contentLog("pageWatch:observer-stop", { reason: reason || "state-change" });
+    }
+
+    function startObserving() {
+      if (!ctl.active || ctl.observing) return;
+      if (!document.body) {
+        if (!ctl.startTimerId) ctl.startTimerId = setTimeout(() => {
+          ctl.startTimerId = null;
+          startObserving();
+        }, 300);
+        return;
+      }
+      if (ctl.startTimerId) {
+        clearTimeout(ctl.startTimerId);
+        ctl.startTimerId = null;
+      }
+      try {
+        ctl.observer.observe(document.body, {
+          childList: true,
+          subtree: true,
+          characterData: true
+        });
+        ctl.observing = true;
+        ctl.lastSig = snapshotSignature();
+        contentLog("pageWatch:observer-start", { pageWatchMs: ctl.pageWatchMs });
+      } catch (_) {}
+    }
+
+    const refreshSettings = async () => {
+      if (!ctl.active) return;
+      const st = await getState();
+      if (st && st.settings && typeof st.settings.pageWatchMs === "number") {
+        ctl.pageWatchMs = Math.max(200, Number(st.settings.pageWatchMs) || 500);
+      }
+      ctl.pageWatchEnabled = !(st && st.settings && st.settings.pageWatchEnabled === false);
+      ctl.isRecording = !!(st && st.isRecording);
+      ctl.isPaused = !!(st && st.isPaused);
+
+      const shouldObserve = ctl.pageWatchEnabled && ctl.isRecording && !ctl.isPaused;
+      if (!shouldObserve) {
+        stopObserving("inactive-state");
+        return;
+      }
+      startObserving();
+    };
+    refreshSettings();
+    ctl.statePollId = setInterval(refreshSettings, 1500);
+
+    function getDynamicUiChangeScreenshotIntervalMs() {
+      const pageWatchMs = Math.max(1, Number(ctl.pageWatchMs) || 500);
+      if (pageWatchMs >= UI_CHANGE_SCREENSHOT_MAX_PAGEWATCH_MS) return 0;
+      const scaledMs = pageWatchMs * UI_CHANGE_SCREENSHOT_MULTIPLIER;
+      return Math.max(UI_CHANGE_SCREENSHOT_INACTIVITY_MS, scaledMs);
+    }
+
+    const trigger = async () => {
+      if (!ctl.active || ctl.pending) return;
+      if (!ctl.pageWatchEnabled || !ctl.isRecording || ctl.isPaused) return;
+      ctl.pending = true;
+      try {
+        const sig = snapshotSignature();
+        if (!sig || sig === ctl.lastSig) return;
+        ctl.lastSig = sig;
+
+        const now = Date.now();
+        if ((now - ctl.lastUiChangeAt) < UI_CHANGE_MIN_INTERVAL_MS) {
+          contentLog("ui-change:throttled", { withinMs: now - ctl.lastUiChangeAt });
+          return;
+        }
+        ctl.lastUiChangeAt = now;
+
+        const dynamicShotIntervalMs = getDynamicUiChangeScreenshotIntervalMs();
+        const elapsedSinceShot = now - ctl.lastUiChangeScreenshotAt;
+        const forceScreenshot = !!(dynamicShotIntervalMs > 0 && elapsedSinceShot >= dynamicShotIntervalMs);
+        if (forceScreenshot) {
+          ctl.lastUiChangeScreenshotAt = now;
+          contentLog("ui-change:force-screenshot", {
+            pageWatchMs: ctl.pageWatchMs,
+            elapsedSinceShot,
+            intervalMs: dynamicShotIntervalMs
+          });
+        }
+
+        await sendEvent({
+          type: "ui-change",
+          url: location.href,
+          human: "UI changed",
+          label: "Dynamic content",
+          actionKind: "ui-change",
+          pageIsLogin: findLoginContext().isLogin,
+          pageHasSensitiveText: detectSensitiveTextOrAttrs(),
+          redactRects: collectSensitiveRectsWithFrame().rects,
+          devicePixelRatio: window.devicePixelRatio || 1,
+          forceScreenshot
+        });
+      } finally {
+        ctl.pending = false;
+      }
+    };
+
+    ctl.observer = new MutationObserver(() => {
+      if (!ctl.active || !ctl.observing) return;
+      clearTimeout(ctl.timerId);
+      ctl.timerId = setTimeout(trigger, Math.max(250, ctl.pageWatchMs || 500));
     });
+
+    ctl.onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        ctl.lastSig = snapshotSignature();
+      }
+    };
+    ctl.onLifecycleCleanup = () => stopPageWatch("lifecycle");
+    document.addEventListener("visibilitychange", ctl.onVisibilityChange);
+    window.addEventListener("pagehide", ctl.onLifecycleCleanup, true);
+    window.addEventListener("beforeunload", ctl.onLifecycleCleanup, true);
+    contentLog("pageWatch:started", { pageWatchMs: ctl.pageWatchMs });
   }
   function hasLoginPasswordKeyword(text) {
     const t = lower(text);
@@ -492,8 +635,59 @@
   }
 
   async function sendEvent(payload) {
-    try { await browser.runtime.sendMessage({ type: "RECORD_EVENT", event: payload }); }
-    catch (_) {}
+    try {
+      const response = await browser.runtime.sendMessage({ type: "RECORD_EVENT", event: payload });
+      if (payload && (payload.type === "submit" || payload.type === "nav" || payload.type === "ui-change")) {
+        contentLog("sendEvent:done", { type: payload.type, response });
+      }
+      return response;
+    } catch (e) {
+      contentLog("sendEvent:error", {
+        type: payload && payload.type,
+        error: String((e && e.message) || e || "unknown")
+      });
+      return { ok: false, error: String((e && e.message) || e || "unknown") };
+    }
+  }
+
+  const SUBMIT_DEDUPE_MS = 1000;
+  let lastSubmitEvent = { key: "", ts: 0 };
+
+  function formFingerprint(form) {
+    if (!form) return "no-form";
+    const id = form.getAttribute && form.getAttribute("id") || "";
+    const name = form.getAttribute && form.getAttribute("name") || "";
+    const action = form.getAttribute && form.getAttribute("action") || "";
+    const method = form.getAttribute && form.getAttribute("method") || "";
+    return [id, name, action, method].join("|");
+  }
+
+  async function emitSubmitEventOnce(login, form, human, label, forceScreenshot) {
+    const key = `${location.href}|${login && login.isLogin ? "login" : "form"}|${formFingerprint(form)}`;
+    const now = Date.now();
+    if (lastSubmitEvent.key === key && (now - lastSubmitEvent.ts) < SUBMIT_DEDUPE_MS) {
+      contentLog("submit:deduped", { key, withinMs: now - lastSubmitEvent.ts });
+      return;
+    }
+    lastSubmitEvent = { key, ts: now };
+
+    const redaction = collectSensitiveRectsWithFrame();
+    contentLog("submit:emit", { key, human, label, forceScreenshot: !!forceScreenshot, isLogin: !!(login && login.isLogin) });
+    await sendEvent({
+      type: "submit",
+      url: location.href,
+      human,
+      label,
+      actionKind: "submit",
+      actionHint: "submit",
+      pageIsLogin: !!(login && login.isLogin),
+      pageHasSensitiveText: detectSensitiveTextOrAttrs(),
+      redactRects: redaction.rects,
+      frameIsTop: redaction.frameIsTop,
+      frameOffsetKnown: redaction.frameOffsetKnown,
+      devicePixelRatio: window.devicePixelRatio || 1,
+      forceScreenshot: !!forceScreenshot
+    });
   }
 
   // ---- INPUT capture (debounced; redacted) ----
@@ -550,6 +744,14 @@
     const login = findLoginContext();
     if (isNoiseContainer(el, login)) return;
 
+    const form = (el && el.form) ? el.form : (el && el.closest ? el.closest("form") : null);
+    const inLoginForm = login.isLogin && (!login.form || form === login.form);
+    const isSubmitLike = inLoginForm && elementLooksLikeLoginSubmit(el);
+    if (isSubmitLike) {
+      await emitSubmitEventOnce(login, form || login.form || null, "Submit login form", "Login", true);
+      return;
+    }
+
     const redaction = collectSensitiveRectsWithFrame();
     const label = getLabelFor(el);
     const actionKind = inferActionKind(el);
@@ -557,9 +759,6 @@
     const hint = detectActionHint(label || human || (el && el.innerText) || "");
 
     const clickingSensitive = isSensitiveField(el) || (login.isLogin && st.settings?.redactLoginUsernames && isLoginUsernameField(el)) || hasSensitiveKeyword(label);
-
-    // If this is likely submit/login, force screenshot and emit a submit event too.
-    const isSubmitLike = login.isLogin && elementLooksLikeLoginSubmit(el);
 
     await sendEvent({
       type: "click",
@@ -580,25 +779,6 @@
       devicePixelRatio: window.devicePixelRatio || 1,
       forceScreenshot: !!login.isLogin
     });
-
-    if (isSubmitLike) {
-      const submitRedaction = collectSensitiveRectsWithFrame();
-      await sendEvent({
-        type: "submit",
-        url: location.href,
-        human: "Submit login form",
-        label: "Login",
-        actionKind: "submit",
-        actionHint: "submit",
-        pageIsLogin: true,
-        pageHasSensitiveText: detectSensitiveTextOrAttrs(),
-        redactRects: submitRedaction.rects,
-        frameIsTop: submitRedaction.frameIsTop,
-        frameOffsetKnown: submitRedaction.frameOffsetKnown,
-        devicePixelRatio: window.devicePixelRatio || 1,
-        forceScreenshot: true
-      });
-    }
   }, true);
 
   // ---- Change capture ----
@@ -651,25 +831,11 @@
     // If Enter pressed within a login form control, treat as submit
     const el = e.target;
     if (!el) return;
-    const inLogin = !login.form || el.closest("form") === login.form;
+    const form = (el && el.form) ? el.form : (el.closest ? el.closest("form") : null);
+    const inLogin = !login.form || form === login.form;
     if (!inLogin) return;
 
-    const redaction = collectSensitiveRectsWithFrame();
-    await sendEvent({
-      type: "submit",
-      url: location.href,
-      human: "Submit login form (Enter)",
-      label: "Login",
-      actionKind: "submit",
-      actionHint: "submit",
-      pageIsLogin: true,
-      pageHasSensitiveText: detectSensitiveTextOrAttrs(),
-      redactRects: redaction.rects,
-      frameIsTop: redaction.frameIsTop,
-      frameOffsetKnown: redaction.frameOffsetKnown,
-      devicePixelRatio: window.devicePixelRatio || 1,
-      forceScreenshot: true
-    });
+    await emitSubmitEventOnce(login, form || login.form || null, "Submit login form", "Login", true);
   }, true);
 
   document.addEventListener("submit", async (e) => {
@@ -678,24 +844,14 @@
 
     const login = findLoginContext();
     const form = e.target;
-    const isLoginForm = login.isLogin && login.form && form === login.form;
-
-    const redaction = collectSensitiveRectsWithFrame();
-    await sendEvent({
-      type: "submit",
-      url: location.href,
-      human: isLoginForm ? "Submit login form" : "Submit form",
-      label: isLoginForm ? "Login" : "Submit",
-      actionKind: "submit",
-      actionHint: "submit",
-      pageIsLogin: !!login.isLogin,
-      pageHasSensitiveText: detectSensitiveTextOrAttrs(),
-      redactRects: redaction.rects,
-      frameIsTop: redaction.frameIsTop,
-      frameOffsetKnown: redaction.frameOffsetKnown,
-      devicePixelRatio: window.devicePixelRatio || 1,
-      forceScreenshot: !!login.isLogin
-    });
+    const isLoginForm = !!(login.isLogin && (!login.form || form === login.form));
+    await emitSubmitEventOnce(
+      login,
+      form || login.form || null,
+      isLoginForm ? "Submit login form" : "Submit form",
+      isLoginForm ? "Login" : "Submit",
+      isLoginForm
+    );
   }, true);
 
   // ---- Navigation capture (SPA) ----

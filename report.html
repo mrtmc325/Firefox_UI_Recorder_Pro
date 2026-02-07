@@ -51,9 +51,25 @@
           URL filter
           <input id="url-filter" type="text" placeholder="contains..." />
         </label>
-        <button id="bundle" class="btn noprint">Download bundle</button>
+        <button id="bundle" class="btn noprint">Export HTML bundle</button>
+        <button id="bundle-raw" class="btn noprint">Export raw ZIP</button>
+        <label class="row">
+          Import mode
+          <select id="import-mode">
+            <option value="replace">Import as new report</option>
+            <option value="merge">Merge into current report</option>
+          </select>
+        </label>
+        <button id="bundle-import" class="btn noprint">Import raw ZIP</button>
+        <input id="bundle-import-file" class="file-input" type="file" accept=".zip,application/zip" />
       </div>
+      <div id="import-status" class="hint noprint"></div>
     </div>
+  </div>
+
+  <div class="report-section toc-section">
+    <h2>Table of Contents</h2>
+    <div id="toc"></div>
   </div>
 
   <div class="report-section noprint">

@@ -8,7 +8,17 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.1.4. Capture UI workflows with clean step titles, text-only redaction, and editable, annotated reports. Screenshots are always unmodified.</p>
+    <p>Version 1.6.0. This release focuses on recorder stability, memory control, improved reporting, and editable import/export workflows.</p>
+
+    <h2>Version Notes (v1.6.0)</h2>
+    <ul>
+      <li>Start/stop capture stability improved with stronger runtime/storage flow handling.</li>
+      <li>Dynamic UI capture now uses a controlled screenshot interval to reduce memory pressure.</li>
+      <li>Raw ZIP report export/import/merge added for future editing.</li>
+      <li>Table of Contents added to report UI and exported HTML.</li>
+      <li>Annotation tools upgraded: live previews, shape sizing labels, better undo, screenshot-based obfuscation.</li>
+      <li>Long-session screenshot compaction added to control memory growth.</li>
+    </ul>
 
     <h2>Install (Temporary Add-on)</h2>
     <ul>
@@ -22,57 +32,69 @@
       <li>Click the toolbar icon.</li>
       <li>Press <strong>Start</strong>.</li>
       <li>Perform your workflow.</li>
-      <li>Press <strong>Stop</strong> (the report is saved automatically).</li>
-      <li>Open the report or print to PDF.</li>
+      <li>Press <strong>Stop</strong>.</li>
+      <li>Open report and export as HTML or raw ZIP as needed.</li>
     </ol>
 
-    <h2>Settings</h2>
-    <ul>
-      <li><strong>Debounce (ms)</strong>: Delay before a screenshot is captured after an event.</li>
-      <li><strong>Capture mode</strong>: Record all events or clicks/submit/nav only.</li>
-      <li><strong>Diff-based screenshots</strong>: Skip duplicate screenshots.</li>
-      <li><strong>Redact sensitive text in report</strong>: Masks secrets in report titles/labels/values only.</li>
-      <li><strong>Redact usernames on login pages</strong>: Masks usernames in report text only.</li>
-      <li><strong>Auto-pause on idle</strong>: Pause recording when the system is idle.</li>
-      <li><strong>Auto-resume on focus</strong>: Resume recording when you return to the browser.</li>
-      <li><strong>Prune noisy input steps</strong>: Collapse rapid input edits to a single step.</li>
-      <li><strong>Page watch</strong>: Capture dynamic dialogs and forms even when the URL stays the same.</li>
-    </ul>
-    <p><strong>Note:</strong> Screenshots are never masked. The full page is always captured.</p>
+    <h2>Configuration How-To Templates</h2>
 
-    <h2>Report History</h2>
-    <p>The extension keeps a rolling buffer of the last 3 workflows. Use the report selector to reopen a prior run if you forgot to export or print.</p>
-
-    <h2>Editing & Annotations</h2>
+    <h3>Template A: Dynamic Dashboard / SPA</h3>
+    <p>Use for pages with live updates, modals, and in-place content refreshes.</p>
     <ul>
-      <li>Edit step titles inline.</li>
-      <li>Add notes from the popup.</li>
-      <li>Draw on screenshots with pen, highlight, outline, shapes, and text.</li>
-      <li>Download a standalone HTML report bundle for sharing.</li>
+      <li><strong>Capture mode</strong>: All events</li>
+      <li><strong>Page watch (dynamic UI)</strong>: On</li>
+      <li><strong>Page watch interval (ms)</strong>: 500 to 1200</li>
+      <li><strong>Diff-based screenshots</strong>: On</li>
+      <li><strong>Debounce (ms)</strong>: 700 to 1000</li>
     </ul>
 
-    <h2>Report Tools</h2>
+    <h3>Template B: Login / Sensitive Workflow</h3>
+    <p>Use for authentication and secure change-control walkthroughs.</p>
     <ul>
-      <li>Search and filter by URL, type, or label.</li>
-      <li>Replay hints checklist (fields + buttons) to guide walkthroughs.</li>
-      <li>Cross-tab timeline to visualize parallel steps.</li>
+      <li><strong>Capture mode</strong>: All events</li>
+      <li><strong>Redact sensitive text in report</strong>: On</li>
+      <li><strong>Redact usernames on login pages</strong>: On</li>
+      <li><strong>Page watch (dynamic UI)</strong>: On</li>
+      <li><strong>Page watch interval (ms)</strong>: 600 to 1000</li>
+    </ul>
+
+    <h3>Template C: Long Session / Low Memory</h3>
+    <p>Use for multi-hour runs or environments where memory pressure is a concern.</p>
+    <ul>
+      <li><strong>Capture mode</strong>: Clicks + submit + nav only</li>
+      <li><strong>Diff-based screenshots</strong>: On</li>
+      <li><strong>Debounce (ms)</strong>: 900 to 1400</li>
+      <li><strong>Page watch (dynamic UI)</strong>: On only when needed</li>
+      <li><strong>Page watch interval (ms)</strong>: 1500 to 3000</li>
+      <li><strong>Prune noisy input steps</strong>: On</li>
+    </ul>
+
+    <h2>Dynamic Screenshot Rule (ui-change)</h2>
+    <ul>
+      <li>If page watch interval is less than <code>10000ms</code>, forced screenshot interval is:</li>
+      <li><code>max(4567.38ms, pageWatchMs * 1.34562)</code></li>
+      <li>If page watch interval is <code>10000ms</code> or higher, dynamic forced screenshots are disabled for <code>ui-change</code>.</li>
+    </ul>
+
+    <h2>Report Editing</h2>
+    <ul>
+      <li>Edit step titles and notes inline.</li>
+      <li>Annotate screenshots with pen/highlight/rect/outline/obfuscate/text.</li>
+      <li>Use Undo/Clear on annotation layers.</li>
+    </ul>
+
+    <h2>Report Export / Import</h2>
+    <ul>
+      <li><strong>Export HTML bundle</strong>: Portable report with TOC and step anchors.</li>
+      <li><strong>Export raw ZIP</strong>: Editable payload for re-import later.</li>
+      <li><strong>Import raw ZIP</strong>: Import as new report or merge into active report.</li>
     </ul>
 
     <h2>Keyboard Shortcut</h2>
-    <p>Use <code>Ctrl+Shift+Y</code> to start/stop recording.</p>
+    <p><code>Ctrl+Shift+Y</code> toggles start/stop recording.</p>
 
-    <h2>Data & Privacy</h2>
-    <p>All data stays in your browser. No external network calls are made.</p>
-
-    <h2>Exports</h2>
-    <ul>
-      <li><strong>Open report</strong> generates an HTML report with timestamps and screenshots.</li>
-      <li><strong>Print to PDF</strong> uses the browser print dialog for a PDF-friendly layout.</li>
-      <li><strong>Download bundle</strong> creates a standalone HTML file for sharing.</li>
-    </ul>
-
-    <h2>Support</h2>
-    <p>If you see noisy labels, the report title cleaner falls back to a generic label to keep steps readable.</p>
+    <h2>Privacy</h2>
+    <p>All data remains in local browser storage. Screenshots are unmodified; redaction applies to report text fields.</p>
   </main>
 </body>
 </html>

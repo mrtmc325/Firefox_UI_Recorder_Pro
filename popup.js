@@ -1,9 +1,49 @@
+const POPUP_DEBUG = true;
+
+function popupLog(message, data) {
+  if (!POPUP_DEBUG) return;
+  const prefix = `[UIR POPUP ${new Date().toISOString()}]`;
+  if (data === undefined) console.log(prefix, message);
+  else console.log(prefix, message, data);
+}
+
+async function writeControlSignal() {
+  const now = Date.now();
+  const payload = { __uiRecorderStopRequestTs: now, __uiRecorderStopSource: "popup" };
+  try {
+    await browser.storage.local.set(payload);
+    popupLog("control-signal:written", { kind: "stop", ts: now });
+  } catch (e) {
+    popupLog("control-signal:error", {
+      kind: "stop",
+      error: String((e && e.message) || e || "unknown")
+    });
+  }
+}
+
 async function getState() { return await browser.runtime.sendMessage({ type: "GET_STATE" }); }
 async function updateSettings(partial) { return await browser.runtime.sendMessage({ type: "UPDATE_SETTINGS", settings: partial }); }
+async function sendMessageSafe(message) {
+  try {
+    popupLog("sendMessage:start", { type: message && message.type });
+    const response = await browser.runtime.sendMessage(message);
+    popupLog("sendMessage:done", { type: message && message.type, response });
+    return response;
+  } catch (e) {
+    popupLog("sendMessage:error", { type: message && message.type, error: String((e && e.message) || e || "unknown") });
+    return { ok: false, error: String((e && e.message) || e || "unknown") };
+  }
+}
 
 async function refresh() {
-  const st = await getState();
-  document.getElementById("status").textContent = st.isRecording ? "Recording..." : "Idle";
+  let st = null;
+  try { st = await getState(); } catch (_) {}
+  if (!st || typeof st !== "object" || !st.settings) {
+    popupLog("refresh:fallback-state");
+    st = { isRecording: false, isPaused: false, count: 0, settings: {} };
+  }
+  popupLog("refresh:state", { isRecording: !!st.isRecording, isPaused: !!st.isPaused, count: st.count || 0 });
+  document.getElementById("status").textContent = st.isRecording ? (st.isPaused ? "Paused" : "Recording...") : "Idle";
   document.getElementById("count").textContent = `Steps captured: ${st.count || 0}`;
 
   document.getElementById("debounce").value = st.settings?.screenshotDebounceMs ?? 900;
@@ -20,28 +60,30 @@ async function refresh() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  popupLog("DOMContentLoaded");
   document.getElementById("start").addEventListener("click", async () => {
-    await browser.runtime.sendMessage({ type: "START_RECORDING" });
+    await sendMessageSafe({ type: "START_RECORDING" });
     await refresh();
   });
   document.getElementById("stop").addEventListener("click", async () => {
-    await browser.runtime.sendMessage({ type: "STOP_RECORDING" });
+    await writeControlSignal();
+    await sendMessageSafe({ type: "STOP_RECORDING" });
     await refresh();
   });
   document.getElementById("note").addEventListener("click", async () => {
     const text = window.prompt("Add note to report:");
     if (!text) return;
-    await browser.runtime.sendMessage({ type: "ADD_NOTE", text });
+    await sendMessageSafe({ type: "ADD_NOTE", text });
     await refresh();
   });
   document.getElementById("report").addEventListener("click", async () => {
-    await browser.runtime.sendMessage({ type: "OPEN_REPORT" });
+    await sendMessageSafe({ type: "OPEN_REPORT" });
   });
   document.getElementById("docs").addEventListener("click", async () => {
-    await browser.runtime.sendMessage({ type: "OPEN_DOCS" });
+    await sendMessageSafe({ type: "OPEN_DOCS" });
   });
   document.getElementById("export-pdf").addEventListener("click", async () => {
-    await browser.runtime.sendMessage({ type: "OPEN_PRINTABLE_REPORT" });
+    await sendMessageSafe({ type: "OPEN_PRINTABLE_REPORT" });
   });
 
   document.getElementById("debounce").addEventListener("change", async (e) => {

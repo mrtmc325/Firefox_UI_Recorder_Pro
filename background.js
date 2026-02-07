@@ -1,4 +1,4 @@
-// UI Workflow Recorder Pro (Firefox MV2) - v1.0.0
+// UI Workflow Recorder Pro (Firefox MV2) - v1.6.0
 // Clean capture, diff-based screenshots, and text-only redaction for reports.
 
 let isRecording = false;
@@ -40,10 +40,86 @@ let settings = {
 let lastShot = { ts: 0, hash: null, dataUrl: null };
 let pendingShotTimer = null;
 let pendingShotResolve = null;
+let runtimeMsgSeq = 0;
+let activeRecordEvents = 0;
+let lastPopupStopToken = 0;
+
+const DEBUG_LOGS = true;
+const EVENT_COMPACT_TRIGGER_COUNT = 600;
+const SCREENSHOT_COMPACT_TRIGGER_COUNT = 220;
+const SCREENSHOT_KEEP_TARGET = 160;
+
+function formatError(err) {
+  if (!err) return "unknown";
+  if (err && err.stack) return err.stack;
+  if (err && err.message) return err.message;
+  return String(err);
+}
+
+function bgLog(message, data) {
+  if (!DEBUG_LOGS) return;
+  const prefix = `[UIR BG ${new Date().toISOString()}]`;
+  if (data === undefined) console.log(prefix, message);
+  else console.log(prefix, message, data);
+}
+
+function bgWarn(message, data) {
+  const prefix = `[UIR BG ${new Date().toISOString()}]`;
+  if (data === undefined) console.warn(prefix, message);
+  else console.warn(prefix, message, data);
+}
+
+function stateSummary() {
+  return {
+    isRecording,
+    isPaused,
+    eventCount: events.length,
+    reportCount: reports.length,
+    sessionId
+  };
+}
+
+if (typeof self !== "undefined" && self.addEventListener) {
+  self.addEventListener("unhandledrejection", (event) => {
+    bgWarn("unhandledrejection", { reason: formatError(event && event.reason) });
+  });
+  self.addEventListener("error", (event) => {
+    bgWarn("runtime-error", {
+      message: event && event.message,
+      filename: event && event.filename,
+      lineno: event && event.lineno,
+      colno: event && event.colno
+    });
+  });
+}
+
+function resetScreenshotState() {
+  const hadPending = !!pendingShotTimer || !!pendingShotResolve;
+  if (pendingShotTimer) {
+    clearTimeout(pendingShotTimer);
+    pendingShotTimer = null;
+  }
+  if (pendingShotResolve) {
+    try { pendingShotResolve({ dataUrl: null, hash: null, reused: false }); } catch (_) {}
+    pendingShotResolve = null;
+  }
+  lastShot = { ts: 0, hash: null, dataUrl: null };
+  if (hadPending) bgLog("resetScreenshotState:cleared-pending");
+}
 
 function nowIso() { return new Date().toISOString(); }
 
 async function persist() { await browser.storage.local.set({ isRecording, isPaused, events, settings, reports, sessionId }); }
+
+async function persistSafe(context) {
+  try {
+    await persist();
+    return { ok: true };
+  } catch (e) {
+    bgWarn("persist-failed", { context: context || "unknown", error: formatError(e) });
+    return { ok: false, error: e };
+  }
+}
 
 async function loadPersisted() {
   const stored = await browser.storage.local.get(["isRecording","isPaused","events","settings","reports","sessionId"]);
@@ -53,6 +129,7 @@ async function loadPersisted() {
   reports = Array.isArray(stored.reports) ? stored.reports : [];
   sessionId = stored.sessionId || null;
   if (stored.settings) settings = { ...settings, ...stored.settings };
+  bgLog("loadPersisted", { isRecording, isPaused, eventCount: events.length, reportCount: reports.length, sessionId });
 }
 
 async function setBadge(text) { try { await browser.browserAction.setBadgeText({ text }); } catch (_) {} }
@@ -174,6 +251,7 @@ function pruneInputSteps(list) {
 
 function saveReportSnapshot() {
   if (!events || !events.length) return false;
+  const eventCountBefore = events.length;
   const report = {
     id: `rpt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     createdAt: nowIso(),
@@ -183,6 +261,7 @@ function saveReportSnapshot() {
   };
   reports.unshift(report);
   reports = reports.slice(0, 3);
+  bgLog("saveReportSnapshot", { sessionId, eventCountBefore, prunedEventCount: report.events.length, reportCount: reports.length });
   return true;
 }
 
@@ -198,6 +277,43 @@ function shouldIgnoreEventType(type) {
   return false;
 }
 
+function hasScreenshotPayload(ev) {
+  return !!(ev && typeof ev === "object" && ev.screenshot);
+}
+
+function isScreenshotPriorityEvent(ev) {
+  const t = (ev && ev.type) || "";
+  if (t === "submit" || t === "nav" || t === "outcome" || t === "note") return true;
+  if (t === "click" && ev && ev.actionHint === "login") return true;
+  return false;
+}
+
+function compactScreenshotsIfNeeded() {
+  if (!Array.isArray(events) || !events.length) return null;
+  let screenshotCount = 0;
+  for (const ev of events) {
+    if (hasScreenshotPayload(ev)) screenshotCount++;
+  }
+  if (events.length < EVENT_COMPACT_TRIGGER_COUNT && screenshotCount < SCREENSHOT_COMPACT_TRIGGER_COUNT) {
+    return null;
+  }
+
+  let removed = 0;
+  for (let i = 0; i < events.length && screenshotCount > SCREENSHOT_KEEP_TARGET; i++) {
+    const ev = events[i];
+    if (!hasScreenshotPayload(ev)) continue;
+    if (isScreenshotPriorityEvent(ev)) continue;
+    ev.screenshot = null;
+    ev.screenshotHash = null;
+    ev.screenshotSkipped = true;
+    ev.screenshotSkipReason = "compacted-memory";
+    removed++;
+    screenshotCount--;
+  }
+
+  return { removed, eventCount: events.length, screenshotCount };
+}
+
 function newSessionId() {
   return `sess_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -205,15 +321,45 @@ function newSessionId() {
 async function pauseRecording() {
   if (!isRecording || isPaused) return;
   isPaused = true;
-  await persist();
+  bgLog("pauseRecording");
+  await persistSafe("pause");
   await setBadge("PAUS");
 }
 
 async function resumeRecording() {
   if (!isRecording || !isPaused) return;
   isPaused = false;
-  await persist();
+  bgLog("resumeRecording");
+  await persistSafe("resume");
   await setBadge("REC");
+}
+
+async function startRecordingInternal(source) {
+  isRecording = true;
+  isPaused = false;
+  events = [];
+  sessionId = newSessionId();
+  resetScreenshotState();
+  const persisted = await persistSafe("start-recording");
+  await setBadge("REC");
+  bgLog("start-recording:done", { source, sessionId, persisted: persisted.ok, ...stateSummary() });
+  return { ok: persisted.ok, persisted: persisted.ok };
+}
+
+async function stopRecordingInternal(source) {
+  bgLog("stop-recording:begin", { source, activeRecordEvents, ...stateSummary() });
+  isRecording = false;
+  isPaused = false;
+  const saved = saveReportSnapshot();
+  // Report snapshots already include the completed session.
+  // Clear active buffer to avoid doubling storage footprint on stop.
+  events = [];
+  sessionId = null;
+  resetScreenshotState();
+  const persisted = await persistSafe("stop-recording");
+  await setBadge("");
+  bgLog("stop-recording:done", { source, saved, persisted: persisted.ok, activeRecordEvents, ...stateSummary() });
+  return { ok: true, saved, persisted: persisted.ok };
 }
 
 browser.runtime.onInstalled.addListener(async () => {
@@ -223,6 +369,7 @@ browser.runtime.onInstalled.addListener(async () => {
   }
   await setBadgeColor("#d00");
   await setBadge(isRecording ? (isPaused ? "PAUS" : "REC") : "");
+  bgLog("onInstalled:ready", { isRecording, isPaused, eventCount: events.length, reportCount: reports.length });
 });
 
 browser.runtime.onStartup.addListener(async () => {
@@ -232,108 +379,150 @@ browser.runtime.onStartup.addListener(async () => {
   }
   await setBadgeColor("#d00");
   await setBadge(isRecording ? (isPaused ? "PAUS" : "REC") : "");
+  bgLog("onStartup:ready", { isRecording, isPaused, eventCount: events.length, reportCount: reports.length });
 });
 
 browser.runtime.onMessage.addListener(async (msg, sender) => {
-  if (!msg || !msg.type) return;
-
-  if (msg.type === "GET_STATE") return { isRecording, isPaused, settings, count: events.length };
-
-  if (msg.type === "UPDATE_SETTINGS") {
-    settings = { ...settings, ...(msg.settings || {}) };
-    if (settings.autoPauseOnIdle) {
-      try { await browser.idle.setDetectionInterval(Math.max(15, settings.idleThresholdSec || 60)); } catch (_) {}
-    }
-    await persist();
-    return { ok: true, settings };
+  const requestId = ++runtimeMsgSeq;
+  if (!msg || !msg.type) {
+    bgLog("onMessage:ignored-empty", { requestId, hasMessage: !!msg });
+    return;
+  }
+  const msgType = msg.type;
+  const senderTabId = sender && sender.tab ? sender.tab.id : null;
+  const shouldLogStart = msgType !== "GET_STATE" || (requestId % 50 === 0);
+  if (shouldLogStart) {
+    bgLog("onMessage:start", { requestId, msgType, senderTabId, isRecording, isPaused, eventCount: events.length, activeRecordEvents, sessionId });
   }
 
-  if (msg.type === "START_RECORDING") {
-    isRecording = true;
-    isPaused = false;
-    events = [];
-    sessionId = newSessionId();
-    lastShot = { ts: 0, hash: null, dataUrl: null };
-    await persist();
-    await setBadge("REC");
-    return { ok: true };
-  }
+  try {
+    if (msgType === "GET_STATE") return { isRecording, isPaused, settings, count: events.length };
 
-  if (msg.type === "STOP_RECORDING") {
-    isRecording = false;
-    isPaused = false;
-    const saved = saveReportSnapshot();
-    await persist();
-    await setBadge("");
-    return { ok: true, saved };
-  }
-
-  if (msg.type === "ADD_NOTE") {
-    if (!isRecording) return { ok: false, ignored: true };
-    const tab = await getActiveTab();
-    const note = String(msg.text || "").trim();
-    if (!note) return { ok: false, ignored: true };
-    events.push({
-      type: "note",
-      ts: nowIso(),
-      url: tab && tab.url ? tab.url : "",
-      human: "Note",
-      label: "Note",
-      text: note,
-      sessionId,
-      tabId: tab && tab.id ? tab.id : null,
-      windowId: tab && tab.windowId ? tab.windowId : null,
-      tabTitle: tab && tab.title ? tab.title : ""
-    });
-    await persist();
-    return { ok: true };
-  }
-
-  if (msg.type === "OPEN_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?idx=0" }); return { ok: true }; }
-  if (msg.type === "OPEN_DOCS") { await browser.tabs.create({ url: browser.runtime.getURL("docs.html") }); return { ok: true }; }
-  if (msg.type === "OPEN_PRINTABLE_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?print=1&idx=0" }); return { ok: true }; }
-
-  if (msg.type === "RECORD_EVENT") {
-    if (!isRecording || isPaused) return { ok: false, ignored: true };
-    const e = msg.event || {};
-    if (shouldIgnoreEventType(e.type)) return { ok: false, ignored: true };
-
-    const cleaned = {
-      ...e,
-      ts: nowIso(),
-      text: applyRedactionToText(e.text),
-      label: applyRedactionToText(e.label),
-      value: applyRedactionToText(e.value),
-      outcome: applyRedactionToText(e.outcome),
-      human: applyRedactionToText(e.human),
-      sessionId,
-      tabId: sender && sender.tab ? sender.tab.id : null,
-      windowId: sender && sender.tab ? sender.tab.windowId : null,
-      tabTitle: sender && sender.tab ? sender.tab.title : ""
-    };
-    delete cleaned.typedValue;
-
-    const includeScreenshot = ["click","change","input","submit","nav","outcome","ui-change","note"].includes(e.type);
-    if (includeScreenshot) {
-      const shot = await maybeScreenshot(e);
-      cleaned.screenshot = shot.screenshot;
-      cleaned.screenshotHash = shot.screenshotHash;
-      cleaned.screenshotSkipped = shot.skipped;
-      cleaned.screenshotSkipReason = shot.reason;
-    } else {
-      cleaned.screenshot = null;
-      cleaned.screenshotHash = null;
-      cleaned.screenshotSkipped = true;
-      cleaned.screenshotSkipReason = "not-needed";
+    if (msgType === "UPDATE_SETTINGS") {
+      settings = { ...settings, ...(msg.settings || {}) };
+      if (settings.autoPauseOnIdle) {
+        try { await browser.idle.setDetectionInterval(Math.max(15, settings.idleThresholdSec || 60)); } catch (_) {}
+      }
+      const persisted = await persistSafe("update-settings");
+      if (!persisted.ok) return { ok: false, settings, persisted: false };
+      return { ok: true, settings };
     }
 
-    events.push(cleaned);
-    await persist();
-    return { ok: true };
+    if (msgType === "START_RECORDING") {
+      return await startRecordingInternal(`runtime:${requestId}`);
+    }
+
+    if (msgType === "STOP_RECORDING") {
+      return await stopRecordingInternal(`runtime:${requestId}`);
+    }
+
+    if (msgType === "ADD_NOTE") {
+      if (!isRecording) return { ok: false, ignored: true };
+      const tab = await getActiveTab();
+      const note = String(msg.text || "").trim();
+      if (!note) return { ok: false, ignored: true };
+      events.push({
+        type: "note",
+        ts: nowIso(),
+        url: tab && tab.url ? tab.url : "",
+        human: "Note",
+        label: "Note",
+        text: note,
+        sessionId,
+        tabId: tab && tab.id ? tab.id : null,
+        windowId: tab && tab.windowId ? tab.windowId : null,
+        tabTitle: tab && tab.title ? tab.title : ""
+      });
+      const persisted = await persistSafe("add-note");
+      return { ok: persisted.ok, persisted: persisted.ok };
+    }
+
+    if (msgType === "OPEN_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?idx=0" }); return { ok: true }; }
+    if (msgType === "OPEN_DOCS") { await browser.tabs.create({ url: browser.runtime.getURL("docs.html") }); return { ok: true }; }
+    if (msgType === "OPEN_PRINTABLE_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?print=1&idx=0" }); return { ok: true }; }
+
+    if (msgType === "RECORD_EVENT") {
+      activeRecordEvents++;
+      const startedAt = Date.now();
+      let eventType = "unknown";
+      try {
+        if (!isRecording || isPaused) return { ok: false, ignored: true };
+        const e = msg.event || {};
+        eventType = e.type || "unknown";
+        if (shouldIgnoreEventType(e.type)) return { ok: false, ignored: true };
+
+        const cleaned = {
+          ...e,
+          ts: nowIso(),
+          text: applyRedactionToText(e.text),
+          label: applyRedactionToText(e.label),
+          value: applyRedactionToText(e.value),
+          outcome: applyRedactionToText(e.outcome),
+          human: applyRedactionToText(e.human),
+          sessionId,
+          tabId: sender && sender.tab ? sender.tab.id : null,
+          windowId: sender && sender.tab ? sender.tab.windowId : null,
+          tabTitle: sender && sender.tab ? sender.tab.title : ""
+        };
+        delete cleaned.typedValue;
+
+        const includeScreenshot = ["click","change","input","submit","nav","outcome","note"].includes(e.type)
+          || (e.type === "ui-change" && !!e.forceScreenshot);
+        if (includeScreenshot) {
+          const shot = await maybeScreenshot(e);
+          cleaned.screenshot = shot.screenshot;
+          cleaned.screenshotHash = shot.screenshotHash;
+          cleaned.screenshotSkipped = shot.skipped;
+          cleaned.screenshotSkipReason = shot.reason;
+        } else {
+          cleaned.screenshot = null;
+          cleaned.screenshotHash = null;
+          cleaned.screenshotSkipped = true;
+          cleaned.screenshotSkipReason = "not-needed";
+        }
+
+        // Drop stale events that completed after state/session changed.
+        if (!isRecording || isPaused || cleaned.sessionId !== sessionId) {
+          bgLog("record-event:dropped-stale", {
+            requestId,
+            eventType,
+            cleanedSessionId: cleaned.sessionId,
+            currentSessionId: sessionId,
+            isRecording,
+            isPaused
+          });
+          return { ok: false, ignored: true, reason: "state-changed" };
+        }
+
+        events.push(cleaned);
+        const compacted = compactScreenshotsIfNeeded();
+        if (compacted && compacted.removed > 0) {
+          bgLog("record-event:compacted", compacted);
+        }
+        const persisted = await persistSafe("record-event");
+        if (!persisted.ok || eventType === "submit") {
+          bgLog("record-event:done", { requestId, eventType, persisted: persisted.ok, eventCount: events.length });
+        }
+        return { ok: persisted.ok, persisted: persisted.ok };
+      } finally {
+        activeRecordEvents = Math.max(0, activeRecordEvents - 1);
+        const durationMs = Date.now() - startedAt;
+        if (durationMs > 1500) {
+          bgWarn("record-event:slow", { requestId, eventType, durationMs, activeRecordEvents });
+        }
+      }
+    }
+
+    bgLog("onMessage:unknown-type", { requestId, msgType });
+    return { ok: false, ignored: true, reason: "unknown-message-type" };
+  } catch (e) {
+    bgWarn("onMessage:error", { requestId, msgType, error: formatError(e) });
+    return { ok: false, error: String((e && e.message) || e || "unknown"), type: msgType };
   }
 });
 
 browser.idle.onStateChanged.addListener(async (state) => {
+  bgLog("idle:onStateChanged", { state, autoPauseOnIdle: !!settings.autoPauseOnIdle, resumeOnFocus: !!settings.resumeOnFocus });
   if (!settings.autoPauseOnIdle) return;
   if (state === "idle" || state === "locked") {
     await pauseRecording();
@@ -342,30 +531,37 @@ browser.idle.onStateChanged.addListener(async (state) => {
   }
 });
 
+browser.storage.onChanged.addListener(async (changes, areaName) => {
+  if (areaName !== "local") return;
+  const stopChange = changes.__uiRecorderStopRequestTs;
+  if (!stopChange) return;
+
+  if (stopChange && typeof stopChange.newValue === "number") {
+    const token = Number(stopChange.newValue);
+    if (token > lastPopupStopToken) {
+      lastPopupStopToken = token;
+      bgLog("storage:stop-request", { token, source: changes.__uiRecorderStopSource && changes.__uiRecorderStopSource.newValue });
+      await stopRecordingInternal(`storage:${token}`);
+    }
+  }
+});
+
 browser.tabs.onActivated.addListener(async () => {
+  bgLog("tabs:onActivated", { resumeOnFocus: !!settings.resumeOnFocus, isRecording, isPaused });
   if (settings.resumeOnFocus) await resumeRecording();
 });
 
 browser.windows.onFocusChanged.addListener(async (windowId) => {
+  bgLog("windows:onFocusChanged", { windowId, resumeOnFocus: !!settings.resumeOnFocus, isRecording, isPaused });
   if (windowId === browser.windows.WINDOW_ID_NONE) return;
   if (settings.resumeOnFocus) await resumeRecording();
 });
 
 browser.commands.onCommand.addListener(async (command) => {
+  bgLog("commands:onCommand", { command, isRecording, isPaused, eventCount: events.length, sessionId });
   if (command !== "toggle-recording") return;
   if (isRecording) {
-    isRecording = false;
-    isPaused = false;
-    const saved = saveReportSnapshot();
-    await persist();
-    await setBadge("");
-    return { ok: true, saved };
+    return await stopRecordingInternal("command:toggle");
   }
-  isRecording = true;
-  isPaused = false;
-  events = [];
-  sessionId = newSessionId();
-  lastShot = { ts: 0, hash: null, dataUrl: null };
-  await persist();
-  await setBadge("REC");
+  return await startRecordingInternal("command:toggle");
 });
