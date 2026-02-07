@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.9.0 - 2026-02-07
+
+### Added
+- Report builder product identity header sourced from extension manifest values:
+  - extension icon
+  - extension name
+  - extension description
+  - extension version badge
+- Collapsible in-page Quick Export Preview added as a first-class report section and builder navigation target.
+- Expanded export theming catalog:
+  - 15 palette presets
+  - 15 font stack presets
+  - additional Table of Contents layout variants (`columns`, `bands`, `outline`)
+
+### Changed
+- Builder header density reduced for cleaner editing ergonomics:
+  - compact icon + version badge treatment
+  - tighter spacing and typography
+- Report history selector labels now prioritize report name with step count and timestamp.
+- Table of Contents editor/export rendering keeps full title and URL detail display options while preserving dense large-report behavior.
+
+### Fixed
+- Oversized header identity icon behavior addressed with hard size clamps and compact badge layout.
+- Quick preview refresh behavior synchronized with active filters/theme updates while preview section is expanded.
+
 ## v1.8.0 - 2026-02-07
 
 ### Added

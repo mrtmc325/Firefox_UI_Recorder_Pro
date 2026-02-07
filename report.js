@@ -27,6 +27,9 @@ function safeDataImageUrl(value) {
 const RAW_BUNDLE_FORMAT = "uir-report-bundle";
 const RAW_BUNDLE_VERSION = 1;
 const REPORT_THEME_STORAGE_KEY = "__uiRecorderReportTheme";
+const DEFAULT_REPORT_TITLE = "Report title";
+const DEFAULT_REPORT_SUBTITLE = "Report short description";
+const DEFAULT_CONTENT_SYSTEM_DESCRIPTION = "UI workflow capture";
 const EXPORT_THEME_DEFAULTS = Object.freeze({
   preset: "extension",
   font: "trebuchet",
@@ -62,6 +65,114 @@ const EXPORT_THEME_PRESETS = Object.freeze({
     edge: "#d1d5db",
     accent2: "#4b5563",
     bg: "radial-gradient(circle at 10% 10%, #e5e7eb 0%, #f5f6f8 50%, #edf2f7 100%)"
+  }),
+  aurora: Object.freeze({
+    ink: "#0f2230",
+    muted: "#55748a",
+    paper: "#f0fbff",
+    panel: "#ffffff",
+    edge: "#cde8f3",
+    accent2: "#14b8a6",
+    bg: "radial-gradient(circle at 14% 10%, #d1fae5 0%, #effafc 46%, #e0f2fe 100%)"
+  }),
+  seabreeze: Object.freeze({
+    ink: "#10263c",
+    muted: "#607a93",
+    paper: "#f2f8ff",
+    panel: "#ffffff",
+    edge: "#d3e0f0",
+    accent2: "#0284c7",
+    bg: "radial-gradient(circle at 9% 8%, #dbeafe 0%, #f4f8ff 50%, #e0f2fe 100%)"
+  }),
+  sunset: Object.freeze({
+    ink: "#2a1b16",
+    muted: "#7f5f52",
+    paper: "#fff7f2",
+    panel: "#ffffff",
+    edge: "#f0d9cf",
+    accent2: "#f97316",
+    bg: "radial-gradient(circle at 10% 12%, #ffedd5 0%, #fff7ed 50%, #fef3c7 100%)"
+  }),
+  sandstone: Object.freeze({
+    ink: "#2e261d",
+    muted: "#796b5c",
+    paper: "#faf5ee",
+    panel: "#ffffff",
+    edge: "#e6d8c7",
+    accent2: "#b45309",
+    bg: "radial-gradient(circle at 8% 10%, #f5e7d5 0%, #faf5ee 52%, #f1f5f9 100%)"
+  }),
+  forest: Object.freeze({
+    ink: "#13251d",
+    muted: "#567263",
+    paper: "#eff8f2",
+    panel: "#ffffff",
+    edge: "#cfe3d7",
+    accent2: "#16a34a",
+    bg: "radial-gradient(circle at 12% 10%, #dcfce7 0%, #eff8f2 48%, #ecfeff 100%)"
+  }),
+  pine: Object.freeze({
+    ink: "#13221f",
+    muted: "#4f6965",
+    paper: "#edf6f4",
+    panel: "#ffffff",
+    edge: "#c7dcd7",
+    accent2: "#0f766e",
+    bg: "radial-gradient(circle at 10% 10%, #d1fae5 0%, #edf6f4 50%, #e2e8f0 100%)"
+  }),
+  charcoal: Object.freeze({
+    ink: "#e5e7eb",
+    muted: "#9ca3af",
+    paper: "#111827",
+    panel: "#1f2937",
+    edge: "#374151",
+    accent2: "#38bdf8",
+    bg: "radial-gradient(circle at 10% 10%, #111827 0%, #0b1220 54%, #030712 100%)"
+  }),
+  midnight: Object.freeze({
+    ink: "#e6edf7",
+    muted: "#9fb1c7",
+    paper: "#0b1324",
+    panel: "#121c33",
+    edge: "#253454",
+    accent2: "#60a5fa",
+    bg: "radial-gradient(circle at 12% 10%, #1e293b 0%, #0f172a 52%, #020617 100%)"
+  }),
+  copper: Object.freeze({
+    ink: "#2e1f17",
+    muted: "#825f4f",
+    paper: "#fff5f0",
+    panel: "#ffffff",
+    edge: "#efcfbf",
+    accent2: "#c2410c",
+    bg: "radial-gradient(circle at 9% 10%, #fed7aa 0%, #fff5f0 52%, #ffedd5 100%)"
+  }),
+  lavender: Object.freeze({
+    ink: "#231b3b",
+    muted: "#70658f",
+    paper: "#f7f5ff",
+    panel: "#ffffff",
+    edge: "#ddd7f4",
+    accent2: "#8b5cf6",
+    bg: "radial-gradient(circle at 12% 10%, #ede9fe 0%, #f7f5ff 52%, #e0f2fe 100%)"
+  }),
+  rose: Object.freeze({
+    ink: "#331a25",
+    muted: "#8c6272",
+    paper: "#fff4f7",
+    panel: "#ffffff",
+    edge: "#f0d5de",
+    accent2: "#e11d48",
+    bg: "radial-gradient(circle at 10% 10%, #ffe4e6 0%, #fff4f7 52%, #fff1f2 100%)"
+  }),
+  mint: Object.freeze({
+    ink: "#173228",
+    muted: "#5f8174",
+    paper: "#f1fff9",
+    panel: "#ffffff",
+    edge: "#cfeee0",
+    accent2: "#10b981",
+    bg: "radial-gradient(circle at 10% 10%, #d1fae5 0%, #f1fff9 52%, #ecfdf5 100%)"
   })
 });
 
@@ -69,7 +180,18 @@ const EXPORT_THEME_FONT_STACKS = Object.freeze({
   trebuchet: "\"Trebuchet MS\",\"Gill Sans\",\"Segoe UI\",sans-serif",
   system: "-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif",
   serif: "Georgia,\"Times New Roman\",Times,serif",
-  mono: "\"JetBrains Mono\",\"SFMono-Regular\",Menlo,Consolas,\"Liberation Mono\",monospace"
+  mono: "\"JetBrains Mono\",\"SFMono-Regular\",Menlo,Consolas,\"Liberation Mono\",monospace",
+  georgia: "Georgia,\"Times New Roman\",Times,serif",
+  palatino: "\"Palatino Linotype\",Palatino,\"Book Antiqua\",serif",
+  times: "\"Times New Roman\",Times,serif",
+  arial: "Arial,\"Helvetica Neue\",Helvetica,sans-serif",
+  verdana: "Verdana,Geneva,sans-serif",
+  tahoma: "Tahoma,\"Segoe UI\",sans-serif",
+  calibri: "Calibri,\"Segoe UI\",Arial,sans-serif",
+  gill: "\"Gill Sans\",\"Gill Sans MT\",\"Trebuchet MS\",sans-serif",
+  optima: "Optima,\"Segoe UI\",Arial,sans-serif",
+  cambria: "Cambria,Georgia,serif",
+  courier: "\"Courier New\",Courier,\"Liberation Mono\",monospace"
 });
 
 function isPlainObject(value) {
@@ -94,7 +216,8 @@ function normalizeExportTheme(raw) {
   const font = Object.prototype.hasOwnProperty.call(EXPORT_THEME_FONT_STACKS, incoming.font)
     ? incoming.font
     : EXPORT_THEME_DEFAULTS.font;
-  const tocLayout = incoming.tocLayout === "list" || incoming.tocLayout === "minimal"
+  const allowedTocLayouts = ["grid", "list", "minimal", "columns", "bands", "outline"];
+  const tocLayout = allowedTocLayouts.includes(incoming.tocLayout)
     ? incoming.tocLayout
     : EXPORT_THEME_DEFAULTS.tocLayout;
   const tocMeta = incoming.tocMeta === "url" || incoming.tocMeta === "none"
@@ -622,12 +745,12 @@ function renderTableOfContents(target, events) {
     const link = document.createElement("a");
     const stepId = ev && ev.stepId ? ev.stepId : `step-${index + 1}`;
     link.href = `#${stepId}`;
-    const heading = `${index + 1}. ${shortenText(titleFor(ev), 88)}`;
+    const heading = `${index + 1}. ${titleFor(ev)}`;
     link.textContent = heading;
     link.title = `${index + 1}. ${titleFor(ev)}`;
     item.appendChild(link);
     if (ev && ev.url) {
-      const meta = el("span", "toc-meta", compactUrlForDisplay(ev.url, 82));
+      const meta = el("span", "toc-meta", String(ev.url));
       meta.title = ev.url;
       item.appendChild(meta);
     }
@@ -1357,28 +1480,43 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
   };
 }
 
-function buildExportHtml(report) {
+function buildExportHtml(report, options = {}) {
+  const opts = isPlainObject(options) ? options : {};
+  const isQuickPreview = !!opts.quickPreview;
   const brand = report.brand || {};
-  const title = escapeHtml(brand.title || "UI Workflow Report");
-  const subtitle = escapeHtml(brand.subtitle || "");
+  const title = escapeHtml(brand.title || DEFAULT_REPORT_TITLE);
+  const subtitle = escapeHtml(brand.subtitle || DEFAULT_REPORT_SUBTITLE);
   const logo = safeDataImageUrl(brand.logo || "");
   const events = Array.isArray(report.events) ? report.events : [];
+  const resolvedSourceStepCount = Number(opts.sourceStepCount);
+  const sourceStepCount = Number.isFinite(resolvedSourceStepCount)
+    ? Math.max(0, Math.floor(resolvedSourceStepCount))
+    : events.length;
+  const quickPreviewNotice = isQuickPreview
+    ? `<div class="preview-banner">Quick preview: first-step snapshot (${events.length} of ${sourceStepCount} step${sourceStepCount === 1 ? "" : "s"}). Use &quot;Export HTML bundle&quot; for the full report.</div>`
+    : "";
   const exportTheme = normalizeExportTheme(report.exportTheme);
   const preset = EXPORT_THEME_PRESETS[exportTheme.preset] || EXPORT_THEME_PRESETS.extension;
   const fontStack = EXPORT_THEME_FONT_STACKS[exportTheme.font] || EXPORT_THEME_FONT_STACKS.trebuchet;
   const themeAccent = normalizeHexColor(exportTheme.accentColor, EXPORT_THEME_DEFAULTS.accentColor);
-  const tocLayoutClass = exportTheme.tocLayout === "list"
-    ? "toc-layout-list"
-    : (exportTheme.tocLayout === "minimal" ? "toc-layout-minimal" : "toc-layout-grid");
+  const tocLayoutClassByValue = Object.freeze({
+    grid: "toc-layout-grid",
+    list: "toc-layout-list",
+    minimal: "toc-layout-minimal",
+    columns: "toc-layout-columns",
+    bands: "toc-layout-bands",
+    outline: "toc-layout-outline"
+  });
+  const tocLayoutClass = tocLayoutClassByValue[exportTheme.tocLayout] || "toc-layout-grid";
   const tocClass = `toc ${tocLayoutClass}${events.length >= 100 ? " toc-dense" : ""}`;
   const tocMetaFor = (ev) => {
     if (exportTheme.tocMeta === "none") return "";
-    if (exportTheme.tocMeta === "url") return compactUrlForDisplay(ev && ev.url, 56);
+    if (exportTheme.tocMeta === "url") return String((ev && ev.url) || "");
     return hostFromUrl(ev && ev.url);
   };
 
   const tocRows = events.map((ev, i) => {
-    const stepTitle = escapeHtml(shortenText(titleFor(ev), 46));
+    const stepTitle = escapeHtml(titleFor(ev));
     const metaText = escapeHtml(tocMetaFor(ev));
     return `<li><a href="#step-${i + 1}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaText ? `<span>${metaText}</span>` : ""}</li>`;
   }).join("\n");
@@ -1452,6 +1590,29 @@ body{
 .toc.toc-layout-list ol{display:block}
 .toc.toc-layout-list li{margin:0 0 4px}
 .toc.toc-layout-list li:last-child{margin-bottom:0}
+.toc.toc-layout-columns ol{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:4px 8px;
+}
+.toc.toc-layout-bands ol{display:block}
+.toc.toc-layout-bands li{
+  margin:0 0 4px;
+  border-left:4px solid var(--accent);
+  border-radius:8px;
+  background:linear-gradient(90deg,var(--paper),var(--panel));
+}
+.toc.toc-layout-bands li:last-child{margin-bottom:0}
+.toc.toc-layout-outline ol{display:block}
+.toc.toc-layout-outline li{
+  margin:0 0 6px;
+  border-style:dashed;
+  border-width:1px;
+  border-color:var(--edge);
+  border-radius:9px;
+  background:transparent;
+}
+.toc.toc-layout-outline li:last-child{margin-bottom:0}
 .toc.toc-layout-minimal{
   background:transparent;
   box-shadow:none;
@@ -1459,13 +1620,13 @@ body{
 }
 .toc.toc-layout-minimal ol{display:block}
 .toc.toc-layout-minimal li{
-  border:none;
-  border-bottom:1px dashed var(--edge);
-  border-radius:0;
-  background:transparent;
-  padding:3px 0;
+  border:1px solid var(--edge);
+  border-radius:8px;
+  background:linear-gradient(180deg,var(--paper),transparent);
+  padding:4px 6px;
+  margin:0 0 4px;
 }
-.toc.toc-layout-minimal li:last-child{border-bottom:none}
+.toc.toc-layout-minimal li:last-child{margin-bottom:0}
 .toc li{
   border:1px solid var(--edge);
   border-radius:7px;
@@ -1479,9 +1640,9 @@ body{
   text-decoration:none;
   font-size:10.5px;
   line-height:1.2;
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
+  white-space:normal;
+  word-break:break-word;
+  overflow-wrap:anywhere;
 }
 .toc a:hover{text-decoration:underline}
 .toc span{
@@ -1490,9 +1651,9 @@ body{
   font-size:9.5px;
   font-weight:400;
   margin-top:0;
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
+  white-space:normal;
+  word-break:break-word;
+  overflow-wrap:anywhere;
 }
 .toc.toc-dense{padding:5px 6px}
 .toc.toc-dense ol{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:2px 4px}
@@ -1554,6 +1715,16 @@ body{
 .brand img{width:44px;height:44px;object-fit:contain;border:1px solid var(--edge);border-radius:10px;background:var(--paper)}
 .brand h1{margin:0;font-size:18px}
 .brand p{margin:0;font-size:11px;color:var(--muted)}
+.preview-banner{
+  margin:0 0 8px;
+  padding:6px 8px;
+  border:1px dashed var(--edge);
+  border-left:3px solid var(--accent);
+  border-radius:10px;
+  color:var(--muted);
+  background:linear-gradient(180deg,var(--paper),var(--panel));
+  font-size:10.5px;
+}
 .shot-wrap{position:relative;display:inline-block}
 .shot img{max-width:100%;border:1px solid var(--edge);border-radius:10px}
 .annot{position:absolute;left:0;top:0;width:100%;height:100%}
@@ -1567,6 +1738,7 @@ body{
   ${logo ? `<img src="${logo}" alt="Logo">` : ""}
   <div><h1>${title}</h1>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
 </div>
+${quickPreviewNotice}
 <section class="${tocClass}">
   <h2>Table of Contents</h2>
   <ol>${tocRows || "<li>No steps captured.</li>"}</ol>
@@ -1593,6 +1765,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const timeline = document.getElementById("timeline");
   const toc = document.getElementById("toc");
   const bundleBtn = document.getElementById("bundle");
+  const quickPreviewBtn = document.getElementById("bundle-preview");
+  const exportPreviewPanel = document.getElementById("section-export-preview");
+  const exportPreviewFrame = document.getElementById("export-preview-frame");
+  const exportPreviewRefresh = document.getElementById("export-preview-refresh");
+  const exportPreviewHide = document.getElementById("export-preview-hide");
   const rawBundleBtn = document.getElementById("bundle-raw");
   const importMode = document.getElementById("import-mode");
   const importBtn = document.getElementById("bundle-import");
@@ -1601,6 +1778,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const brandLogo = document.getElementById("brand-logo");
   const brandTitle = document.getElementById("brand-title");
   const brandSubtitle = document.getElementById("brand-subtitle");
+  const builderAppIcon = document.getElementById("builder-app-icon");
+  const builderAppTitle = document.getElementById("builder-app-title");
+  const builderAppDescription = document.getElementById("builder-app-description");
+  const builderContentDescription = document.getElementById("builder-content-description");
+  const builderContextPill = document.getElementById("builder-context-pill");
   const brandUpload = document.getElementById("brand-upload");
   const brandRemove = document.getElementById("brand-remove");
   const exportThemePreset = document.getElementById("export-theme-preset");
@@ -1621,6 +1803,46 @@ document.addEventListener("DOMContentLoaded", async () => {
   const idx = Math.max(0, Math.min(reports.length - 1, Number(idxParam || 0)));
   const report = reports[idx];
 
+  function pickManifestIconPath(manifest) {
+    if (!manifest || !manifest.icons || typeof manifest.icons !== "object") return "";
+    const iconMap = manifest.icons;
+    if (iconMap["48"]) return iconMap["48"];
+    if (iconMap["32"]) return iconMap["32"];
+    if (iconMap["16"]) return iconMap["16"];
+    const sized = Object.keys(iconMap)
+      .map((k) => Number(k))
+      .filter((n) => Number.isFinite(n))
+      .sort((a, b) => b - a);
+    if (sized.length) return String(iconMap[String(sized[0])] || "");
+    const firstKey = Object.keys(iconMap)[0];
+    return firstKey ? String(iconMap[firstKey] || "") : "";
+  }
+
+  function syncBuilderIdentity() {
+    const manifest = typeof browser !== "undefined" && browser.runtime && typeof browser.runtime.getManifest === "function"
+      ? browser.runtime.getManifest()
+      : null;
+    if (!manifest) return;
+    const appName = String(manifest.name || "").trim();
+    const appDescription = String(manifest.description || "").trim();
+    const appVersion = String(manifest.version || "").trim();
+    const iconPath = pickManifestIconPath(manifest);
+
+    if (builderAppTitle && appName) builderAppTitle.textContent = appName;
+    if (builderAppDescription && appDescription) builderAppDescription.textContent = appDescription;
+    if (builderContentDescription) builderContentDescription.textContent = DEFAULT_CONTENT_SYSTEM_DESCRIPTION;
+    if (builderContextPill && appVersion) builderContextPill.textContent = `v${appVersion}`;
+    if (builderAppIcon) {
+      if (iconPath) builderAppIcon.src = iconPath;
+      builderAppIcon.width = 16;
+      builderAppIcon.height = 16;
+      builderAppIcon.style.width = "16px";
+      builderAppIcon.style.height = "16px";
+    }
+  }
+
+  syncBuilderIdentity();
+
   const metaNode = document.getElementById("meta");
   function refreshMeta() {
     const activeReport = reports[idx];
@@ -1628,8 +1850,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     const shownSteps = activeReport && Array.isArray(activeReport.events) ? activeReport.events.length : 0;
     const sess = activeReport && activeReport.sessionId ? activeReport.sessionId : "n/a";
     if (metaNode) {
-      metaNode.textContent =
-        `Saved reports: ${reports.length} | Showing: ${shownAt} | Steps: ${shownSteps} | Session: ${sess}`;
+      const roboticSummary = `Saved reports: ${reports.length} | Showing: ${shownAt} | Steps: ${shownSteps} | Session: ${sess}`;
+      metaNode.setAttribute("title", roboticSummary);
+      metaNode.setAttribute("aria-label", `Capture summary quick reference. ${roboticSummary}`);
     }
   }
   refreshMeta();
@@ -1638,6 +1861,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const DENSE_LAYOUT_THRESHOLD = 100;
   const ANNOTATION_SESSION_IDLE_MS = 15_000;
   let activeAnnotationTeardown = null;
+  let previewRefreshTimer = null;
 
   function normalizeTheme(theme) {
     return String(theme || "").toLowerCase() === "dark" ? "dark" : "light";
@@ -1819,9 +2043,24 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (select) {
     select.innerHTML = "";
+    function reportHistoryName(entry, index) {
+      const rawTitle = entry && entry.brand && entry.brand.title ? String(entry.brand.title).trim() : "";
+      if (rawTitle) return rawTitle;
+      const firstEvent = entry && Array.isArray(entry.events) && entry.events.length ? entry.events[0] : null;
+      if (firstEvent) {
+        const tabTitle = firstEvent.tabTitle ? String(firstEvent.tabTitle).trim() : "";
+        if (tabTitle) return tabTitle;
+        const host = hostFromUrl(firstEvent.url || "");
+        if (host) return host;
+      }
+      return `Report ${index + 1}`;
+    }
     reports.forEach((r, i) => {
       const opt = document.createElement("option");
-      const label = `${i + 1}. ${new Date(r.createdAt || Date.now()).toLocaleString()} (${(r.events || []).length} steps)`;
+      const reportName = reportHistoryName(r, i);
+      const shownAt = new Date(r.createdAt || Date.now()).toLocaleString();
+      const stepCount = (r.events || []).length;
+      const label = `${i + 1}. ${reportName} (${stepCount} steps • ${shownAt})`;
       opt.value = String(i);
       opt.textContent = label;
       if (i === idx) opt.selected = true;
@@ -1855,10 +2094,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     exportThemeLayout,
     exportThemeMeta,
     exportThemeAccent,
-    exportThemeReset
+    exportThemeReset,
+    quickPreviewBtn,
+    exportPreviewRefresh,
+    exportPreviewHide
   ].filter(Boolean);
   if (!hasReport) {
     exportThemeControls.forEach((node) => { node.disabled = true; });
+    hideInlinePreview();
   }
 
   function syncExportThemeControls() {
@@ -1875,17 +2118,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   syncExportThemeControls();
 
   if (hasReport && brandTitle) {
-    brandTitle.textContent = (report.brand && report.brand.title) || "UI Workflow Report";
+    brandTitle.textContent = (report.brand && report.brand.title) || DEFAULT_REPORT_TITLE;
     brandTitle.addEventListener("blur", async () => {
-      report.brand.title = brandTitle.textContent.trim();
+      const nextTitle = brandTitle.textContent.trim() || DEFAULT_REPORT_TITLE;
+      brandTitle.textContent = nextTitle;
+      report.brand.title = nextTitle;
       await saveReports(reports);
       updateAux();
     });
   }
   if (hasReport && brandSubtitle) {
-    brandSubtitle.textContent = (report.brand && report.brand.subtitle) || "Procedure walkthrough";
+    brandSubtitle.textContent = (report.brand && report.brand.subtitle) || DEFAULT_REPORT_SUBTITLE;
     brandSubtitle.addEventListener("blur", async () => {
-      report.brand.subtitle = brandSubtitle.textContent.trim();
+      const nextSubtitle = brandSubtitle.textContent.trim() || DEFAULT_REPORT_SUBTITLE;
+      brandSubtitle.textContent = nextSubtitle;
+      report.brand.subtitle = nextSubtitle;
       await saveReports(reports);
     });
   }
@@ -1935,6 +2182,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     report.exportTheme = next;
     syncExportThemeControls();
     await saveReports(reports);
+    scheduleInlinePreviewRefresh();
   }
 
   if (hasReport && exportThemePreset) {
@@ -1965,6 +2213,75 @@ document.addEventListener("DOMContentLoaded", async () => {
       typeFilter ? typeFilter.value : "all",
       urlFilter ? urlFilter.value : ""
     );
+  }
+
+  function buildQuickPreviewReport() {
+    if (!hasReport || !Array.isArray(report.events) || !report.events.length) return null;
+    const visibleEvents = getVisibleEvents();
+    const sourceEvents = visibleEvents.length ? visibleEvents : report.events;
+    const firstEvent = sourceEvents[0];
+    if (!firstEvent) return null;
+
+    const previewReport = cloneJson(report);
+    previewReport.events = [cloneJson(firstEvent)];
+    if (!isPlainObject(previewReport.brand)) previewReport.brand = {};
+    const suffix = "Quick preview (first-step snapshot)";
+    const currentSubtitle = String(previewReport.brand.subtitle || "").trim();
+    if (!currentSubtitle) {
+      previewReport.brand.subtitle = suffix;
+    } else if (!currentSubtitle.toLowerCase().includes("quick preview")) {
+      previewReport.brand.subtitle = `${currentSubtitle} • ${suffix}`;
+    }
+
+    return {
+      report: previewReport,
+      sourceStepCount: sourceEvents.length
+    };
+  }
+
+  function hideInlinePreview() {
+    if (previewRefreshTimer) {
+      clearTimeout(previewRefreshTimer);
+      previewRefreshTimer = null;
+    }
+    if (exportPreviewPanel) {
+      exportPreviewPanel.open = false;
+    }
+    if (exportPreviewFrame) exportPreviewFrame.srcdoc = "";
+  }
+
+  function renderInlineQuickPreview(showPanel) {
+    if (!hasReport) {
+      setImportStatus("No report available to preview.", true);
+      return false;
+    }
+    if (!exportPreviewPanel || !exportPreviewFrame) {
+      setImportStatus("Inline preview container is unavailable.", true);
+      return false;
+    }
+    const preview = buildQuickPreviewReport();
+    if (!preview || !preview.report || !Array.isArray(preview.report.events) || !preview.report.events.length) {
+      setImportStatus("No steps available for quick preview.", true);
+      return false;
+    }
+    const html = buildExportHtml(preview.report, {
+      quickPreview: true,
+      sourceStepCount: preview.sourceStepCount
+    });
+    if (showPanel) {
+      exportPreviewPanel.open = true;
+    }
+    exportPreviewFrame.srcdoc = html;
+    return true;
+  }
+
+  function scheduleInlinePreviewRefresh() {
+    if (!hasReport || !exportPreviewPanel || !exportPreviewPanel.open) return;
+    if (previewRefreshTimer) clearTimeout(previewRefreshTimer);
+    previewRefreshTimer = setTimeout(() => {
+      previewRefreshTimer = null;
+      renderInlineQuickPreview(false);
+    }, 140);
   }
 
   function updateAux(eventsOverride) {
@@ -2012,6 +2329,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       onDragDrop: (draggedEv, targetEv, place, context) => { dragDropEventAndRefresh(draggedEv, targetEv, place, context); }
     });
     renderTableOfContents(toc, visibleEvents);
+    scheduleInlinePreviewRefresh();
   }
 
   function render() {
@@ -2498,6 +2816,41 @@ document.addEventListener("DOMContentLoaded", async () => {
       const filename = `ui-report-${new Date().toISOString().replace(/[:.]/g, "-")}.html`;
       await downloadBlob(blob, filename);
       setImportStatus(`Exported HTML bundle: ${filename}`, false);
+    });
+  }
+
+  if (quickPreviewBtn) {
+    quickPreviewBtn.addEventListener("click", () => {
+      if (renderInlineQuickPreview(true)) {
+        setImportStatus("Rendered inline quick preview (first-step snapshot).", false);
+      }
+    });
+  }
+
+  if (exportPreviewRefresh) {
+    exportPreviewRefresh.addEventListener("click", () => {
+      if (renderInlineQuickPreview(true)) {
+        setImportStatus("Refreshed inline quick preview.", false);
+      }
+    });
+  }
+
+  if (exportPreviewHide) {
+    exportPreviewHide.addEventListener("click", () => {
+      hideInlinePreview();
+      setImportStatus("Inline quick preview collapsed.", false);
+    });
+  }
+
+  if (exportPreviewPanel) {
+    exportPreviewPanel.addEventListener("toggle", () => {
+      if (!exportPreviewPanel.open && previewRefreshTimer) {
+        clearTimeout(previewRefreshTimer);
+        previewRefreshTimer = null;
+      }
+      if (exportPreviewPanel.open) {
+        renderInlineQuickPreview(false);
+      }
     });
   }
 

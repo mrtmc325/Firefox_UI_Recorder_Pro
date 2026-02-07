@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.8.0
+# UI Workflow Recorder Pro (Firefox) v1.9.0
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.8.0`
+- Version: `1.9.0`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -17,6 +17,13 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Sleek navigation rail with section jump links
   - Expand/collapse all panels
   - Fast docs link directly from the editor
+  - Product identity header synced from extension manifest (name, description, icon, version)
+  - Compact addon-sized icon/version badge for lower visual noise
+  - Quick info tooltip for saved report/session stats
+- Embedded quick export preview:
+  - Collapsible in-page preview section
+  - Auto refresh while expanded when filters/theme change
+  - Added to builder navigation
 - Reordering and merge workflows:
   - Move up/down controls per step
   - Cross-tab timeline drag/drop with flow-in placement
@@ -26,8 +33,8 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Screenshot-based obfuscation
   - Idle teardown and flattened save-on-close for memory stability
 - Export style system:
-  - Theme presets, font choices, TOC layout modes, and accent color
-  - Compact TOC and dense behavior for large reports
+  - 15 palette presets, 15 font choices, Table of Contents layout modes, and accent color
+  - Compact TOC controls with full title/URL detail options and dense behavior for large reports
   - Professional metadata chips (friendly timestamp + compact URL label)
   - Right-side path token removed from exported rows
 - Raw ZIP export/import/merge for future re-editing.
@@ -102,8 +109,8 @@ Use when generating professional deliverables from the same capture data.
 - In report builder, set:
   - `Export theme > Palette`
   - `Export theme > Font`
-  - `Export theme > TOC layout`
-  - `Export theme > TOC details`
+  - `Export theme > Table of Contents layout`
+  - `Export theme > Table of Contents details`
   - `Export theme > Accent`
 
 Expected behavior:

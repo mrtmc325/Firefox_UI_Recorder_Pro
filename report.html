@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>UI Workflow Report</title>
+  <title>UI Workflow Recorder Pro - Report Builder</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="report">
@@ -19,6 +19,7 @@
         </div>
         <nav class="report-nav-links">
           <a class="nav-link" href="#section-controls">Controls</a>
+          <a class="nav-link" href="#section-export-preview">Quick Preview</a>
           <a class="nav-link" href="#section-toc">Table of Contents</a>
           <a class="nav-link" href="#section-hints">Replay Hints</a>
           <a class="nav-link" href="#section-timeline">Cross-tab Timeline</a>
@@ -30,17 +31,39 @@
 
     <main class="report-main">
       <section id="section-controls" class="report-section report-header noprint">
-        <div class="section-heading">
-          <h2>Report Builder</h2>
-          <span class="section-pill">Editor</span>
+        <div class="section-heading section-heading-product">
+          <div class="section-product">
+            <div class="section-product-copy">
+              <h2 id="builder-app-title">UI Workflow Recorder Pro</h2>
+              <p id="builder-app-description" class="section-product-description">
+                Record UI workflows with clean step titles, text-only redaction, and advanced reporting tools.
+              </p>
+              <p id="builder-content-description" class="section-product-description section-product-description-secondary">
+                UI workflow capture
+              </p>
+            </div>
+          </div>
+          <div class="section-context">
+            <span class="section-context-badge">
+              <img
+                id="builder-app-icon"
+                class="section-product-icon"
+                src="icons/icon.svg"
+                alt="UI Workflow Recorder Pro icon"
+                width="16"
+                height="16"
+              />
+              <span id="builder-context-pill" class="section-pill">Editor</span>
+            </span>
+          </div>
         </div>
 
         <div class="brand-header">
           <div class="brand-left">
             <img id="brand-logo" class="brand-logo" alt="Logo" />
             <div class="brand-text">
-              <div id="brand-title" class="brand-title" contenteditable="true">UI Workflow Report</div>
-              <div id="brand-subtitle" class="brand-subtitle" contenteditable="true">Procedure walkthrough</div>
+              <div id="brand-title" class="brand-title" contenteditable="true">Report title</div>
+              <div id="brand-subtitle" class="brand-subtitle" contenteditable="true">Report short description</div>
             </div>
           </div>
           <div class="brand-actions">
@@ -49,9 +72,17 @@
           </div>
         </div>
 
-        <div id="meta" class="step-meta"></div>
+        <div class="report-meta-quick">
+          <button
+            id="meta"
+            type="button"
+            class="meta-info-btn"
+            aria-label="Capture summary quick reference"
+            title="Capture summary quick reference"
+          >i</button>
+        </div>
         <div class="hint">
-          Titles are cleaned automatically. Screenshots are unmodified; only report text is redacted.
+          Step titles are auto-cleaned for readability. Screenshots remain original; only report text is redacted.
         </div>
 
         <div class="toolbar">
@@ -102,6 +133,7 @@
           </button>
 
           <button id="bundle" class="btn">Export HTML bundle</button>
+          <button id="bundle-preview" class="btn ghost">Quick HTML preview</button>
           <button id="bundle-raw" class="btn">Export raw ZIP</button>
           <a id="docs-link" class="btn ghost docs-link-inline" href="docs.html" target="_blank" rel="noopener">Docs</a>
 
@@ -124,6 +156,18 @@
                 <option value="extension">Extension light</option>
                 <option value="mist">Cool mist</option>
                 <option value="slate">Slate calm</option>
+                <option value="aurora">Aurora aqua</option>
+                <option value="seabreeze">Sea breeze</option>
+                <option value="sunset">Warm sunset</option>
+                <option value="sandstone">Sandstone</option>
+                <option value="forest">Forest clean</option>
+                <option value="pine">Pine modern</option>
+                <option value="charcoal">Charcoal dark</option>
+                <option value="midnight">Midnight blue</option>
+                <option value="copper">Copper glow</option>
+                <option value="lavender">Lavender glass</option>
+                <option value="rose">Rose calm</option>
+                <option value="mint">Mint fresh</option>
               </select>
             </label>
             <label class="row">
@@ -133,18 +177,32 @@
                 <option value="system">System sans</option>
                 <option value="serif">Readable serif</option>
                 <option value="mono">Mono technical</option>
+                <option value="georgia">Georgia classic</option>
+                <option value="palatino">Palatino book</option>
+                <option value="times">Times formal</option>
+                <option value="arial">Arial clean</option>
+                <option value="verdana">Verdana ui</option>
+                <option value="tahoma">Tahoma compact</option>
+                <option value="calibri">Calibri modern</option>
+                <option value="gill">Gill sans</option>
+                <option value="optima">Optima elegant</option>
+                <option value="cambria">Cambria readable</option>
+                <option value="courier">Courier mono</option>
               </select>
             </label>
             <label class="row">
-              TOC layout
+              Table of Contents layout
               <select id="export-theme-layout">
                 <option value="grid">Compact cards</option>
                 <option value="list">Single list</option>
                 <option value="minimal">Minimal numbers</option>
+                <option value="columns">Two-column detail</option>
+                <option value="bands">Banded rows</option>
+                <option value="outline">Outline blocks</option>
               </select>
             </label>
             <label class="row">
-              TOC details
+              Table of Contents details
               <select id="export-theme-meta">
                 <option value="host">Host only</option>
                 <option value="url">Compact URL</option>
@@ -157,12 +215,28 @@
             </label>
             <button id="export-theme-reset" class="btn ghost export-theme-reset" type="button">Reset export theme</button>
           </div>
-          <div class="hint">These settings apply to exported HTML bundles only.</div>
+          <div class="hint">These settings apply to quick preview and exported HTML bundles.</div>
         </div>
         <div id="import-status" class="hint"></div>
       </section>
 
-      <h1 class="print-title">UI Workflow Report</h1>
+      <h1 class="print-title">Report title</h1>
+
+      <details id="section-export-preview" class="report-section report-panel export-preview-panel noprint">
+        <summary class="panel-summary">
+          <span class="panel-title">Quick Export Preview</span>
+        </summary>
+        <div class="panel-body export-preview-body">
+          <div class="export-preview-head">
+            <div class="export-preview-title">First-step snapshot using current export theme</div>
+            <div class="export-preview-actions">
+              <button id="export-preview-refresh" class="btn subtle btn-small" type="button">Refresh</button>
+              <button id="export-preview-hide" class="btn ghost btn-small" type="button">Hide</button>
+            </div>
+          </div>
+          <iframe id="export-preview-frame" class="export-preview-frame" title="Quick export preview"></iframe>
+        </div>
+      </details>
 
       <details id="section-toc" class="report-section report-panel toc-section" open>
         <summary class="panel-summary">
