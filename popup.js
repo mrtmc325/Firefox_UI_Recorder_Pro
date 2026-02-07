@@ -48,6 +48,7 @@ async function refresh() {
 
   document.getElementById("debounce").value = st.settings?.screenshotDebounceMs ?? 900;
   document.getElementById("capture-mode").value = st.settings?.captureMode ?? "all";
+  document.getElementById("active-tab-only").checked = st.settings?.activeTabOnly !== false;
   document.getElementById("diff").checked = !!st.settings?.diffEnabled;
   document.getElementById("redact").checked = !!st.settings?.redactEnabled;
   document.getElementById("redact-user").checked = !!st.settings?.redactLoginUsernames;
@@ -92,6 +93,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("capture-mode").addEventListener("change", async (e) => {
     await updateSettings({ captureMode: String(e.target.value || "all") });
+    await refresh();
+  });
+  document.getElementById("active-tab-only").addEventListener("change", async (e) => {
+    await updateSettings({ activeTabOnly: !!e.target.checked });
     await refresh();
   });
   document.getElementById("diff").addEventListener("change", async (e) => {

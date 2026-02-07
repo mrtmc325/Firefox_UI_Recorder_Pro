@@ -8,16 +8,17 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.6.0. This release focuses on recorder stability, memory control, improved reporting, and editable import/export workflows.</p>
+    <p>Version 1.7.0. This release extends capture/report stability with stronger editor memory controls, reordering workflows, and report theme improvements.</p>
 
-    <h2>Version Notes (v1.6.0)</h2>
+    <h2>Version Notes (v1.7.0)</h2>
     <ul>
-      <li>Start/stop capture stability improved with stronger runtime/storage flow handling.</li>
-      <li>Dynamic UI capture now uses a controlled screenshot interval to reduce memory pressure.</li>
-      <li>Raw ZIP report export/import/merge added for future editing.</li>
-      <li>Table of Contents added to report UI and exported HTML.</li>
-      <li>Annotation tools upgraded: live previews, shape sizing labels, better undo, screenshot-based obfuscation.</li>
-      <li>Long-session screenshot compaction added to control memory growth.</li>
+      <li>Report editor now supports practical reordering for merge workflows (step move controls and timeline drag/drop).</li>
+      <li>Cross-tab timeline supports Draw + Swap controls directly in timeline cards.</li>
+      <li>Annotation editor lifecycle hardened for large reports:
+        lazy allocation on open, idle teardown, and close-to-commit screenshot flattening.</li>
+      <li>Replay hints converted to actionable shortcuts (filter/jump helpers).</li>
+      <li>Report theme toggle added with icon preview (sun/clouds and moon/clouds) plus a darker low-glare dark mode.</li>
+      <li>All existing v1.6.0 recorder stability and export/import improvements are retained.</li>
     </ul>
 
     <h2>Install (Temporary Add-on)</h2>
@@ -37,6 +38,15 @@
     </ol>
 
     <h2>Configuration How-To Templates</h2>
+
+    <h3>Template 0: Strict Active Tab Following</h3>
+    <p>Use when multiple tabs/windows are open and only foreground interactions should be captured.</p>
+    <ul>
+      <li><strong>Follow active tab only (strict)</strong>: On</li>
+      <li><strong>Capture mode</strong>: All events</li>
+      <li><strong>Auto-resume on tab focus</strong>: On</li>
+      <li><strong>Limitation</strong>: when Firefox has no focused window, capture is temporarily paused until focus returns.</li>
+    </ul>
 
     <h3>Template A: Dynamic Dashboard / SPA</h3>
     <p>Use for pages with live updates, modals, and in-place content refreshes.</p>
@@ -69,6 +79,15 @@
       <li><strong>Prune noisy input steps</strong>: On</li>
     </ul>
 
+    <h3>Template D: Merge + Reorder Publishing Workflow</h3>
+    <p>Use when combining multiple captures into one polished report.</p>
+    <ul>
+      <li><strong>Import raw ZIP</strong>: Merge into current report</li>
+      <li><strong>Cross-tab timeline</strong>: Drag and drop to reposition timeline items</li>
+      <li><strong>Step list</strong>: Use Move up / Move down for final ordering</li>
+      <li><strong>Theme toggle</strong>: Choose light/dark during editing before export</li>
+    </ul>
+
     <h2>Dynamic Screenshot Rule (ui-change)</h2>
     <ul>
       <li>If page watch interval is less than <code>10000ms</code>, forced screenshot interval is:</li>
@@ -81,6 +100,8 @@
       <li>Edit step titles and notes inline.</li>
       <li>Annotate screenshots with pen/highlight/rect/outline/obfuscate/text.</li>
       <li>Use Undo/Clear on annotation layers.</li>
+      <li>Reorder with drag/drop in timeline and Move up/Move down in the step list.</li>
+      <li>Use the theme icon toggle to switch light/dark while editing.</li>
     </ul>
 
     <h2>Report Export / Import</h2>

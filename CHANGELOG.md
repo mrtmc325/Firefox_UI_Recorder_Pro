@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.7.0 - 2026-02-07
+
+### Added
+- Report editor theme toggle with icon preview:
+  - rounded-square sun/clouds vs moon/clouds control
+  - hover preview of the opposite theme before switching
+- Cross-tab timeline editing actions:
+  - Draw action from timeline cards
+  - Swap controls and drag/drop reordering between sections
+- Reordering controls in the step editor to support merged report alignment.
+
+### Changed
+- Dark mode visual design moved from navy tones to a darker near-black editing palette.
+- Replay hints converted from passive chips to actionable shortcuts (filter/jump helpers).
+- In-extension docs and GitHub docs updated with v1.7.0 template workflows.
+
+### Fixed
+- Timeline drag/drop placement behavior for middle/top insertions now preserves intended target position.
+- Improved strict active-tab-follow handling during cross-tab interaction sequences.
+
+### Performance / Memory
+- Annotation resources are now provisioned only when editor tools are opened.
+- Annotation sessions auto-teardown after idle periods to release canvas/event resources.
+- Close-editor path now commits a flattened screenshot update and drops superseded frame data.
+- Annotation persistence is debounced to reduce storage churn during intensive drawing.
+
 ## v1.6.0 - 2026-02-07
 
 ### Added

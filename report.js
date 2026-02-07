@@ -26,6 +26,7 @@ function safeDataImageUrl(value) {
 
 const RAW_BUNDLE_FORMAT = "uir-report-bundle";
 const RAW_BUNDLE_VERSION = 1;
+const REPORT_THEME_STORAGE_KEY = "__uiRecorderReportTheme";
 
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -316,10 +317,35 @@ function filterEvents(events, query, typeFilter, urlFilter) {
   });
 }
 
+function hostFromUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    return new URL(raw).host || "";
+  } catch (_) {
+    return "";
+  }
+}
+
 function buildHints(events) {
   const fields = new Set();
   const buttons = new Set();
+  const typeCounts = new Map();
+  const hostCounts = new Map();
+  let firstSubmitStepId = "";
+  let firstNavStepId = "";
+  let firstNoShotStepId = "";
+  let screenshotCount = 0;
   events.forEach(ev => {
+    const tpe = String((ev && ev.type) || "event");
+    typeCounts.set(tpe, (typeCounts.get(tpe) || 0) + 1);
+    const host = hostFromUrl(ev && ev.url);
+    if (host) hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
+    if (ev && ev.screenshot) screenshotCount++;
+    if (!firstSubmitStepId && tpe === "submit" && ev && ev.stepId) firstSubmitStepId = ev.stepId;
+    if (!firstNavStepId && tpe === "nav" && ev && ev.stepId) firstNavStepId = ev.stepId;
+    if (!firstNoShotStepId && ev && ev.stepId && !ev.screenshot) firstNoShotStepId = ev.stepId;
+
     if (ev.type === "input" || ev.type === "change") {
       const t = cleanTitle(ev.label || ev.human || "");
       if (t) fields.add(t);
@@ -329,17 +355,93 @@ function buildHints(events) {
       if (t) buttons.add(t);
     }
   });
-  return { fields: Array.from(fields), buttons: Array.from(buttons) };
+  return {
+    fields: Array.from(fields),
+    buttons: Array.from(buttons),
+    typeCounts: Array.from(typeCounts.entries()).sort((a, b) => b[1] - a[1]),
+    hostCounts: Array.from(hostCounts.entries()).sort((a, b) => b[1] - a[1]),
+    firstSubmitStepId,
+    firstNavStepId,
+    firstNoShotStepId,
+    total: events.length,
+    screenshotCount
+  };
 }
 
-function renderHints(target, events) {
+function renderHints(target, events, options) {
   const hints = buildHints(events);
   target.innerHTML = "";
+
+  const applyTypeFilter = options && typeof options.applyTypeFilter === "function" ? options.applyTypeFilter : null;
+  const applyUrlFilter = options && typeof options.applyUrlFilter === "function" ? options.applyUrlFilter : null;
+  const applySearch = options && typeof options.applySearch === "function" ? options.applySearch : null;
+  const clearFilters = options && typeof options.clearFilters === "function" ? options.clearFilters : null;
+  const jumpToStepId = options && typeof options.jumpToStepId === "function" ? options.jumpToStepId : null;
+  const currentTypeFilter = options && options.currentTypeFilter ? String(options.currentTypeFilter) : "all";
+  const currentUrlFilter = options && options.currentUrlFilter ? String(options.currentUrlFilter).trim() : "";
+
+  const summary = el(
+    "div",
+    "hint",
+    `Replay shortcuts: ${hints.total} visible steps, ${hints.screenshotCount} with screenshots.`
+  );
+  target.appendChild(summary);
+
   const list = el("div", "hint-list");
-  hints.fields.forEach(f => list.appendChild(el("div", "chip", `Field: ${f}`)));
-  hints.buttons.forEach(b => list.appendChild(el("div", "chip", `Action: ${b}`)));
-  if (!hints.fields.length && !hints.buttons.length) {
-    target.appendChild(el("div", "hint", "No hints yet."));
+  const addActionChip = (label, onClick, active) => {
+    const btn = el("button", `chip hint-action${active ? " active" : ""}`, label);
+    btn.type = "button";
+    btn.addEventListener("click", onClick);
+    list.appendChild(btn);
+  };
+
+  if (clearFilters) {
+    addActionChip("Clear filters", () => clearFilters(), false);
+  }
+
+  if (applyTypeFilter) {
+    const topTypes = hints.typeCounts.slice(0, 6);
+    topTypes.forEach(([type, count]) => {
+      addActionChip(
+        `Type: ${type} (${count})`,
+        () => applyTypeFilter(type),
+        currentTypeFilter === type
+      );
+    });
+  }
+
+  if (applyUrlFilter) {
+    const topHosts = hints.hostCounts.slice(0, 3);
+    topHosts.forEach(([host, count]) => {
+      addActionChip(
+        `URL: ${host} (${count})`,
+        () => applyUrlFilter(host),
+        !!currentUrlFilter && currentUrlFilter === host
+      );
+    });
+  }
+
+  if (jumpToStepId && hints.firstSubmitStepId) {
+    addActionChip("Jump: first submit", () => jumpToStepId(hints.firstSubmitStepId), false);
+  }
+  if (jumpToStepId && hints.firstNavStepId) {
+    addActionChip("Jump: first nav", () => jumpToStepId(hints.firstNavStepId), false);
+  }
+  if (jumpToStepId && hints.firstNoShotStepId) {
+    addActionChip("Jump: first without screenshot", () => jumpToStepId(hints.firstNoShotStepId), false);
+  }
+
+  if (applySearch) {
+    hints.fields.slice(0, 4).forEach((f) => {
+      addActionChip(`Find field: ${f}`, () => applySearch(f), false);
+    });
+    hints.buttons.slice(0, 4).forEach((b) => {
+      addActionChip(`Find action: ${b}`, () => applySearch(b), false);
+    });
+  }
+
+  if (!list.children.length) {
+    target.appendChild(el("div", "hint", "No replay shortcuts available for current filters."));
   } else {
     target.appendChild(list);
   }
@@ -368,7 +470,13 @@ function renderTableOfContents(target, events) {
   target.appendChild(list);
 }
 
-function renderTimeline(target, events) {
+function renderTimeline(target, events, options) {
+  const onMove = options && typeof options.onMove === "function" ? options.onMove : null;
+  const canMove = options && typeof options.canMove === "function" ? options.canMove : null;
+  const onDraw = options && typeof options.onDraw === "function" ? options.onDraw : null;
+  const onDragDrop = options && typeof options.onDragDrop === "function" ? options.onDragDrop : null;
+  const getColumnContext = options && typeof options.getColumnContext === "function" ? options.getColumnContext : null;
+
   target.innerHTML = "";
   const byTab = new Map();
   events.forEach(ev => {
@@ -376,23 +484,194 @@ function renderTimeline(target, events) {
     if (!byTab.has(key)) byTab.set(key, []);
     byTab.get(key).push(ev);
   });
+
   const tabs = Array.from(byTab.keys());
   target.style.gridTemplateColumns = `repeat(${Math.max(1, tabs.length)}, minmax(180px, 1fr))`;
+
+  let draggedEvent = null;
+  let draggedBlock = null;
+  const dropTargets = [];
+
+  function clearDropIndicators() {
+    dropTargets.forEach((n) => {
+      if (!n || !n.classList) return;
+      n.classList.remove("timeline-drop-before");
+      n.classList.remove("timeline-drop-after");
+      n.classList.remove("timeline-column-drop");
+    });
+  }
+
+  function finishDrag() {
+    clearDropIndicators();
+    if (draggedBlock) {
+      draggedBlock.classList.remove("timeline-drag-origin");
+      draggedBlock = null;
+    }
+    draggedEvent = null;
+  }
+
+  function toElement(target) {
+    if (!target) return null;
+    if (target.nodeType === 1) return target;
+    if (target.parentElement) return target.parentElement;
+    return null;
+  }
+
+  function closestTimelineBlock(target) {
+    const node = toElement(target);
+    if (!node || !node.closest) return null;
+    return node.closest(".timeline-event");
+  }
+
+  function resolveColumnPlacement(col, clientY) {
+    const blocks = Array.from(col.querySelectorAll(".timeline-event")).filter((block) => block && block !== draggedBlock && block.__timelineEvent);
+    if (!blocks.length) {
+      return { targetEvent: null, place: "after", markerBlock: null };
+    }
+    for (const block of blocks) {
+      const rect = block.getBoundingClientRect();
+      const mid = rect.top + (rect.height / 2);
+      if (clientY < mid) {
+        return { targetEvent: block.__timelineEvent, place: "before", markerBlock: block };
+      }
+    }
+    const last = blocks[blocks.length - 1];
+    return { targetEvent: last.__timelineEvent, place: "after", markerBlock: last };
+  }
+
+  function enableColumnDrop(col, columnContext) {
+    if (!onDragDrop) return;
+    col.addEventListener("dragenter", (event) => {
+      if (!draggedEvent) return;
+      event.preventDefault();
+      col.classList.add("timeline-column-drop");
+    });
+    col.addEventListener("dragover", (event) => {
+      if (!draggedEvent) return;
+      event.preventDefault();
+      clearDropIndicators();
+      col.classList.add("timeline-column-drop");
+      const placement = resolveColumnPlacement(col, event.clientY);
+      if (placement.markerBlock) {
+        placement.markerBlock.classList.add(placement.place === "before" ? "timeline-drop-before" : "timeline-drop-after");
+      }
+    });
+    col.addEventListener("dragleave", (event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) {
+        col.classList.remove("timeline-column-drop");
+      }
+    });
+    col.addEventListener("drop", (event) => {
+      if (!draggedEvent) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const targetBlock = closestTimelineBlock(event.target);
+      if (targetBlock && targetBlock.__timelineEvent && targetBlock !== draggedBlock) {
+        const rect = targetBlock.getBoundingClientRect();
+        const place = event.clientY < (rect.top + rect.height / 2) ? "before" : "after";
+        Promise.resolve(onDragDrop(draggedEvent, targetBlock.__timelineEvent, place, columnContext)).catch(() => {}).finally(finishDrag);
+        return;
+      }
+      const placement = resolveColumnPlacement(col, event.clientY);
+      Promise.resolve(onDragDrop(draggedEvent, placement.targetEvent, placement.place, columnContext)).catch(() => {}).finally(finishDrag);
+    });
+  }
+
   tabs.forEach(key => {
+    const colEvents = byTab.get(key);
     const col = el("div", "timeline-column");
-    const title = byTab.get(key)[0] && byTab.get(key)[0].tabTitle ? byTab.get(key)[0].tabTitle : key;
+    dropTargets.push(col);
+    const title = colEvents[0] && colEvents[0].tabTitle ? colEvents[0].tabTitle : key;
+    const columnContext = getColumnContext ? getColumnContext(key, colEvents[0]) : null;
     col.appendChild(el("div", "timeline-header", title));
-    byTab.get(key).forEach(ev => {
-      const block = el("div", "timeline-event");
+
+    enableColumnDrop(col, columnContext);
+
+    colEvents.forEach(ev => {
+      const block = el("div", "timeline-event timeline-draggable");
+      dropTargets.push(block);
+      block.__timelineEvent = ev;
+      block.draggable = !!onDragDrop;
       const stepId = ev && ev.stepId ? ev.stepId : "";
       const text = `${ev.type || "event"} — ${titleFor(ev)}`;
+      const main = el("div", "timeline-event-main");
       if (stepId) {
         const link = document.createElement("a");
         link.href = `#${stepId}`;
         link.textContent = text;
-        block.appendChild(link);
+        main.appendChild(link);
       } else {
-        block.textContent = text;
+        main.textContent = text;
+      }
+      block.appendChild(main);
+
+      if (onDragDrop) {
+        block.addEventListener("dragstart", (event) => {
+          draggedEvent = ev;
+          draggedBlock = block;
+          block.classList.add("timeline-drag-origin");
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "move";
+            try { event.dataTransfer.setData("text/plain", stepId || "timeline-event"); } catch (_) {}
+          }
+        });
+        block.addEventListener("dragend", () => {
+          finishDrag();
+        });
+        block.addEventListener("dragover", (event) => {
+          if (!draggedEvent || draggedEvent === ev) return;
+          event.preventDefault();
+          clearDropIndicators();
+          col.classList.add("timeline-column-drop");
+          const rect = block.getBoundingClientRect();
+          const place = event.clientY < (rect.top + rect.height / 2) ? "before" : "after";
+          block.classList.add(place === "before" ? "timeline-drop-before" : "timeline-drop-after");
+        });
+        block.addEventListener("drop", (event) => {
+          if (!draggedEvent || draggedEvent === ev) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const rect = block.getBoundingClientRect();
+          const place = event.clientY < (rect.top + rect.height / 2) ? "before" : "after";
+          Promise.resolve(onDragDrop(draggedEvent, ev, place, columnContext)).catch(() => {}).finally(finishDrag);
+        });
+      }
+
+      if (onMove || onDraw) {
+        const actions = el("div", "timeline-event-actions");
+        if (onDraw) {
+          const drawBtn = el("button", "btn timeline-mini-btn", "Draw");
+          drawBtn.disabled = !(stepId && ev && ev.screenshot);
+          drawBtn.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (drawBtn.disabled) return;
+            onDraw(ev, stepId);
+          });
+          actions.appendChild(drawBtn);
+        }
+        if (onMove) {
+          const upBtn = el("button", "btn ghost timeline-mini-btn", "Swap up");
+          upBtn.disabled = !!(canMove && !canMove(ev, -1));
+          upBtn.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (upBtn.disabled) return;
+            Promise.resolve(onMove(ev, -1)).catch(() => {});
+          });
+          actions.appendChild(upBtn);
+
+          const downBtn = el("button", "btn ghost timeline-mini-btn", "Swap down");
+          downBtn.disabled = !!(canMove && !canMove(ev, 1));
+          downBtn.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (downBtn.disabled) return;
+            Promise.resolve(onMove(ev, 1)).catch(() => {});
+          });
+          actions.appendChild(downBtn);
+        }
+        block.appendChild(actions);
       }
       col.appendChild(block);
     });
@@ -411,6 +690,8 @@ function hexToRgba(hex, alpha) {
 function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, reports, idx, root) {
   const ctx = canvas.getContext("2d");
   const previewCtx = previewCanvas ? previewCanvas.getContext("2d") : null;
+  const ANNOTATION_SAVE_DEBOUNCE_MS = 700;
+  let destroyed = false;
   const state = {
     mode: "pen",
     color: "#ff3b3b",
@@ -421,9 +702,12 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
     cursorX: 0,
     cursorY: 0,
     hasCursor: false,
-    pathPoints: [],
+    lastPoint: null,
+    pendingUndoSnapshot: null,
+    strokeChanged: false,
     history: []
   };
+  let persistTimer = null;
 
   function getPoint(e) {
     const rect = canvas.getBoundingClientRect();
@@ -450,24 +734,48 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
   }
 
   function restoreFromHistory() {
+    if (destroyed) return;
     const prev = state.history.pop();
     if (!prev) return;
     const annotationData = typeof prev === "string" ? prev : prev.annotation;
     if (!annotationData) return;
     const img = new Image();
     img.onload = () => {
+      if (destroyed) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       clearPreview();
       ev.annotation = annotationData;
-      saveReports(reports);
+      persistAnnotation(true);
     };
     img.src = annotationData;
   }
 
   function clearPreview() {
-    if (!previewCtx) return;
+    if (destroyed || !previewCtx) return;
     previewCtx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function persistAnnotation(immediate) {
+    const commit = async () => {
+      if (destroyed) return;
+      ev.annotation = canvas.toDataURL();
+      await saveReports(reports);
+    };
+    if (destroyed) return Promise.resolve();
+    if (immediate) {
+      if (persistTimer) {
+        clearTimeout(persistTimer);
+        persistTimer = null;
+      }
+      return commit();
+    }
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      commit().catch(() => {});
+    }, ANNOTATION_SAVE_DEBOUNCE_MS);
+    return Promise.resolve();
   }
 
   function drawSizeLabel(x, y, w, h) {
@@ -488,7 +796,7 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
   }
 
   function drawCursorFollow(x, y) {
-    if (!previewCtx || state.drawing) return;
+    if (destroyed || !previewCtx || state.drawing) return;
     clearPreview();
     if (state.mode === "pen" || state.mode === "highlight") {
       const radius = state.mode === "highlight" ? Math.max(4, state.size * 1.8) : Math.max(2, state.size * 0.8);
@@ -524,9 +832,8 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
     }
   }
 
-  function drawStroke(points, modeName, previewOnly) {
-    const target = previewOnly ? previewCtx : ctx;
-    if (!target || !points.length) return false;
+  function applyStrokeStyle(target, modeName, previewOnly) {
+    if (!target) return;
     const isHighlight = modeName === "highlight";
     target.lineCap = "round";
     target.lineJoin = "round";
@@ -534,20 +841,20 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
       ? hexToRgba(state.color, previewOnly ? 0.25 : 0.34)
       : (previewOnly ? hexToRgba(state.color, 0.5) : state.color);
     target.lineWidth = isHighlight ? Math.max(5, state.size * 2.4) : Math.max(1, state.size);
+  }
+
+  function drawStrokeSegment(target, from, to, modeName, previewOnly) {
+    if (!target || !from || !to) return false;
+    applyStrokeStyle(target, modeName, previewOnly);
     target.beginPath();
-    target.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) {
-      target.lineTo(points[i].x, points[i].y);
-    }
-    if (points.length === 1) {
-      target.lineTo(points[0].x + 0.01, points[0].y + 0.01);
-    }
+    target.moveTo(from.x, from.y);
+    target.lineTo(to.x, to.y);
     target.stroke();
     return true;
   }
 
   function drawShapePreview(currentX, currentY) {
-    if (!previewCtx) return;
+    if (destroyed || !previewCtx) return;
     clearPreview();
     const w = currentX - state.startX;
     const h = currentY - state.startY;
@@ -702,11 +1009,12 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
   }
 
   function renderCursorIfNeeded() {
-    if (!state.hasCursor || state.drawing) return;
+    if (destroyed || !state.hasCursor || state.drawing) return;
     drawCursorFollow(state.cursorX, state.cursorY);
   }
 
-  canvas.addEventListener("mousedown", (e) => {
+  const handleMouseDown = (e) => {
+    if (destroyed) return;
     const point = getPoint(e);
     state.drawing = true;
     state.startX = point.x;
@@ -714,19 +1022,23 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
     state.cursorX = point.x;
     state.cursorY = point.y;
     state.hasCursor = true;
-    state.pathPoints = [{ x: point.x, y: point.y }];
+    state.lastPoint = { x: point.x, y: point.y };
+    state.pendingUndoSnapshot = snapshotState();
+    state.strokeChanged = false;
 
     if (state.mode === "pen" || state.mode === "highlight") {
       clearPreview();
-      drawStroke(state.pathPoints, state.mode, true);
+      const dot = { x: point.x + 0.01, y: point.y + 0.01 };
+      state.strokeChanged = drawStrokeSegment(ctx, point, dot, state.mode, false) || state.strokeChanged;
       return;
     }
     if (state.mode === "rect" || state.mode === "outline" || state.mode === "obfuscate") {
       drawShapePreview(point.x, point.y);
     }
-  });
+  };
 
-  canvas.addEventListener("mousemove", (e) => {
+  const handleMouseMove = (e) => {
+    if (destroyed) return;
     const point = getPoint(e);
     state.cursorX = point.x;
     state.cursorY = point.y;
@@ -737,34 +1049,39 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
     }
 
     if (state.mode === "pen" || state.mode === "highlight") {
-      const prev = state.pathPoints[state.pathPoints.length - 1];
-      if (!prev || prev.x !== point.x || prev.y !== point.y) state.pathPoints.push({ x: point.x, y: point.y });
-      clearPreview();
-      drawStroke(state.pathPoints, state.mode, true);
+      const prev = state.lastPoint;
+      if (!prev || (prev.x === point.x && prev.y === point.y)) return;
+      state.strokeChanged = drawStrokeSegment(ctx, prev, point, state.mode, false) || state.strokeChanged;
+      state.lastPoint = { x: point.x, y: point.y };
       return;
     }
 
     if (state.mode === "rect" || state.mode === "outline" || state.mode === "obfuscate") {
       drawShapePreview(point.x, point.y);
     }
-  });
+  };
 
-  canvas.addEventListener("mouseleave", () => {
+  const handleMouseLeave = () => {
+    if (destroyed) return;
     state.hasCursor = false;
     if (!state.drawing) clearPreview();
-  });
+  };
 
-  canvas.addEventListener("mouseup", (e) => {
+  const handleMouseUp = (e) => {
+    if (destroyed) return;
     if (!state.drawing) return;
     const point = getPoint(e);
-    const undoSnapshot = snapshotState();
     let changed = false;
 
     if (state.mode === "pen" || state.mode === "highlight") {
-      const prev = state.pathPoints[state.pathPoints.length - 1];
-      if (!prev || prev.x !== point.x || prev.y !== point.y) state.pathPoints.push({ x: point.x, y: point.y });
-      changed = drawStroke(state.pathPoints, state.mode, false);
+      const prev = state.lastPoint;
+      if (prev && (prev.x !== point.x || prev.y !== point.y)) {
+        state.strokeChanged = drawStrokeSegment(ctx, prev, point, state.mode, false) || state.strokeChanged;
+      }
+      changed = !!state.strokeChanged;
+      if (changed && state.pendingUndoSnapshot) pushUndoSnapshot(state.pendingUndoSnapshot);
     } else if (state.mode === "rect" || state.mode === "outline") {
+      const undoSnapshot = state.pendingUndoSnapshot || snapshotState();
       const w = point.x - state.startX;
       const h = point.y - state.startY;
       if (Math.abs(w) > 0 || Math.abs(h) > 0) {
@@ -777,29 +1094,60 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
           ctx.fillRect(state.startX, state.startY, w, h);
         }
         changed = true;
+        pushUndoSnapshot(undoSnapshot);
       }
     } else if (state.mode === "obfuscate") {
+      const undoSnapshot = state.pendingUndoSnapshot || snapshotState();
       changed = applyObfuscationOverlay(state.startX, state.startY, point.x, point.y);
+      if (changed) pushUndoSnapshot(undoSnapshot);
     } else if (state.mode === "text") {
+      const undoSnapshot = state.pendingUndoSnapshot || snapshotState();
       const text = window.prompt("Text:");
       if (text) {
         ctx.fillStyle = state.color;
         ctx.font = `${Math.max(12, state.size * 4)}px sans-serif`;
         ctx.fillText(text, point.x, point.y);
         changed = true;
+        pushUndoSnapshot(undoSnapshot);
       }
     }
 
     state.drawing = false;
-    state.pathPoints = [];
+    state.lastPoint = null;
+    state.pendingUndoSnapshot = null;
+    state.strokeChanged = false;
     clearPreview();
     renderCursorIfNeeded();
 
     if (!changed) return;
-    pushUndoSnapshot(undoSnapshot);
-    ev.annotation = canvas.toDataURL();
-    saveReports(reports);
-  });
+    const shouldDebounce = state.mode === "pen" || state.mode === "highlight";
+    persistAnnotation(!shouldDebounce);
+  };
+
+  canvas.addEventListener("mousedown", handleMouseDown);
+  canvas.addEventListener("mousemove", handleMouseMove);
+  canvas.addEventListener("mouseleave", handleMouseLeave);
+  canvas.addEventListener("mouseup", handleMouseUp);
+
+  function destroy() {
+    if (destroyed) return;
+    destroyed = true;
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    canvas.removeEventListener("mousedown", handleMouseDown);
+    canvas.removeEventListener("mousemove", handleMouseMove);
+    canvas.removeEventListener("mouseleave", handleMouseLeave);
+    canvas.removeEventListener("mouseup", handleMouseUp);
+    state.history = [];
+    state.drawing = false;
+    state.hasCursor = false;
+    state.lastPoint = null;
+    state.pendingUndoSnapshot = null;
+    state.strokeChanged = false;
+    clearPreview();
+  }
 
   return {
     setMode: (m) => {
@@ -820,19 +1168,26 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       clearPreview();
       ev.annotation = "";
+      if (persistTimer) {
+        clearTimeout(persistTimer);
+        persistTimer = null;
+      }
       saveReports(reports);
     },
     undo: () => restoreFromHistory(),
     load: (dataUrl) => {
+      if (destroyed) return;
       if (!dataUrl) return;
       const img = new Image();
       img.onload = () => {
+        if (destroyed) return;
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         clearPreview();
         renderCursorIfNeeded();
       };
       img.src = dataUrl;
-    }
+    },
+    destroy
   };
 }
 
@@ -842,11 +1197,17 @@ function buildExportHtml(report) {
   const subtitle = escapeHtml(brand.subtitle || "");
   const logo = safeDataImageUrl(brand.logo || "");
   const events = Array.isArray(report.events) ? report.events : [];
+  const shorten = (value, maxLen) => {
+    const s = String(value || "").trim();
+    if (!s) return "";
+    if (s.length <= maxLen) return s;
+    return `${s.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
+  };
 
   const tocRows = events.map((ev, i) => {
-    const stepTitle = escapeHtml(titleFor(ev));
-    const metaUrl = escapeHtml(ev.url || "");
-    return `<li><a href="#step-${i + 1}">${i + 1}. ${stepTitle}</a>${metaUrl ? `<span>${metaUrl}</span>` : ""}</li>`;
+    const stepTitle = escapeHtml(shorten(titleFor(ev), 52));
+    const metaHost = escapeHtml(hostFromUrl(ev.url || ""));
+    return `<li><a href="#step-${i + 1}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaHost ? `<span>${metaHost}</span>` : ""}</li>`;
   }).join("\n");
 
   const rows = events.map((ev, i) => {
@@ -864,25 +1225,108 @@ function buildExportHtml(report) {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${title}</title>
 <style>
-body{font-family:Arial,sans-serif;margin:18px;color:#111;background:#fff}
-.toc{border:1px solid #cbd5e1;border-radius:14px;padding:14px;background:#f8fafc;margin:14px 0 18px}
-.toc h2{margin:0 0 10px;font-size:18px}
-.toc ol{margin:0;padding-left:22px;display:grid;gap:8px}
-.toc li{border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff}
-.toc a{font-weight:700;color:#0f172a;text-decoration:none}
+:root{
+  --ink:#0b1220;
+  --muted:#64748b;
+  --paper:#f8fafc;
+  --panel:#ffffff;
+  --edge:#e2e8f0;
+  --accent:#22c55e;
+  --accent-2:#0ea5e9;
+  --shadow:0 12px 32px rgba(15,23,42,0.12);
+  --radius:14px;
+}
+*{box-sizing:border-box}
+body{
+  font-family:"Trebuchet MS","Gill Sans","Segoe UI",sans-serif;
+  margin:16px;
+  color:var(--ink);
+  background:radial-gradient(circle at 10% 10%, #e0f2fe 0%, #f8fafc 45%, #ecfeff 100%);
+}
+.toc{
+  border:1px solid var(--edge);
+  border-radius:12px;
+  padding:8px 10px;
+  background:#f8fbff;
+  margin:8px 0 12px;
+  box-shadow:var(--shadow);
+}
+.toc h2{
+  margin:0 0 6px;
+  font-size:13px;
+  letter-spacing:.4px;
+  text-transform:uppercase;
+  color:#334155;
+}
+.toc ol{
+  margin:0;
+  padding-left:0;
+  list-style:none;
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:4px;
+}
+.toc li{
+  border:1px solid var(--edge);
+  border-radius:8px;
+  padding:4px 6px;
+  background:var(--panel);
+  min-height:34px;
+}
+.toc a{
+  display:block;
+  font-weight:600;
+  color:#0f172a;
+  text-decoration:none;
+  font-size:11px;
+  line-height:1.2;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
 .toc a:hover{text-decoration:underline}
-.toc span{display:block;color:#64748b;font-size:12px;font-weight:400;margin-top:2px;word-break:break-word}
-.step{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
-.step-title{font-weight:bold;margin-bottom:6px}
-.step-meta{font-size:12px;color:#666;margin-bottom:8px}
-.brand{display:flex;align-items:center;gap:12px;margin-bottom:12px}
-.brand img{width:48px;height:48px;object-fit:contain;border:1px solid #ddd;border-radius:8px}
+.toc span{
+  display:block;
+  color:var(--muted);
+  font-size:10px;
+  font-weight:400;
+  margin-top:1px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.step{
+  border:1px solid var(--edge);
+  border-radius:var(--radius);
+  padding:12px;
+  margin:10px 0;
+  background:var(--panel);
+  box-shadow:var(--shadow);
+}
+.step-title{font-weight:700;margin-bottom:6px}
+.step-meta{font-size:12px;color:var(--muted);margin-bottom:8px}
+.brand{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin-bottom:10px;
+  border:1px solid var(--edge);
+  border-radius:16px;
+  padding:10px 12px;
+  background:var(--panel);
+  box-shadow:var(--shadow);
+}
+.brand img{width:48px;height:48px;object-fit:contain;border:1px solid var(--edge);border-radius:10px;background:#f1f5f9}
 .brand h1{margin:0;font-size:20px}
-.brand p{margin:0;font-size:12px;color:#555}
+.brand p{margin:0;font-size:12px;color:var(--muted)}
 .shot-wrap{position:relative;display:inline-block}
-.shot img{max-width:100%;border:1px solid #ddd;border-radius:10px}
+.shot img{max-width:100%;border:1px solid var(--edge);border-radius:10px}
 .annot{position:absolute;left:0;top:0;width:100%;height:100%}
-@media print {.toc{page-break-after:always}.step{page-break-inside:avoid}}
+@media print {
+  body{margin:0.5in;background:#fff}
+  .toc{page-break-inside:avoid}
+  .step{page-break-inside:avoid;box-shadow:none}
+}
 </style></head><body>
 <div class="brand">
   ${logo ? `<img src="${logo}" alt="Logo">` : ""}
@@ -909,6 +1353,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const search = document.getElementById("search");
   const typeFilter = document.getElementById("type-filter");
   const urlFilter = document.getElementById("url-filter");
+  const themeToggle = document.getElementById("theme-toggle");
   const hints = document.getElementById("hints");
   const timeline = document.getElementById("timeline");
   const toc = document.getElementById("toc");
@@ -941,6 +1386,49 @@ document.addEventListener("DOMContentLoaded", async () => {
   refreshMeta();
 
   const hasReport = !!(report && Array.isArray(report.events) && report.events.length);
+  const ANNOTATION_SESSION_IDLE_MS = 15_000;
+  let activeAnnotationTeardown = null;
+
+  function normalizeTheme(theme) {
+    return String(theme || "").toLowerCase() === "dark" ? "dark" : "light";
+  }
+
+  function applyEditorTheme(theme) {
+    const normalized = normalizeTheme(theme);
+    document.body.classList.toggle("report-dark", normalized === "dark");
+    if (themeToggle) {
+      const nextTheme = normalized === "dark" ? "light" : "dark";
+      themeToggle.dataset.theme = normalized;
+      themeToggle.setAttribute("aria-label", `Switch to ${nextTheme}`);
+      themeToggle.setAttribute("title", `Switch to ${nextTheme}`);
+      themeToggle.setAttribute("aria-pressed", normalized === "dark" ? "true" : "false");
+    }
+    return normalized;
+  }
+
+  async function loadEditorTheme() {
+    try {
+      const stored = await browser.storage.local.get([REPORT_THEME_STORAGE_KEY]);
+      return normalizeTheme(stored && stored[REPORT_THEME_STORAGE_KEY]);
+    } catch (_) {
+      return "light";
+    }
+  }
+
+  async function saveEditorTheme(theme) {
+    try {
+      await browser.storage.local.set({ [REPORT_THEME_STORAGE_KEY]: normalizeTheme(theme) });
+    } catch (_) {}
+  }
+
+  const initialTheme = await loadEditorTheme();
+  let currentTheme = applyEditorTheme(initialTheme);
+  if (themeToggle) {
+    themeToggle.addEventListener("click", async () => {
+      currentTheme = applyEditorTheme(currentTheme === "dark" ? "light" : "dark");
+      await saveEditorTheme(currentTheme);
+    });
+  }
 
   function setImportStatus(message, isError) {
     if (!importStatus) return;
@@ -965,6 +1453,102 @@ document.addEventListener("DOMContentLoaded", async () => {
     events.forEach((ev) => {
       if (ev && typeof ev === "object") delete ev.stepId;
     });
+  }
+
+  function moveEventByOffset(ev, delta) {
+    if (!hasReport || !Array.isArray(report.events)) return false;
+    const from = report.events.indexOf(ev);
+    if (from < 0) return false;
+    const to = from + Number(delta || 0);
+    if (to < 0 || to >= report.events.length) return false;
+    const tmp = report.events[to];
+    report.events[to] = report.events[from];
+    report.events[from] = tmp;
+    return true;
+  }
+
+  function canMoveEventByOffset(ev, delta) {
+    if (!hasReport || !Array.isArray(report.events)) return false;
+    const from = report.events.indexOf(ev);
+    if (from < 0) return false;
+    const to = from + Number(delta || 0);
+    return to >= 0 && to < report.events.length;
+  }
+
+  async function moveEventAndRefresh(ev, delta) {
+    if (!moveEventByOffset(ev, delta)) return;
+    await saveReports(reports);
+    render();
+  }
+
+  function getEventColumnContext(_key, sampleEvent) {
+    if (!sampleEvent || typeof sampleEvent !== "object") return null;
+    return {
+      tabId: sampleEvent.tabId !== undefined ? sampleEvent.tabId : null,
+      tabTitle: sampleEvent.tabTitle || "",
+      windowId: sampleEvent.windowId !== undefined ? sampleEvent.windowId : null
+    };
+  }
+
+  function applyEventColumnContext(ev, context) {
+    if (!ev || typeof ev !== "object" || !context) return;
+    if (Object.prototype.hasOwnProperty.call(context, "tabId")) ev.tabId = context.tabId;
+    if (Object.prototype.hasOwnProperty.call(context, "tabTitle")) ev.tabTitle = context.tabTitle;
+    if (Object.prototype.hasOwnProperty.call(context, "windowId")) ev.windowId = context.windowId;
+  }
+
+  function moveEventRelative(draggedEv, targetEv, place, context) {
+    if (!hasReport || !Array.isArray(report.events)) return false;
+    const from = report.events.indexOf(draggedEv);
+    if (from < 0) return false;
+
+    const [item] = report.events.splice(from, 1);
+    let insertAt = report.events.length;
+    if (targetEv) {
+      const targetIndex = report.events.indexOf(targetEv);
+      if (targetIndex < 0) {
+        report.events.splice(from, 0, item);
+        return false;
+      }
+      insertAt = place === "before" ? targetIndex : (targetIndex + 1);
+    }
+    if (insertAt < 0) insertAt = 0;
+    if (insertAt > report.events.length) insertAt = report.events.length;
+    report.events.splice(insertAt, 0, item);
+    applyEventColumnContext(item, context);
+    return true;
+  }
+
+  async function dragDropEventAndRefresh(draggedEv, targetEv, place, context) {
+    if (!moveEventRelative(draggedEv, targetEv, place, context)) return;
+    await saveReports(reports);
+    render();
+  }
+
+  function openAnnotationEditorForStep(stepId) {
+    if (!stepId) return;
+    const stepNode = document.getElementById(stepId);
+    if (!stepNode) return;
+    stepNode.scrollIntoView({ behavior: "smooth", block: "center" });
+    const trigger = stepNode.querySelector(".annot-enable-btn");
+    if (trigger) trigger.click();
+  }
+
+  function setTypeFilterValue(value) {
+    if (!typeFilter) return;
+    const next = String(value || "all");
+    if (next === "all") {
+      typeFilter.value = "all";
+      return;
+    }
+    const hasOption = Array.from(typeFilter.options || []).some((opt) => opt && opt.value === next);
+    if (!hasOption) {
+      const opt = document.createElement("option");
+      opt.value = next;
+      opt.textContent = next.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      typeFilter.appendChild(opt);
+    }
+    typeFilter.value = next;
   }
 
   if (select) {
@@ -1056,13 +1640,54 @@ document.addEventListener("DOMContentLoaded", async () => {
   function updateAux(eventsOverride) {
     const visibleEvents = Array.isArray(eventsOverride) ? eventsOverride : getVisibleEvents();
     assignStepIds(visibleEvents);
-    renderHints(hints, visibleEvents);
-    renderTimeline(timeline, visibleEvents);
+    renderHints(hints, visibleEvents, {
+      currentTypeFilter: typeFilter ? typeFilter.value : "all",
+      currentUrlFilter: urlFilter ? urlFilter.value : "",
+      applyTypeFilter: (value) => {
+        setTypeFilterValue(value || "all");
+        render();
+      },
+      applyUrlFilter: (value) => {
+        if (!urlFilter) return;
+        urlFilter.value = value || "";
+        render();
+      },
+      applySearch: (value) => {
+        if (!search) return;
+        search.value = value || "";
+        render();
+      },
+      clearFilters: () => {
+        if (search) search.value = "";
+        if (typeFilter) typeFilter.value = "all";
+        if (urlFilter) urlFilter.value = "";
+        render();
+      },
+      jumpToStepId: (stepId) => {
+        if (!stepId) return;
+        const node = document.getElementById(stepId);
+        if (!node) return;
+        node.scrollIntoView({ behavior: "smooth", block: "center" });
+        node.classList.add("step-flash");
+        setTimeout(() => node.classList.remove("step-flash"), 1200);
+      }
+    });
+    renderTimeline(timeline, visibleEvents, {
+      canMove: canMoveEventByOffset,
+      onMove: (ev, delta) => { moveEventAndRefresh(ev, delta); },
+      onDraw: (_ev, stepId) => { openAnnotationEditorForStep(stepId); },
+      getColumnContext: getEventColumnContext,
+      onDragDrop: (draggedEv, targetEv, place, context) => { dragDropEventAndRefresh(draggedEv, targetEv, place, context); }
+    });
     renderTableOfContents(toc, visibleEvents);
   }
 
   function render() {
     if (!hasReport) return;
+    if (activeAnnotationTeardown) {
+      try { activeAnnotationTeardown("render-refresh"); } catch (_) {}
+      activeAnnotationTeardown = null;
+    }
     root.innerHTML = "";
     clearStepIds(report.events);
     const events = getVisibleEvents();
@@ -1096,6 +1721,25 @@ document.addEventListener("DOMContentLoaded", async () => {
       wrap.appendChild(el("div", "step-meta", metaText));
 
       const actions = el("div", "step-actions noprint");
+      const eventPos = report.events.indexOf(ev);
+      const moveUp = el("button", "btn ghost", "Move up");
+      moveUp.disabled = eventPos <= 0;
+      moveUp.addEventListener("click", async () => {
+        if (!moveEventByOffset(ev, -1)) return;
+        await saveReports(reports);
+        render();
+      });
+      actions.appendChild(moveUp);
+
+      const moveDown = el("button", "btn ghost", "Move down");
+      moveDown.disabled = eventPos < 0 || eventPos >= (report.events.length - 1);
+      moveDown.addEventListener("click", async () => {
+        if (!moveEventByOffset(ev, 1)) return;
+        await saveReports(reports);
+        render();
+      });
+      actions.appendChild(moveDown);
+
       const deleteStep = el("button", "btn danger", "Delete step");
       deleteStep.addEventListener("click", async () => {
         const pos = report.events.indexOf(ev);
@@ -1133,68 +1777,242 @@ document.addEventListener("DOMContentLoaded", async () => {
         const shotWrap = el("div", "shot-wrap");
         const img = document.createElement("img");
         img.className = "step-img";
+        img.src = ev.screenshot;
         shotWrap.appendChild(img);
 
-        const canvas = document.createElement("canvas");
-        canvas.className = "shot-canvas";
-        shotWrap.appendChild(canvas);
-        const previewCanvas = document.createElement("canvas");
-        previewCanvas.className = "shot-preview-canvas";
-        shotWrap.appendChild(previewCanvas);
-
         const tools = el("div", "annot-tools noprint");
-        const mode = document.createElement("select");
-        ["pen","highlight","rect","outline","obfuscate","text"].forEach(m => {
-          const opt = document.createElement("option");
-          opt.value = m;
-          opt.textContent = m;
-          mode.appendChild(opt);
-        });
-        const color = document.createElement("input");
-        color.type = "color";
-        color.value = "#ff3b3b";
-        const size = document.createElement("input");
-        size.type = "range";
-        size.min = "1";
-        size.max = "8";
-        size.value = "3";
-        const undoBtn = el("button", "btn", "Undo");
-        const clearBtn = el("button", "btn", "Clear");
-        tools.appendChild(mode);
-        tools.appendChild(color);
-        tools.appendChild(size);
-        tools.appendChild(undoBtn);
-        tools.appendChild(clearBtn);
+        let staticAnnot = null;
+        function renderStaticAnnotation() {
+          if (staticAnnot) {
+            staticAnnot.remove();
+            staticAnnot = null;
+          }
+          if (!ev.annotation) return;
+          staticAnnot = document.createElement("img");
+          staticAnnot.className = "annot";
+          staticAnnot.src = ev.annotation;
+          shotWrap.appendChild(staticAnnot);
+        }
+        renderStaticAnnotation();
+
+        const enableAnnotBtn = el("button", "btn annot-enable-btn", ev.annotation ? "Edit annotation" : "Enable annotation");
+        tools.appendChild(enableAnnotBtn);
 
         let annotationReady = false;
-        const initAnnotationTools = () => {
-          if (annotationReady) return;
-          annotationReady = true;
-          const w = img.clientWidth || img.naturalWidth;
-          const h = img.clientHeight || img.naturalHeight;
-          canvas.width = w;
-          canvas.height = h;
-          canvas.style.width = `${w}px`;
-          canvas.style.height = `${h}px`;
-          previewCanvas.width = w;
-          previewCanvas.height = h;
-          previewCanvas.style.width = `${w}px`;
-          previewCanvas.style.height = `${h}px`;
-          const annot = setupAnnotationTools(canvas, previewCanvas, img, ev, report, reports, index, root);
-          annot.setMode(mode.value);
-          annot.setColor(color.value);
-          annot.setSize(Number(size.value));
-          if (ev.annotation) annot.load(ev.annotation);
+        let sessionIdleTimer = null;
+        let canvas = null;
+        let previewCanvas = null;
+        let mode = null;
+        let color = null;
+        let size = null;
+        let undoBtn = null;
+        let clearBtn = null;
+        let closeBtn = null;
+        let annot = null;
+        let removeActivityListeners = null;
+        let markSessionDirty = null;
+        let sessionDirty = false;
 
-          mode.addEventListener("change", () => annot.setMode(mode.value));
-          color.addEventListener("change", () => annot.setColor(color.value));
-          size.addEventListener("change", () => annot.setSize(Number(size.value)));
-          undoBtn.addEventListener("click", () => annot.undo());
-          clearBtn.addEventListener("click", () => annot.clear());
+        const clearSessionIdleTimer = () => {
+          if (sessionIdleTimer) {
+            clearTimeout(sessionIdleTimer);
+            sessionIdleTimer = null;
+          }
         };
-        img.onload = initAnnotationTools;
-        img.src = ev.screenshot;
-        if (img.complete && img.naturalWidth > 0) initAnnotationTools();
+
+        const resetSessionIdleTimer = () => {
+          if (!annotationReady) return;
+          clearSessionIdleTimer();
+          sessionIdleTimer = setTimeout(() => {
+            teardownAnnotationSession("idle-timeout");
+          }, ANNOTATION_SESSION_IDLE_MS);
+        };
+
+        const commitFlattenedScreenshot = () => {
+          if (!annotationReady || !canvas || !img) return;
+          const w = canvas.width || img.naturalWidth || img.clientWidth;
+          const h = canvas.height || img.naturalHeight || img.clientHeight;
+          if (!w || !h) return;
+          try {
+            const mergedCanvas = document.createElement("canvas");
+            mergedCanvas.width = w;
+            mergedCanvas.height = h;
+            const mergedCtx = mergedCanvas.getContext("2d");
+            if (!mergedCtx) return;
+            mergedCtx.drawImage(img, 0, 0, w, h);
+            mergedCtx.drawImage(canvas, 0, 0, w, h);
+            const mergedDataUrl = mergedCanvas.toDataURL("image/png");
+            mergedCanvas.width = 1;
+            mergedCanvas.height = 1;
+            if (!mergedDataUrl) return;
+            ev.screenshot = mergedDataUrl;
+            ev.annotation = "";
+            img.src = mergedDataUrl;
+            saveReports(reports).catch(() => {});
+          } catch (_) {}
+        };
+
+        const teardownAnnotationSession = (reason) => {
+          if (!annotationReady) return;
+          if (sessionDirty) commitFlattenedScreenshot();
+          annotationReady = false;
+          sessionDirty = false;
+          clearSessionIdleTimer();
+          if (removeActivityListeners) {
+            removeActivityListeners();
+            removeActivityListeners = null;
+          }
+          if (annot && typeof annot.destroy === "function") {
+            try { annot.destroy(); } catch (_) {}
+          }
+          annot = null;
+          if (canvas && markSessionDirty) {
+            canvas.removeEventListener("mousedown", markSessionDirty, true);
+            canvas.removeEventListener("touchstart", markSessionDirty, true);
+          }
+          markSessionDirty = null;
+          if (canvas) {
+            canvas.width = 1;
+            canvas.height = 1;
+            canvas.remove();
+            canvas = null;
+          }
+          if (previewCanvas) {
+            previewCanvas.width = 1;
+            previewCanvas.height = 1;
+            previewCanvas.remove();
+            previewCanvas = null;
+          }
+          if (mode && onModeChange) mode.removeEventListener("change", onModeChange);
+          if (color && onColorChange) color.removeEventListener("change", onColorChange);
+          if (size && onSizeChange) size.removeEventListener("change", onSizeChange);
+          if (undoBtn && onUndoClick) undoBtn.removeEventListener("click", onUndoClick);
+          if (clearBtn && onClearClick) clearBtn.removeEventListener("click", onClearClick);
+          if (closeBtn && onCloseClick) closeBtn.removeEventListener("click", onCloseClick);
+          mode = null;
+          color = null;
+          size = null;
+          undoBtn = null;
+          clearBtn = null;
+          closeBtn = null;
+          tools.innerHTML = "";
+          enableAnnotBtn.textContent = ev.annotation ? "Edit annotation" : "Enable annotation";
+          tools.appendChild(enableAnnotBtn);
+          renderStaticAnnotation();
+          if (activeAnnotationTeardown === teardownAnnotationSession) activeAnnotationTeardown = null;
+        };
+
+        let onModeChange = null;
+        let onColorChange = null;
+        let onSizeChange = null;
+        let onUndoClick = null;
+        let onClearClick = null;
+        let onCloseClick = null;
+
+        const initAnnotationTools = () => {
+          if (annotationReady) {
+            resetSessionIdleTimer();
+            return;
+          }
+          if (activeAnnotationTeardown && activeAnnotationTeardown !== teardownAnnotationSession) {
+            try { activeAnnotationTeardown("switch-section"); } catch (_) {}
+          }
+          activeAnnotationTeardown = teardownAnnotationSession;
+          annotationReady = true;
+          sessionDirty = false;
+
+          if (staticAnnot) {
+            staticAnnot.remove();
+            staticAnnot = null;
+          }
+
+          canvas = document.createElement("canvas");
+          canvas.className = "shot-canvas";
+          shotWrap.appendChild(canvas);
+          previewCanvas = document.createElement("canvas");
+          previewCanvas.className = "shot-preview-canvas";
+          shotWrap.appendChild(previewCanvas);
+          markSessionDirty = () => {
+            sessionDirty = true;
+            resetSessionIdleTimer();
+          };
+          canvas.addEventListener("mousedown", markSessionDirty, true);
+          canvas.addEventListener("touchstart", markSessionDirty, true);
+
+          mode = document.createElement("select");
+          ["pen","highlight","rect","outline","obfuscate","text"].forEach(m => {
+            const opt = document.createElement("option");
+            opt.value = m;
+            opt.textContent = m;
+            mode.appendChild(opt);
+          });
+          color = document.createElement("input");
+          color.type = "color";
+          color.value = "#ff3b3b";
+          size = document.createElement("input");
+          size.type = "range";
+          size.min = "1";
+          size.max = "8";
+          size.value = "3";
+          undoBtn = el("button", "btn", "Undo");
+          clearBtn = el("button", "btn", "Clear");
+          closeBtn = el("button", "btn ghost", "Close editor");
+          enableAnnotBtn.remove();
+          tools.appendChild(mode);
+          tools.appendChild(color);
+          tools.appendChild(size);
+          tools.appendChild(undoBtn);
+          tools.appendChild(clearBtn);
+          tools.appendChild(closeBtn);
+
+          const touchActivity = () => resetSessionIdleTimer();
+          const activityEvents = ["mousemove", "mousedown", "keydown", "wheel", "touchstart", "scroll"];
+          activityEvents.forEach((name) => {
+            window.addEventListener(name, touchActivity, true);
+          });
+          removeActivityListeners = () => {
+            activityEvents.forEach((name) => {
+              window.removeEventListener(name, touchActivity, true);
+            });
+          };
+          resetSessionIdleTimer();
+
+          const boot = () => {
+            if (!annotationReady || !canvas || !previewCanvas) return;
+            const w = img.clientWidth || img.naturalWidth;
+            const h = img.clientHeight || img.naturalHeight;
+            canvas.width = w;
+            canvas.height = h;
+            canvas.style.width = `${w}px`;
+            canvas.style.height = `${h}px`;
+            previewCanvas.width = w;
+            previewCanvas.height = h;
+            previewCanvas.style.width = `${w}px`;
+            previewCanvas.style.height = `${h}px`;
+            annot = setupAnnotationTools(canvas, previewCanvas, img, ev, report, reports, index, root);
+            annot.setMode(mode.value);
+            annot.setColor(color.value);
+            annot.setSize(Number(size.value));
+            if (ev.annotation) annot.load(ev.annotation);
+
+            onModeChange = () => { if (annot) annot.setMode(mode.value); resetSessionIdleTimer(); };
+            onColorChange = () => { if (annot) annot.setColor(color.value); resetSessionIdleTimer(); };
+            onSizeChange = () => { if (annot) annot.setSize(Number(size.value)); resetSessionIdleTimer(); };
+            onUndoClick = () => { sessionDirty = true; if (annot) annot.undo(); resetSessionIdleTimer(); };
+            onClearClick = () => { sessionDirty = true; if (annot) annot.clear(); resetSessionIdleTimer(); };
+            onCloseClick = () => teardownAnnotationSession("manual-close");
+            mode.addEventListener("change", onModeChange);
+            color.addEventListener("change", onColorChange);
+            size.addEventListener("change", onSizeChange);
+            undoBtn.addEventListener("click", onUndoClick);
+            clearBtn.addEventListener("click", onClearClick);
+            closeBtn.addEventListener("click", onCloseClick);
+          };
+
+          if (img.complete && img.naturalWidth > 0) boot();
+          else img.addEventListener("load", boot, { once: true });
+        };
+        enableAnnotBtn.addEventListener("click", initAnnotationTools);
 
         wrap.appendChild(tools);
         wrap.appendChild(shotWrap);

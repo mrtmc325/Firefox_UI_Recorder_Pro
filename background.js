@@ -1,4 +1,4 @@
-// UI Workflow Recorder Pro (Firefox MV2) - v1.6.0
+// UI Workflow Recorder Pro (Firefox MV2) - v1.7.0
 // Clean capture, diff-based screenshots, and text-only redaction for reports.
 
 let isRecording = false;
@@ -15,6 +15,7 @@ let settings = {
   redactLoginUsernames: true,
 
   captureMode: "all",
+  activeTabOnly: true,
   autoPauseOnIdle: false,
   idleThresholdSec: 60,
   resumeOnFocus: true,
@@ -43,6 +44,9 @@ let pendingShotResolve = null;
 let runtimeMsgSeq = 0;
 let activeRecordEvents = 0;
 let lastPopupStopToken = 0;
+let activeCaptureTabId = null;
+let activeCaptureWindowId = null;
+let activeCaptureUpdatedAt = 0;
 
 const DEBUG_LOGS = true;
 const EVENT_COMPACT_TRIGGER_COUNT = 600;
@@ -107,6 +111,92 @@ function resetScreenshotState() {
   if (hadPending) bgLog("resetScreenshotState:cleared-pending");
 }
 
+function clearActiveCaptureTarget(reason) {
+  const hadTarget = activeCaptureTabId !== null || activeCaptureWindowId !== null;
+  activeCaptureTabId = null;
+  activeCaptureWindowId = null;
+  activeCaptureUpdatedAt = Date.now();
+  if (hadTarget || reason) {
+    bgLog("active-target:cleared", { reason, updatedAt: activeCaptureUpdatedAt });
+  }
+}
+
+async function refreshActiveCaptureTarget(reason) {
+  try {
+    const tabs = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+    const tab = tabs && tabs[0] ? tabs[0] : null;
+    if (!tab || typeof tab.id !== "number") {
+      clearActiveCaptureTarget(`${reason}:no-active-tab`);
+      return null;
+    }
+    activeCaptureTabId = tab.id;
+    activeCaptureWindowId = typeof tab.windowId === "number" ? tab.windowId : null;
+    activeCaptureUpdatedAt = Date.now();
+    bgLog("active-target:set", {
+      reason,
+      tabId: activeCaptureTabId,
+      windowId: activeCaptureWindowId,
+      updatedAt: activeCaptureUpdatedAt
+    });
+    return tab;
+  } catch (e) {
+    bgWarn("active-target:error", { reason, error: formatError(e) });
+    clearActiveCaptureTarget(`${reason}:error`);
+    return null;
+  }
+}
+
+function isEventFromActiveTarget(senderTab) {
+  if (!senderTab || typeof senderTab.id !== "number") return false;
+  if (activeCaptureTabId === null || activeCaptureWindowId === null) return false;
+  return senderTab.id === activeCaptureTabId && senderTab.windowId === activeCaptureWindowId;
+}
+
+function isInjectableTabUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  const u = url.toLowerCase();
+  return !(
+    u.startsWith("about:") ||
+    u.startsWith("moz-extension:") ||
+    u.startsWith("chrome:") ||
+    u.startsWith("resource:") ||
+    u.startsWith("view-source:")
+  );
+}
+
+async function ensureContentScriptInTab(tabId, reason) {
+  if (typeof tabId !== "number") return false;
+  try {
+    const tab = await browser.tabs.get(tabId);
+    if (!tab || !isInjectableTabUrl(tab.url)) {
+      bgLog("content-inject:skip", { reason, tabId, url: tab && tab.url });
+      return false;
+    }
+    await browser.tabs.executeScript(tabId, { file: "content.js", allFrames: true });
+    bgLog("content-inject:done", { reason, tabId, url: tab.url });
+    return true;
+  } catch (e) {
+    bgWarn("content-inject:failed", { reason, tabId, error: formatError(e) });
+    return false;
+  }
+}
+
+async function notifyActiveTargetTab(reason) {
+  if (activeCaptureTabId === null) return false;
+  try {
+    await browser.tabs.sendMessage(activeCaptureTabId, {
+      type: "UIR_ACTIVE_TARGET_UPDATED",
+      reason: reason || "unknown",
+      ts: Date.now()
+    });
+    bgLog("active-target:notified", { reason, tabId: activeCaptureTabId });
+    return true;
+  } catch (e) {
+    bgLog("active-target:notify-skipped", { reason, tabId: activeCaptureTabId, error: formatError(e) });
+    return false;
+  }
+}
+
 function nowIso() { return new Date().toISOString(); }
 
 async function persist() { await browser.storage.local.set({ isRecording, isPaused, events, settings, reports, sessionId }); }
@@ -159,15 +249,33 @@ function applyRedactionToText(text) {
 }
 
 async function captureVisiblePng() {
-  try { return await browser.tabs.captureVisibleTab(undefined, { format: "png" }); }
-  catch (e) { console.warn("captureVisibleTab failed:", e); return null; }
+  if (settings.activeTabOnly) {
+    if (activeCaptureWindowId === null) {
+      bgLog("capture:skipped-no-active-target");
+      return { dataUrl: null, reason: "no-active-target" };
+    }
+    try {
+      const dataUrl = await browser.tabs.captureVisibleTab(activeCaptureWindowId, { format: "png" });
+      return { dataUrl, reason: null };
+    } catch (e) {
+      console.warn("captureVisibleTab failed:", e);
+      return { dataUrl: null, reason: "capture-failed" };
+    }
+  }
+  try {
+    const dataUrl = await browser.tabs.captureVisibleTab(undefined, { format: "png" });
+    return { dataUrl, reason: null };
+  } catch (e) {
+    console.warn("captureVisibleTab failed:", e);
+    return { dataUrl: null, reason: "capture-failed" };
+  }
 }
 
 async function debouncedScreenshot() {
   const now = Date.now();
   const elapsed = now - lastShot.ts;
   if (elapsed < settings.screenshotMinIntervalMs && lastShot.dataUrl) {
-    return { dataUrl: lastShot.dataUrl, hash: lastShot.hash, reused: true };
+    return { dataUrl: lastShot.dataUrl, hash: lastShot.hash, reused: true, reason: null };
   }
   if (pendingShotTimer) {
     return new Promise((resolve) => {
@@ -179,15 +287,15 @@ async function debouncedScreenshot() {
     pendingShotResolve = resolve;
     pendingShotTimer = setTimeout(async () => {
       pendingShotTimer = null;
-      const dataUrl = await captureVisiblePng();
-      if (!dataUrl) {
-        pendingShotResolve && pendingShotResolve({ dataUrl: null, hash: null, reused: false });
+      const capture = await captureVisiblePng();
+      if (!capture.dataUrl) {
+        pendingShotResolve && pendingShotResolve({ dataUrl: null, hash: null, reused: false, reason: capture.reason || "capture-failed" });
         pendingShotResolve = null;
         return;
       }
-      const hash = stableHash(dataUrl);
-      lastShot = { ts: Date.now(), hash, dataUrl };
-      pendingShotResolve && pendingShotResolve({ dataUrl, hash, reused: false });
+      const hash = stableHash(capture.dataUrl);
+      lastShot = { ts: Date.now(), hash, dataUrl: capture.dataUrl };
+      pendingShotResolve && pendingShotResolve({ dataUrl: capture.dataUrl, hash, reused: false, reason: null });
       pendingShotResolve = null;
     }, settings.screenshotDebounceMs);
   });
@@ -197,7 +305,7 @@ async function maybeScreenshot(e) {
   const force = !!e.forceScreenshot;
 
   const shot = await debouncedScreenshot();
-  if (!shot.dataUrl) return { screenshot: null, screenshotHash: null, skipped: true, reason: "capture-failed" };
+  if (!shot.dataUrl) return { screenshot: null, screenshotHash: null, skipped: true, reason: shot.reason || "capture-failed" };
 
   const redacted = shot.dataUrl;
   const redactedHash = stableHash(redacted);
@@ -339,6 +447,14 @@ async function startRecordingInternal(source) {
   isPaused = false;
   events = [];
   sessionId = newSessionId();
+  if (settings.activeTabOnly) {
+    await refreshActiveCaptureTarget("start");
+    if (activeCaptureTabId !== null) {
+      await ensureContentScriptInTab(activeCaptureTabId, "start");
+      await notifyActiveTargetTab("start");
+    }
+  }
+  else clearActiveCaptureTarget("start:non-strict");
   resetScreenshotState();
   const persisted = await persistSafe("start-recording");
   await setBadge("REC");
@@ -355,6 +471,7 @@ async function stopRecordingInternal(source) {
   // Clear active buffer to avoid doubling storage footprint on stop.
   events = [];
   sessionId = null;
+  clearActiveCaptureTarget("stop");
   resetScreenshotState();
   const persisted = await persistSafe("stop-recording");
   await setBadge("");
@@ -364,6 +481,13 @@ async function stopRecordingInternal(source) {
 
 browser.runtime.onInstalled.addListener(async () => {
   await loadPersisted();
+  if (isRecording && settings.activeTabOnly) {
+    await refreshActiveCaptureTarget("installed");
+    if (activeCaptureTabId !== null) {
+      await ensureContentScriptInTab(activeCaptureTabId, "installed");
+      await notifyActiveTargetTab("installed");
+    }
+  }
   if (settings.autoPauseOnIdle) {
     try { await browser.idle.setDetectionInterval(Math.max(15, settings.idleThresholdSec || 60)); } catch (_) {}
   }
@@ -374,6 +498,13 @@ browser.runtime.onInstalled.addListener(async () => {
 
 browser.runtime.onStartup.addListener(async () => {
   await loadPersisted();
+  if (isRecording && settings.activeTabOnly) {
+    await refreshActiveCaptureTarget("startup");
+    if (activeCaptureTabId !== null) {
+      await ensureContentScriptInTab(activeCaptureTabId, "startup");
+      await notifyActiveTargetTab("startup");
+    }
+  }
   if (settings.autoPauseOnIdle) {
     try { await browser.idle.setDetectionInterval(Math.max(15, settings.idleThresholdSec || 60)); } catch (_) {}
   }
@@ -396,10 +527,35 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
   }
 
   try {
-    if (msgType === "GET_STATE") return { isRecording, isPaused, settings, count: events.length };
+    if (msgType === "GET_STATE") {
+      const hasSenderTab = !!(sender && sender.tab && typeof sender.tab.id === "number");
+      const isActiveCaptureTab = settings.activeTabOnly
+        ? (hasSenderTab ? isEventFromActiveTarget(sender.tab) : true)
+        : true;
+      return {
+        isRecording,
+        isPaused,
+        settings,
+        count: events.length,
+        activeCaptureTabId: settings.activeTabOnly ? activeCaptureTabId : null,
+        activeCaptureWindowId: settings.activeTabOnly ? activeCaptureWindowId : null,
+        isActiveCaptureTab
+      };
+    }
 
     if (msgType === "UPDATE_SETTINGS") {
       settings = { ...settings, ...(msg.settings || {}) };
+      if (settings.activeTabOnly) {
+        if (isRecording) {
+          await refreshActiveCaptureTarget("settings:update");
+          if (activeCaptureTabId !== null) {
+            await ensureContentScriptInTab(activeCaptureTabId, "settings:update");
+            await notifyActiveTargetTab("settings:update");
+          }
+        }
+      } else {
+        clearActiveCaptureTarget("settings:disable");
+      }
       if (settings.autoPauseOnIdle) {
         try { await browser.idle.setDetectionInterval(Math.max(15, settings.idleThresholdSec || 60)); } catch (_) {}
       }
@@ -418,7 +574,13 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
 
     if (msgType === "ADD_NOTE") {
       if (!isRecording) return { ok: false, ignored: true };
+      if (settings.activeTabOnly && (activeCaptureTabId === null || activeCaptureWindowId === null)) {
+        return { ok: false, ignored: true, reason: "no-active-target" };
+      }
       const tab = await getActiveTab();
+      if (settings.activeTabOnly && !isEventFromActiveTarget(tab)) {
+        return { ok: false, ignored: true, reason: "non-active-tab" };
+      }
       const note = String(msg.text || "").trim();
       if (!note) return { ok: false, ignored: true };
       events.push({
@@ -450,6 +612,18 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         const e = msg.event || {};
         eventType = e.type || "unknown";
         if (shouldIgnoreEventType(e.type)) return { ok: false, ignored: true };
+        const senderTab = sender && sender.tab ? sender.tab : null;
+        if (settings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
+          bgLog("record-event:dropped-non-active", {
+            requestId,
+            eventType,
+            senderTabId: senderTab && senderTab.id,
+            senderWindowId: senderTab && senderTab.windowId,
+            activeCaptureTabId,
+            activeCaptureWindowId
+          });
+          return { ok: false, ignored: true, reason: "non-active-tab" };
+        }
 
         const cleaned = {
           ...e,
@@ -466,7 +640,8 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         };
         delete cleaned.typedValue;
 
-        const includeScreenshot = ["click","change","input","submit","nav","outcome","note"].includes(e.type)
+        const includeScreenshot = ["click","change","input","submit","outcome","note"].includes(e.type)
+          || (e.type === "nav" && (!settings.activeTabOnly || !!e.forceScreenshot))
           || (e.type === "ui-change" && !!e.forceScreenshot);
         if (includeScreenshot) {
           const shot = await maybeScreenshot(e);
@@ -479,6 +654,19 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           cleaned.screenshotHash = null;
           cleaned.screenshotSkipped = true;
           cleaned.screenshotSkipReason = "not-needed";
+        }
+
+        if (settings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
+          bgLog("record-event:dropped-non-active", {
+            requestId,
+            eventType,
+            phase: "post-capture",
+            senderTabId: senderTab && senderTab.id,
+            senderWindowId: senderTab && senderTab.windowId,
+            activeCaptureTabId,
+            activeCaptureWindowId
+          });
+          return { ok: false, ignored: true, reason: "non-active-tab" };
         }
 
         // Drop stale events that completed after state/session changed.
@@ -548,12 +736,31 @@ browser.storage.onChanged.addListener(async (changes, areaName) => {
 
 browser.tabs.onActivated.addListener(async () => {
   bgLog("tabs:onActivated", { resumeOnFocus: !!settings.resumeOnFocus, isRecording, isPaused });
+  if (isRecording && settings.activeTabOnly) {
+    await refreshActiveCaptureTarget("tab-activated");
+    if (activeCaptureTabId !== null) {
+      await ensureContentScriptInTab(activeCaptureTabId, "tab-activated");
+      await notifyActiveTargetTab("tab-activated");
+    }
+    bgLog("active-target:tab-activated", { activeCaptureTabId, activeCaptureWindowId, activeCaptureUpdatedAt });
+  }
   if (settings.resumeOnFocus) await resumeRecording();
 });
 
 browser.windows.onFocusChanged.addListener(async (windowId) => {
   bgLog("windows:onFocusChanged", { windowId, resumeOnFocus: !!settings.resumeOnFocus, isRecording, isPaused });
-  if (windowId === browser.windows.WINDOW_ID_NONE) return;
+  if (windowId === browser.windows.WINDOW_ID_NONE) {
+    if (isRecording && settings.activeTabOnly) clearActiveCaptureTarget("focus:none");
+    return;
+  }
+  if (isRecording && settings.activeTabOnly) {
+    await refreshActiveCaptureTarget("focus-changed");
+    if (activeCaptureTabId !== null) {
+      await ensureContentScriptInTab(activeCaptureTabId, "focus-changed");
+      await notifyActiveTargetTab("focus-changed");
+    }
+    bgLog("active-target:focus-changed", { windowId, activeCaptureTabId, activeCaptureWindowId, activeCaptureUpdatedAt });
+  }
   if (settings.resumeOnFocus) await resumeRecording();
 });
 

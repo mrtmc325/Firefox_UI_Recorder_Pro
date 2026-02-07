@@ -1,21 +1,32 @@
-# UI Workflow Recorder Pro (Firefox) v1.6.0
+# UI Workflow Recorder Pro (Firefox) v1.7.0
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline, hints, and export/import tooling.
 
 ## Current Release
-- Version: `1.6.0`
+- Version: `1.7.0`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
 - Canonical submit capture with dedupe (click + Enter + native submit).
 - Start/stop hardening with added runtime/storage diagnostics.
+- Strict active-tab-only capture mode (follows current active tab in focused window).
 - Dynamic UI watch with memory-safe observer lifecycle.
 - Dynamic UI screenshot forcing interval:
   - Enabled only when `Page watch interval (ms) < 10000`
   - Interval formula: `max(4567.38ms, pageWatchMs * 1.34562)`
 - Report Table of Contents (in UI and exported HTML).
 - Raw ZIP export/import/merge for future re-editing.
+- Report editor reordering for merge workflows:
+  - Move up/down controls per step
+  - Cross-tab timeline drag/drop reordering with flow-in placement
 - Annotation upgrades: live preview overlays, sizing labels, screenshot-based obfuscation, improved undo.
+- Annotation editor memory controls:
+  - Lazy resource allocation when editor opens
+  - Idle auto-close/teardown behavior
+  - Flatten-on-close update to replace previous screenshot frame
+- Report theme toggle:
+  - Icon-only sun/moon toggle with hover preview
+  - Darker near-black dark mode palette for editor comfort
 - Screenshot compaction for long sessions to reduce memory pressure.
 
 ## Install (Temporary Add-on)
@@ -32,6 +43,18 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
 6. Export as HTML bundle or raw ZIP if needed.
 
 ## How-To Templates (Configuration Profiles)
+
+### 0) Strict Active Tab Following
+Use when you want to capture only the active tab and ignore all background-tab activity.
+
+- `Follow active tab only (strict)`: `On`
+- `Capture mode`: `All events`
+- `Auto-resume on tab focus`: `On`
+
+Expected behavior:
+- When you switch tabs, capture follows the new active tab immediately.
+- Events from non-active tabs are dropped by design.
+- If Firefox has no focused window, events are ignored until focus returns.
 
 ### 1) Dynamic Dashboard / SPA Capture
 Use when UI updates without URL changes.
@@ -81,6 +104,8 @@ Expected behavior:
 - Raw ZIP can be imported as:
   - New report
   - Merge into current report
+- Reports can be reordered directly before export to align merged procedures.
+- Cross-tab timeline supports drag/drop + draw/swap actions for section alignment.
 
 ## Privacy
 - Data remains local in browser storage.

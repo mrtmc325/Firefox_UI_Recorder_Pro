@@ -1,4 +1,4 @@
-// content.js - v1.6.0
+// content.js - v1.7.0
 // Clean capture with optional text redaction and readable step naming.
 
 (function () {
@@ -79,13 +79,9 @@
       clearTimeout(ctl.timerId);
       ctl.timerId = null;
     }
-    if (ctl.intervalId) {
-      clearInterval(ctl.intervalId);
-      ctl.intervalId = null;
-    }
-    if (ctl.statePollId) {
-      clearInterval(ctl.statePollId);
-      ctl.statePollId = null;
+    if (ctl.statePollTimerId) {
+      clearTimeout(ctl.statePollTimerId);
+      ctl.statePollTimerId = null;
     }
     if (ctl.startTimerId) {
       clearTimeout(ctl.startTimerId);
@@ -98,6 +94,10 @@
     if (ctl.onVisibilityChange) {
       try { document.removeEventListener("visibilitychange", ctl.onVisibilityChange); } catch (_) {}
       ctl.onVisibilityChange = null;
+    }
+    if (ctl.onScroll) {
+      try { window.removeEventListener("scroll", ctl.onScroll, true); } catch (_) {}
+      ctl.onScroll = null;
     }
     if (ctl.onLifecycleCleanup) {
       try { window.removeEventListener("pagehide", ctl.onLifecycleCleanup, true); } catch (_) {}
@@ -125,17 +125,22 @@
       pending: false,
       observing: false,
       timerId: null,
-      intervalId: null,
-      statePollId: null,
+      statePollTimerId: null,
       startTimerId: null,
       pageWatchMs: 500,
       lastUiChangeAt: 0,
       lastUiChangeScreenshotAt: 0,
+      pendingScroll: false,
+      lastScrollX: Math.round(window.scrollX || 0),
+      lastScrollY: Math.round(window.scrollY || 0),
       observer: null,
       isRecording: false,
       isPaused: false,
+      isActiveCaptureTab: true,
+      activeTabOnly: false,
       pageWatchEnabled: true,
       onVisibilityChange: null,
+      onScroll: null,
       onLifecycleCleanup: null
     };
     window.__uiRecorderPageWatchCtl = ctl;
@@ -187,16 +192,40 @@
       ctl.pageWatchEnabled = !(st && st.settings && st.settings.pageWatchEnabled === false);
       ctl.isRecording = !!(st && st.isRecording);
       ctl.isPaused = !!(st && st.isPaused);
+      ctl.activeTabOnly = !!(st && st.settings && st.settings.activeTabOnly);
+      ctl.isActiveCaptureTab = !(st && st.isActiveCaptureTab === false);
 
-      const shouldObserve = ctl.pageWatchEnabled && ctl.isRecording && !ctl.isPaused;
+      const shouldObserve = ctl.pageWatchEnabled
+        && ctl.isRecording
+        && !ctl.isPaused
+        && (!ctl.activeTabOnly || ctl.isActiveCaptureTab);
       if (!shouldObserve) {
-        stopObserving("inactive-state");
+        stopObserving(ctl.activeTabOnly && !ctl.isActiveCaptureTab ? "inactive-non-active-tab" : "inactive-state");
         return;
       }
       startObserving();
     };
-    refreshSettings();
-    ctl.statePollId = setInterval(refreshSettings, 1500);
+
+    function scheduleStateRefresh(delayMs) {
+      if (!ctl.active) return;
+      if (ctl.statePollTimerId) {
+        clearTimeout(ctl.statePollTimerId);
+        ctl.statePollTimerId = null;
+      }
+      ctl.statePollTimerId = setTimeout(async () => {
+        ctl.statePollTimerId = null;
+        try {
+          await refreshSettings();
+        } catch (_) {}
+        const shouldObserve = ctl.pageWatchEnabled
+          && ctl.isRecording
+          && !ctl.isPaused
+          && (!ctl.activeTabOnly || ctl.isActiveCaptureTab);
+        scheduleStateRefresh(shouldObserve ? 1500 : 10000);
+      }, Math.max(250, Number(delayMs) || 1500));
+    }
+
+    scheduleStateRefresh(0);
 
     function getDynamicUiChangeScreenshotIntervalMs() {
       const pageWatchMs = Math.max(1, Number(ctl.pageWatchMs) || 500);
@@ -210,9 +239,25 @@
       if (!ctl.pageWatchEnabled || !ctl.isRecording || ctl.isPaused) return;
       ctl.pending = true;
       try {
-        const sig = snapshotSignature();
-        if (!sig || sig === ctl.lastSig) return;
-        ctl.lastSig = sig;
+        const isScrollTrigger = !!ctl.pendingScroll;
+        ctl.pendingScroll = false;
+        let actionKind = "ui-change";
+        let human = "UI changed";
+        let label = "Dynamic content";
+        if (isScrollTrigger) {
+          const sx = Math.round(window.scrollX || 0);
+          const sy = Math.round(window.scrollY || 0);
+          if (sx === ctl.lastScrollX && sy === ctl.lastScrollY) return;
+          ctl.lastScrollX = sx;
+          ctl.lastScrollY = sy;
+          actionKind = "scroll";
+          human = "Scroll page";
+          label = `Scroll to X:${sx}, Y:${sy}`;
+        } else {
+          const sig = snapshotSignature();
+          if (!sig || sig === ctl.lastSig) return;
+          ctl.lastSig = sig;
+        }
 
         const now = Date.now();
         if ((now - ctl.lastUiChangeAt) < UI_CHANGE_MIN_INTERVAL_MS) {
@@ -236,9 +281,9 @@
         await sendEvent({
           type: "ui-change",
           url: location.href,
-          human: "UI changed",
-          label: "Dynamic content",
-          actionKind: "ui-change",
+          human,
+          label,
+          actionKind,
           pageIsLogin: findLoginContext().isLogin,
           pageHasSensitiveText: detectSensitiveTextOrAttrs(),
           redactRects: collectSensitiveRectsWithFrame().rects,
@@ -250,10 +295,15 @@
       }
     };
 
-    ctl.observer = new MutationObserver(() => {
+    function queueTrigger(reason) {
       if (!ctl.active || !ctl.observing) return;
+      if (reason === "scroll") ctl.pendingScroll = true;
       clearTimeout(ctl.timerId);
       ctl.timerId = setTimeout(trigger, Math.max(250, ctl.pageWatchMs || 500));
+    }
+
+    ctl.observer = new MutationObserver(() => {
+      queueTrigger("mutation");
     });
 
     ctl.onVisibilityChange = () => {
@@ -261,8 +311,16 @@
         ctl.lastSig = snapshotSignature();
       }
     };
+    ctl.requestRefresh = async () => {
+      try { await refreshSettings(); } catch (_) {}
+    };
     ctl.onLifecycleCleanup = () => stopPageWatch("lifecycle");
+    ctl.onScroll = () => {
+      if (!ctl.active || !ctl.observing) return;
+      queueTrigger("scroll");
+    };
     document.addEventListener("visibilitychange", ctl.onVisibilityChange);
+    window.addEventListener("scroll", ctl.onScroll, { capture: true, passive: true });
     window.addEventListener("pagehide", ctl.onLifecycleCleanup, true);
     window.addEventListener("beforeunload", ctl.onLifecycleCleanup, true);
     contentLog("pageWatch:started", { pageWatchMs: ctl.pageWatchMs });
@@ -652,6 +710,7 @@
 
   const SUBMIT_DEDUPE_MS = 1000;
   let lastSubmitEvent = { key: "", ts: 0 };
+  let lastNavScreenshotAt = 0;
 
   function formFingerprint(form) {
     if (!form) return "no-form";
@@ -856,14 +915,31 @@
 
   // ---- Navigation capture (SPA) ----
   let lastUrl = location.href;
+  function shouldForceScreenshotByDynamicInterval(pageWatchMs, nowMs) {
+    const ms = Math.max(1, Number(pageWatchMs) || 500);
+    if (ms >= UI_CHANGE_SCREENSHOT_MAX_PAGEWATCH_MS) return false;
+    const intervalMs = Math.max(UI_CHANGE_SCREENSHOT_INACTIVITY_MS, ms * UI_CHANGE_SCREENSHOT_MULTIPLIER);
+    return (nowMs - lastNavScreenshotAt) >= intervalMs;
+  }
+
   async function emitNavIfChanged(forceShot=false) {
     if (location.href === lastUrl) return;
     lastUrl = location.href;
 
     const st = await getState();
     if (!st.isRecording) return;
+    if (st.settings && st.settings.activeTabOnly && st.isActiveCaptureTab === false) return;
 
+    const now = Date.now();
+    let forceScreenshot = !!forceShot;
+    if (!forceScreenshot && st.settings && st.settings.activeTabOnly && st.settings.pageWatchEnabled !== false) {
+      if (shouldForceScreenshotByDynamicInterval(st.settings.pageWatchMs, now)) {
+        forceScreenshot = true;
+      }
+    }
     const login = findLoginContext();
+    const finalForceScreenshot = forceScreenshot || !!login.isLogin;
+    if (finalForceScreenshot) lastNavScreenshotAt = now;
     const redaction = collectSensitiveRectsWithFrame();
     await sendEvent({
       type: "nav",
@@ -877,7 +953,7 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
-      forceScreenshot: forceShot || !!login.isLogin
+      forceScreenshot: finalForceScreenshot
     });
   }
 
@@ -889,6 +965,15 @@
 
   // Initial page: if login, capture a nav step with forced screenshot so you always get the login page in the report.
   setupPageWatch();
+  browser.runtime.onMessage.addListener((msg) => {
+    if (!msg || msg.type !== "UIR_ACTIVE_TARGET_UPDATED") return;
+    const ctl = window.__uiRecorderPageWatchCtl;
+    if (ctl && typeof ctl.requestRefresh === "function") {
+      ctl.requestRefresh();
+      contentLog("pageWatch:refresh-from-target-update", { reason: msg.reason || "unknown" });
+    }
+  });
+
   setTimeout(async () => {
     const st = await getState();
     if (!st.isRecording) return;
