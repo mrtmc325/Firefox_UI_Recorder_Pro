@@ -1,4 +1,4 @@
-// UI Workflow Recorder Pro (Firefox MV2) - v1.11.1
+// UI Workflow Recorder Pro (Firefox MV2) - v1.11.2
 // Clean capture, diff-based screenshots, and text-only redaction for reports.
 
 let isRecording = false;

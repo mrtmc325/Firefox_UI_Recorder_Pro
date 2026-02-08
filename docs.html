@@ -8,12 +8,13 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.11.1. This release removes burst trigger interval gating/configuration and keeps burst controls cleaner while preserving existing hotkey burst behavior.</p>
+    <p>Version 1.11.2. This release hardens report-builder memory behavior for long sessions by pausing offscreen burst playback and unloading preview content when collapsed.</p>
 
-    <h2>Version Notes (v1.11.1)</h2>
+    <h2>Version Notes (v1.11.2)</h2>
     <ul>
-      <li>Burst trigger interval control was removed from popup advanced settings.</li>
-      <li>Burst activation now starts from qualifying consecutive events without a trigger-window gate.</li>
+      <li>Burst replay cards now auto-pause when offscreen and resume when visible.</li>
+      <li>Burst player teardown now removes listeners/observers and releases frame/canvas resources more aggressively.</li>
+      <li>Inline quick preview now unloads iframe content on collapse to avoid hidden memory growth.</li>
       <li>Fast click replay (GIF-style canvas loop) added with per-burst Play/Pause controls.</li>
       <li>Each burst replay now includes a per-card speed slider in the editor and exported HTML.</li>
       <li>Click burst replay cards are embedded inline with workflow steps (time-ordered), not grouped into a separate top section.</li>

@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.11.2 - 2026-02-08
+
+### Changed
+- Burst replay players in the report builder now pause when cards are offscreen and resume when visible.
+- Quick export preview now unloads iframe `srcdoc` when collapsed.
+- Inline preview rendering now uses a small HTML cache to avoid unnecessary iframe rebuild churn.
+
+### Fixed
+- Hardened long-session report-builder memory behavior:
+  - burst player destroy path now removes listeners/observers and clears frame/canvas resources.
+  - reduced hidden playback/timer activity while builder remains open for extended periods.
+
 ## v1.11.1 - 2026-02-08
 
 ### Changed

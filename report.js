@@ -1213,6 +1213,10 @@ function createClickBurstPlayer(card, burst, options) {
   let timerId = null;
   let destroyed = false;
   let speedMultiplier = 1;
+  let visibleInViewport = true;
+  let pageVisible = typeof document !== "undefined" ? !document.hidden : true;
+  let visibilityObserver = null;
+  let visibilityListenerAttached = false;
 
   const stopLoop = () => {
     if (timerId) {
@@ -1220,6 +1224,14 @@ function createClickBurstPlayer(card, burst, options) {
       timerId = null;
     }
   };
+
+  const isRuntimePlayable = () => (
+    !destroyed &&
+    isPlaying &&
+    visibleInViewport &&
+    pageVisible &&
+    frames.length >= 2
+  );
 
   const destroyImages = () => {
     frames.forEach((entry) => {
@@ -1330,7 +1342,7 @@ function createClickBurstPlayer(card, burst, options) {
 
   const startLoop = () => {
     stopLoop();
-    if (destroyed || !isPlaying || frames.length < 2) return;
+    if (!isRuntimePlayable()) return;
     const frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / Math.max(0.25, Math.min(3, speedMultiplier))));
     timerId = setInterval(() => {
       frameIndex += 1;
@@ -1347,22 +1359,48 @@ function createClickBurstPlayer(card, burst, options) {
     startLoop();
   };
 
-  playPause.addEventListener("click", () => setPlaying(!isPlaying));
-  jumpFirst.addEventListener("click", () => {
+  const onPlayPauseClick = () => setPlaying(!isPlaying);
+  const onJumpFirstClick = () => {
     const stepId = burst && burst.frames && burst.frames[0] ? burst.frames[0].stepId : "";
     if (stepId && onJump) onJump(stepId);
-  });
-  jumpLast.addEventListener("click", () => {
+  };
+  const onJumpLastClick = () => {
     const last = burst && burst.frames ? burst.frames[burst.frames.length - 1] : null;
     const stepId = last && last.stepId ? last.stepId : "";
     if (stepId && onJump) onJump(stepId);
-  });
-  speedSlider.addEventListener("input", () => {
+  };
+  const onSpeedInput = () => {
     const next = Number(speedSlider.value);
     speedMultiplier = Number.isFinite(next) ? Math.max(0.25, Math.min(3, next)) : 1;
     speedValue.textContent = `${speedMultiplier.toFixed(2)}x`;
     if (isPlaying) startLoop();
-  });
+  };
+
+  playPause.addEventListener("click", onPlayPauseClick);
+  jumpFirst.addEventListener("click", onJumpFirstClick);
+  jumpLast.addEventListener("click", onJumpLastClick);
+  speedSlider.addEventListener("input", onSpeedInput);
+
+  const updateVisibilityState = () => {
+    if (destroyed) return;
+    pageVisible = typeof document !== "undefined" ? !document.hidden : true;
+    if (isRuntimePlayable()) startLoop();
+    else stopLoop();
+  };
+
+  if (typeof IntersectionObserver !== "undefined") {
+    visibilityObserver = new IntersectionObserver((entries) => {
+      if (destroyed) return;
+      const entry = Array.isArray(entries) && entries.length ? entries[entries.length - 1] : null;
+      visibleInViewport = !!(entry && entry.isIntersecting && entry.intersectionRatio > 0);
+      updateVisibilityState();
+    }, { root: null, threshold: [0, 0.01] });
+    visibilityObserver.observe(card);
+  }
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", updateVisibilityState);
+    visibilityListenerAttached = true;
+  }
 
   if (frames.length < 2) {
     progress.textContent = "Not enough valid frames";
@@ -1383,7 +1421,28 @@ function createClickBurstPlayer(card, burst, options) {
       if (destroyed) return;
       destroyed = true;
       stopLoop();
+      if (visibilityObserver) {
+        try { visibilityObserver.disconnect(); } catch (_) {}
+        visibilityObserver = null;
+      }
+      if (visibilityListenerAttached) {
+        try { document.removeEventListener("visibilitychange", updateVisibilityState); } catch (_) {}
+        visibilityListenerAttached = false;
+      }
+      playPause.removeEventListener("click", onPlayPauseClick);
+      jumpFirst.removeEventListener("click", onJumpFirstClick);
+      jumpLast.removeEventListener("click", onJumpLastClick);
+      speedSlider.removeEventListener("input", onSpeedInput);
       destroyImages();
+      frames.forEach((entry) => {
+        if (!entry) return;
+        entry.src = "";
+        entry.marker = null;
+        entry.stepId = "";
+      });
+      canvas.width = 1;
+      canvas.height = 1;
+      ctx.clearRect(0, 0, 1, 1);
       if (onDestroy) onDestroy();
     }
   };
@@ -2822,6 +2881,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   let activeAnnotationTeardown = null;
   let activeBurstPlayers = [];
   let previewRefreshTimer = null;
+  let inlinePreviewHtmlCache = "";
 
   function destroyBurstPlayers() {
     if (!Array.isArray(activeBurstPlayers) || !activeBurstPlayers.length) {
@@ -3249,6 +3309,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       exportPreviewPanel.open = false;
     }
     if (exportPreviewFrame) exportPreviewFrame.srcdoc = "";
+    inlinePreviewHtmlCache = "";
   }
 
   function renderInlineQuickPreview(showPanel) {
@@ -3272,7 +3333,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (showPanel) {
       exportPreviewPanel.open = true;
     }
-    exportPreviewFrame.srcdoc = html;
+    if (html !== inlinePreviewHtmlCache) {
+      exportPreviewFrame.srcdoc = html;
+      inlinePreviewHtmlCache = html;
+    }
     return true;
   }
 
@@ -3893,6 +3957,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!exportPreviewPanel.open && previewRefreshTimer) {
         clearTimeout(previewRefreshTimer);
         previewRefreshTimer = null;
+      }
+      if (!exportPreviewPanel.open && exportPreviewFrame) {
+        exportPreviewFrame.srcdoc = "";
+        inlinePreviewHtmlCache = "";
       }
       if (exportPreviewPanel.open) {
         renderInlineQuickPreview(false);
