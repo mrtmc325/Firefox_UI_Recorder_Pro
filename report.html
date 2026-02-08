@@ -213,9 +213,16 @@
               Accent
               <input id="export-theme-accent" type="color" value="#0ea5e9" />
             </label>
+            <label class="row export-theme-speed-row">
+              Burst replay speed
+              <div class="export-theme-speed-control">
+                <input id="burst-playback-speed" type="range" min="0.25" max="3" step="0.05" value="1" />
+                <span id="burst-playback-speed-value" class="export-theme-speed-value">1.00x</span>
+              </div>
+            </label>
             <button id="export-theme-reset" class="btn ghost export-theme-reset" type="button">Reset export theme</button>
           </div>
-          <div class="hint">These settings apply to quick preview and exported HTML bundles.</div>
+          <div class="hint">These settings apply to quick preview and exported HTML bundles, including burst replay speed.</div>
         </div>
         <div id="import-status" class="hint"></div>
       </section>

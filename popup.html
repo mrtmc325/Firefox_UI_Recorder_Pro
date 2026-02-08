@@ -14,7 +14,7 @@
         <div class="subtitle">UI workflow capture</div>
       </div>
     </div>
-    <div class="version">v1.11.3</div>
+    <div class="version">v1.11.5</div>
   </header>
 
   <section class="card actions">
@@ -112,6 +112,26 @@
           GIF Capture Mode
           <span id="burst-mode-chip" class="burst-mode-chip">GIF: OFF</span>
         </div>
+        <label class="row">
+          GIF capture FPS
+          <select id="gif-capture-fps">
+            <option value="5">5 FPS</option>
+            <option value="10">10 FPS</option>
+            <option value="15">15 FPS</option>
+          </select>
+        </label>
+        <label class="row">
+          Click marker color
+          <input id="gif-marker-color" type="color" value="#2563eb" />
+        </label>
+        <label class="row">
+          Number icon style
+          <select id="gif-marker-style">
+            <option value="rounded-bold">Rounded bold</option>
+            <option value="tech-mono">Tech mono</option>
+            <option value="outline-heavy">Outline heavy</option>
+          </select>
+        </label>
       </div>
     </details>
 
@@ -122,7 +142,7 @@
       </summary>
       <div class="settings-group-body">
         <div class="hint">
-          Screenshots are unmodified. Only report text is redacted. Hotkeys: Ctrl+Shift+Y (record), Cmd+Opt+G/Ctrl+Alt+G (GIF capture toggle at 5 FPS while recording). GIF mode is hotkey-only.
+          Screenshots are unmodified. Only report text is redacted. Hotkeys: Ctrl+Shift+Y (record), Cmd+Opt+G/Ctrl+Alt+G (GIF capture toggle at selected FPS while recording). GIF mode is hotkey-only. Marker color/style settings apply to replay numbering in builder and export.
         </div>
       </div>
     </details>

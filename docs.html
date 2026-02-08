@@ -8,23 +8,28 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.11.4. This release makes GIF capture hotkey-only, removes burst tuning from the popup/editor playback, and keeps burst replay at a fixed 5 FPS target cadence.</p>
+    <p>Version 1.11.5. This release adds hotkey stop grace handling, condenses synthetic pre-burst placeholders, and keeps GIF capture hotkey-only with tunable 5/10/15 FPS capture.</p>
 
-    <h2>Version Notes (v1.11.4)</h2>
+    <h2>Version Notes (v1.11.5)</h2>
     <ul>
-      <li>Documentation wording now matches live behavior for hotkey burst split boundaries (epoch/toggle-based) and fixed replay cadence.</li>
+      <li>Hotkey stop now uses a 2000ms grace window so final GIF burst frames can be captured before recording fully ends.</li>
+      <li>Pressing the record hotkey again during the stop grace window performs an immediate stop.</li>
+      <li>Synthetic pre-burst source rows are now condensed from visible step lists; replay cards remain inline in chronological flow.</li>
+      <li>Documentation wording now matches live behavior for hotkey burst split boundaries (epoch/toggle-based), with selectable capture cadence (5/10/15 FPS) and tunable replay speed.</li>
       <li>Report builder step actions now use a precomputed event-position map to reduce per-render lookup overhead on larger reports.</li>
       <li>Default debug logging is now disabled in background/content/popup scripts for lower long-session console noise and overhead.</li>
       <li>Burst replay cards now auto-pause when offscreen and resume when visible.</li>
       <li>Burst player teardown now removes listeners/observers and releases frame/canvas resources more aggressively.</li>
       <li>Inline quick preview now unloads iframe content on collapse to avoid hidden memory growth.</li>
       <li>Fast click replay (GIF-style canvas loop) added with per-burst Play/Pause controls.</li>
+      <li>Burst replay speed is configurable in the report builder and exported HTML uses the same selected speed.</li>
+      <li>Burst click markers are now 3x larger for visibility, with popup controls for marker color and 3 marker-number styles.</li>
       <li>Click burst replay cards are embedded inline with workflow steps (time-ordered), not grouped into a separate top section.</li>
       <li>Exported HTML includes inline click burst replay cards that loop and can be paused.</li>
       <li>Recorder now attempts an automatic screenshot-backed lifecycle step on both <strong>Start</strong> and <strong>Stop</strong>.</li>
       <li>Normal mode keeps click screenshots only when click causes detectable UI update (unless force-screenshot is set).</li>
       <li>Hotkey GIF burst mode is unconditional for workflow-driving events and bypasses click UI probe delay, diff dedupe, and normal screenshot debounce/min-interval gates.</li>
-      <li>Popup now shows a read-only GIF burst mode status chip (ON/OFF) with no burst tuning controls.</li>
+      <li>Popup shows GIF burst mode status and lightweight pre-record controls for capture FPS (5/10/15) plus click marker appearance.</li>
       <li>GIF burst mode is keyboard-driven during recording: <strong>Cmd+Opt+G</strong> (macOS target) / <strong>Ctrl+Alt+G</strong> (default).</li>
       <li>When GIF burst mode is ON, page-watch is automatically disabled; when OFF, your tuned page-watch settings resume.</li>
       <li>In hotkey GIF mode, one burst continues for the active hotkey epoch until mode is toggled OFF.</li>
@@ -141,10 +146,12 @@
     <h2>Keyboard Shortcuts</h2>
     <ul>
       <li><code>Ctrl+Shift+Y</code> toggles start/stop recording.</li>
+      <li>Hotkey stop grace: first <code>Ctrl+Shift+Y</code> stop press schedules stop in 2000ms; a second press during grace forces immediate stop.</li>
       <li><code>Cmd+Opt+G</code> (macOS target) / <code>Ctrl+Alt+G</code> (default) toggles high-speed GIF burst mode while recording.</li>
-      <li>When ON, GIF burst mode attempts unconditional screenshot capture at a default 5 FPS target cadence until toggled OFF.</li>
-      <li>GIF burst behavior is hotkey-only and fixed; popup burst tuning controls are removed.</li>
-      <li>5 FPS is the fixed target cadence in GIF mode; actual capture speed can be lower on slow systems.</li>
+      <li>When ON, GIF burst mode attempts unconditional screenshot capture at the selected 5/10/15 FPS target cadence until toggled OFF.</li>
+      <li>GIF burst behavior is hotkey-only; popup tuning is intentionally limited to capture FPS and marker appearance.</li>
+      <li>Capture FPS is selectable (5/10/15) in popup GIF settings; replay speed is tuned in the report builder and carried into export.</li>
+      <li>Popup/API stop actions remain immediate and do not use the hotkey stop grace delay.</li>
       <li>If this shortcut conflicts with a browser shortcut, rebind the extension command from Firefox extension shortcuts.</li>
     </ul>
 

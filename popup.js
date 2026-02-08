@@ -7,6 +7,24 @@ function popupLog(message, data) {
   else console.log(prefix, message, data);
 }
 
+function normalizeHexColor(value, fallback = "#2563eb") {
+  const color = String(value || "").trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(color)) return color.toLowerCase();
+  return fallback;
+}
+
+function normalizeMarkerStyle(value) {
+  const style = String(value || "").trim().toLowerCase();
+  if (style === "tech-mono" || style === "outline-heavy") return style;
+  return "rounded-bold";
+}
+
+function normalizeHotkeyBurstFps(value) {
+  const fps = Math.round(Number(value));
+  if (fps === 10 || fps === 15) return fps;
+  return 5;
+}
+
 async function writeControlSignal() {
   const now = Date.now();
   const payload = { __uiRecorderStopRequestTs: now, __uiRecorderStopSource: "popup" };
@@ -44,14 +62,24 @@ async function refresh() {
   }
   popupLog("refresh:state", { isRecording: !!st.isRecording, isPaused: !!st.isPaused, count: st.count || 0 });
   const burstMode = !!st.burstHotkeyModeActive;
+  const pendingStopUntilMs = Number(st.pendingHotkeyStopUntilMs);
+  const pendingStop = !!st.pendingHotkeyStop && Number.isFinite(pendingStopUntilMs) && pendingStopUntilMs > Date.now();
+  const pendingSeconds = pendingStop
+    ? Math.max(0.1, Math.ceil((pendingStopUntilMs - Date.now()) / 100) / 10)
+    : 0;
   const statusText = st.isRecording
-    ? (st.isPaused ? "Paused" : (burstMode ? "Recording... (GIF Capture)" : "Recording..."))
+    ? (
+      pendingStop
+        ? `Stopping in ${pendingSeconds.toFixed(1)}s...`
+        : (st.isPaused ? "Paused" : (burstMode ? "Recording... (GIF Capture)" : "Recording..."))
+    )
     : "Idle";
   document.getElementById("status").textContent = statusText;
   document.getElementById("count").textContent = `Steps captured: ${st.count || 0}`;
   const burstChip = document.getElementById("burst-mode-chip");
+  const burstFps = normalizeHotkeyBurstFps(st.settings?.hotkeyBurstFps);
   if (burstChip) {
-    burstChip.textContent = burstMode ? "GIF: ON (5 FPS)" : "GIF: OFF";
+    burstChip.textContent = burstMode ? `GIF: ON (${burstFps} FPS)` : `GIF: OFF (${burstFps} FPS)`;
     burstChip.classList.toggle("active", burstMode);
   }
 
@@ -67,6 +95,9 @@ async function refresh() {
   document.getElementById("prune-inputs").checked = !!st.settings?.pruneInputs;
   document.getElementById("page-watch").checked = !!st.settings?.pageWatchEnabled;
   document.getElementById("page-watch-ms").value = st.settings?.pageWatchMs ?? 500;
+  document.getElementById("gif-capture-fps").value = String(burstFps);
+  document.getElementById("gif-marker-color").value = normalizeHexColor(st.settings?.clickBurstMarkerColor, "#2563eb");
+  document.getElementById("gif-marker-style").value = normalizeMarkerStyle(st.settings?.clickBurstMarkerStyle);
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -142,6 +173,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("page-watch-ms").addEventListener("change", async (e) => {
     await updateSettings({ pageWatchMs: Math.max(200, Number(e.target.value || 500)) });
+    await refresh();
+  });
+  document.getElementById("gif-capture-fps").addEventListener("change", async (e) => {
+    await updateSettings({ hotkeyBurstFps: normalizeHotkeyBurstFps(e.target.value) });
+    await refresh();
+  });
+  document.getElementById("gif-marker-color").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstMarkerColor: normalizeHexColor(e.target.value, "#2563eb") });
+    await refresh();
+  });
+  document.getElementById("gif-marker-style").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstMarkerStyle: normalizeMarkerStyle(e.target.value) });
     await refresh();
   });
   await refresh();

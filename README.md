@@ -1,24 +1,30 @@
-# UI Workflow Recorder Pro (Firefox) v1.11.4
+# UI Workflow Recorder Pro (Firefox) v1.11.5
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.11.4`
+- Version: `1.11.5`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
 - Strict active-tab-only capture mode (follows active tab in focused window).
 - Fast-click burst replay capture:
   - Builds burst replay cards from hotkey GIF capture frames and renders them inline in workflow order.
-  - Blue numbered click markers (ordered progression) with play/pause.
-  - Replay runs at a fixed 5 FPS target cadence.
+  - Large numbered click markers (3x size) with ordered progression and play/pause.
+  - Marker color and marker-number style are configurable pre-record in the extension popup (3 styles).
+  - Replay speed is tunable in the report builder (0.25x to 3.00x), and exported HTML starts at the same selected speed.
   - Keyboard-controlled during recording: `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default).
   - While burst mode is on, page-watch is temporarily disabled; turning burst mode off restores tuned page-watch behavior.
-  - Hotkey burst mode is unconditional for workflow-driving events and uses a dedicated capture lane at a default 5 FPS target cadence.
+  - Hotkey burst mode is unconditional for workflow-driving events and uses a dedicated capture lane at the selected 5/10/15 FPS target cadence.
   - Hotkey burst mode bypasses click UI probe delays, diff dedupe, and normal screenshot debounce/min-interval gates.
   - Hotkey burst mode keeps one continuous burst for the active hotkey epoch until mode is toggled OFF.
-  - Popup shows burst mode status only (ON/OFF); burst behavior is no longer configurable in popup.
+  - Synthetic pre-burst source frames are condensed from the visible step list while replay cards stay inline in chronology.
+  - GIF mode remains hotkey-only; popup allows lightweight pre-record tuning for capture FPS (5/10/15) and click marker appearance.
   - Burst-mode memory safety cap keeps replay fidelity while preventing runaway screenshot growth.
+- Hotkey stop grace:
+  - Stopping via `Ctrl+Shift+Y` keeps recording alive for 2000ms so final burst frames can land.
+  - Pressing `Ctrl+Shift+Y` again during this grace window performs an immediate stop.
+  - Popup/API stop remains immediate.
 - Automatic lifecycle screenshots:
   - Recorder attempts a screenshot-backed step when recording starts.
   - Recorder attempts a screenshot-backed step when recording stops.
@@ -150,9 +156,11 @@ Expected behavior:
 
 ## Keyboard Shortcuts
 - `Ctrl+Shift+Y`: start/stop recording.
+- Hotkey stop grace is applied on `Ctrl+Shift+Y` stop: first press schedules stop in 2000ms, second press during grace stops immediately.
 - `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default): toggle high-speed GIF burst mode while recording.
-- While ON, GIF burst mode attempts unconditional screenshot capture at a default 5 FPS target cadence until toggled OFF.
-- GIF burst behavior is hotkey-only and fixed; popup burst tuning controls are removed.
+- While ON, GIF burst mode attempts unconditional screenshot capture at the selected 5/10/15 FPS target cadence until toggled OFF.
+- GIF burst behavior is hotkey-only; popup provides only lightweight controls for FPS (5/10/15) and click marker appearance.
+- Burst replay speed is configured in the report builder and carried into exported HTML replay cards.
 - Actual FPS can be lower on slower systems due to browser capture throughput limits.
 - If this shortcut conflicts with Firefox/browser defaults, rebind this command in Firefox extension shortcuts.
 

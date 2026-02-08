@@ -826,6 +826,11 @@ body.report .toolbar .theme-toggle {
   min-width: 0;
 }
 
+.export-theme-controls .row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+}
+
 .export-theme-controls .row input[type="color"] {
   height: 34px;
   padding: 2px;
@@ -836,6 +841,26 @@ body.report .toolbar .theme-toggle {
 
 .export-theme-reset {
   justify-self: end;
+}
+
+.export-theme-speed-row {
+  align-self: stretch;
+}
+
+.export-theme-speed-control {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-theme-speed-value {
+  min-width: 44px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
 }
 
 .export-preview-panel {
@@ -1379,6 +1404,23 @@ body.report.report-dense .annot-tools {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.click-burst-speed-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.click-burst-speed-slider {
+  width: 96px;
+}
+
+.click-burst-speed-value {
+  min-width: 36px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .click-burst-progress {

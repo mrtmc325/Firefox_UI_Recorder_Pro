@@ -40,11 +40,14 @@ const EXPORT_THEME_DEFAULTS = Object.freeze({
 const CLICK_BURST_DEFAULTS = Object.freeze({
   clickBurstEnabled: true,
   clickBurstMarkerColor: "#2563eb",
+  clickBurstMarkerStyle: "rounded-bold",
   clickBurstAutoPlay: true,
   clickBurstCondenseStepScreenshots: true,
-  clickBurstPlaybackFps: 5
+  clickBurstPlaybackFps: 5,
+  clickBurstPlaybackSpeed: 1
 });
 const CLICK_BURST_RENDER_MARKER_CAP = 10;
+const CLICK_BURST_MARKER_SCALE = 3;
 
 const EXPORT_THEME_PRESETS = Object.freeze({
   extension: Object.freeze({
@@ -235,9 +238,34 @@ function normalizeExportTheme(raw) {
   return { preset, font, tocLayout, tocMeta, accentColor };
 }
 
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return Number(fallback);
+  return Math.max(min, Math.min(max, num));
+}
+
+function normalizeClickBurstMarkerStyle(value) {
+  const style = String(value || "").trim().toLowerCase();
+  if (style === "tech-mono" || style === "outline-heavy") return style;
+  return "rounded-bold";
+}
+
 function normalizeClickBurstSettings(raw) {
-  if (!isPlainObject(raw)) return { ...CLICK_BURST_DEFAULTS };
-  return { ...CLICK_BURST_DEFAULTS };
+  const incoming = isPlainObject(raw) ? raw : {};
+  return {
+    ...CLICK_BURST_DEFAULTS,
+    clickBurstMarkerColor: normalizeHexColor(
+      incoming.clickBurstMarkerColor,
+      CLICK_BURST_DEFAULTS.clickBurstMarkerColor
+    ),
+    clickBurstMarkerStyle: normalizeClickBurstMarkerStyle(incoming.clickBurstMarkerStyle),
+    clickBurstPlaybackSpeed: Number(clampNumber(
+      incoming.clickBurstPlaybackSpeed,
+      0.25,
+      3,
+      CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed
+    ).toFixed(2))
+  };
 }
 
 function encodeText(value) {
@@ -947,20 +975,56 @@ function buildBurstFrameMap(bursts) {
   return map;
 }
 
-function buildBurstInsertionMap(bursts) {
-  const map = new Map();
-  if (!Array.isArray(bursts)) return map;
+function buildBurstInsertionPlan(sourceEvents, displayEvents, bursts) {
+  const byStepId = new Map();
+  const prelude = [];
+  if (!Array.isArray(bursts) || !bursts.length) {
+    return { byStepId, prelude };
+  }
+
+  const source = Array.isArray(sourceEvents) ? sourceEvents : [];
+  const display = Array.isArray(displayEvents) ? displayEvents : [];
+  const sourceStepIds = source.map((ev) => (ev && ev.stepId ? String(ev.stepId) : ""));
+  const sourcePosByStepId = new Map();
+  sourceStepIds.forEach((stepId, pos) => {
+    if (!stepId || sourcePosByStepId.has(stepId)) return;
+    sourcePosByStepId.set(stepId, pos);
+  });
+  const visibleStepIds = new Set(
+    display
+      .map((ev) => (ev && ev.stepId ? String(ev.stepId) : ""))
+      .filter(Boolean)
+  );
+
+  const findAnchorStepId = (stepId) => {
+    if (!stepId || !sourcePosByStepId.has(stepId)) return null;
+    const pos = sourcePosByStepId.get(stepId);
+    for (let i = pos; i >= 0; i--) {
+      const candidateStepId = sourceStepIds[i];
+      if (candidateStepId && visibleStepIds.has(candidateStepId)) {
+        return candidateStepId;
+      }
+    }
+    return null;
+  };
+
   bursts.forEach((burst, burstIndex) => {
     const frames = Array.isArray(burst && burst.frames) ? burst.frames : [];
     if (frames.length < 2) return;
     const firstFrame = frames[0];
-    const stepId = firstFrame && firstFrame.stepId ? String(firstFrame.stepId) : "";
-    if (!stepId) return;
-    const list = map.get(stepId) || [];
-    list.push({ burst, burstIndex });
-    map.set(stepId, list);
+    const firstStepId = firstFrame && firstFrame.stepId ? String(firstFrame.stepId) : "";
+    const anchorStepId = findAnchorStepId(firstStepId);
+    const entry = { burst, burstIndex, anchorStepId };
+    if (!anchorStepId) {
+      prelude.push(entry);
+      return;
+    }
+    const list = byStepId.get(anchorStepId) || [];
+    list.push(entry);
+    byStepId.set(anchorStepId, list);
   });
-  return map;
+
+  return { byStepId, prelude };
 }
 
 function isImpliedBurstStep(ev, burstFrameMap, burstSettings) {
@@ -969,24 +1033,45 @@ function isImpliedBurstStep(ev, burstFrameMap, burstSettings) {
   if (!stepId) return false;
   const burstFrame = burstFrameMap.get(stepId);
   if (!burstFrame) return false;
-  return !!(
-    burstSettings.clickBurstCondenseStepScreenshots &&
-    burstFrame.frameIndex > 0 &&
-    !ev.annotation
-  );
+  if (ev.burstSynthetic && !ev.annotation) {
+    // Synthetic burst frames should stay implied; replay cards are the visible artifact.
+    return true;
+  }
+  return !!(burstSettings.clickBurstCondenseStepScreenshots && burstFrame.frameIndex > 0 && !ev.annotation);
 }
 
-function drawBurstMarker(ctx, x, y, markerIndex, markerColor) {
-  const radius = 12;
+function drawBurstMarker(ctx, x, y, markerIndex, markerColor, markerStyle) {
+  const radius = 12 * CLICK_BURST_MARKER_SCALE;
+  const style = normalizeClickBurstMarkerStyle(markerStyle);
+  let fillColor = hexToRgba(markerColor, 0.2);
+  let strokeColor = markerColor;
+  let textColor = "#ffffff";
+  let lineWidth = 6;
+  let font = "800 34px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+
+  if (style === "tech-mono") {
+    fillColor = "rgba(15, 23, 42, 0.78)";
+    strokeColor = markerColor;
+    textColor = "#e2e8f0";
+    lineWidth = 7;
+    font = "700 30px \"JetBrains Mono\", \"SFMono-Regular\", Menlo, Consolas, monospace";
+  } else if (style === "outline-heavy") {
+    fillColor = "rgba(255, 255, 255, 0.92)";
+    strokeColor = markerColor;
+    textColor = markerColor;
+    lineWidth = 8;
+    font = "900 34px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+  }
+
   ctx.beginPath();
   ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(37, 99, 235, 0.18)";
+  ctx.fillStyle = fillColor;
   ctx.fill();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = markerColor;
+  ctx.lineWidth = lineWidth;
+  ctx.strokeStyle = strokeColor;
   ctx.stroke();
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 12px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+  ctx.fillStyle = textColor;
+  ctx.font = font;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(String(markerIndex), x, y);
@@ -995,9 +1080,20 @@ function drawBurstMarker(ctx, x, y, markerIndex, markerColor) {
 function createClickBurstPlayer(card, burst, options) {
   const fps = CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
   const baseFrameDurationMs = Math.max(16, Math.round(1000 / fps));
-  const markerColor = CLICK_BURST_DEFAULTS.clickBurstMarkerColor;
+  const markerColor = normalizeHexColor(
+    options && options.markerColor,
+    CLICK_BURST_DEFAULTS.clickBurstMarkerColor
+  );
+  const markerStyle = normalizeClickBurstMarkerStyle(options && options.markerStyle);
   const autoPlay = CLICK_BURST_DEFAULTS.clickBurstAutoPlay;
+  let speedMultiplier = Number(clampNumber(
+    options && options.speedMultiplier,
+    0.25,
+    3,
+    CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed
+  ).toFixed(2));
   const onJump = options && typeof options.onJump === "function" ? options.onJump : null;
+  const onSpeedCommit = options && typeof options.onSpeedCommit === "function" ? options.onSpeedCommit : null;
   const onDestroy = options && typeof options.onDestroy === "function" ? options.onDestroy : null;
 
   const media = el("div", "click-burst-media");
@@ -1011,12 +1107,25 @@ function createClickBurstPlayer(card, burst, options) {
   const controls = el("div", "click-burst-controls");
   const playPause = el("button", "btn ghost btn-small", autoPlay ? "Pause" : "Play");
   playPause.type = "button";
+  const speedWrap = el("label", "click-burst-speed-control");
+  speedWrap.title = "Replay speed";
+  const speedInput = document.createElement("input");
+  speedInput.type = "range";
+  speedInput.min = "0.25";
+  speedInput.max = "3";
+  speedInput.step = "0.05";
+  speedInput.value = String(speedMultiplier);
+  speedInput.className = "click-burst-speed-slider";
+  const speedValue = el("span", "click-burst-speed-value", `${speedMultiplier.toFixed(2)}x`);
+  speedWrap.appendChild(speedInput);
+  speedWrap.appendChild(speedValue);
   const progress = el("span", "click-burst-progress", "Frame 0/0");
   const jumpFirst = el("button", "btn subtle btn-small", "Jump first");
   jumpFirst.type = "button";
   const jumpLast = el("button", "btn subtle btn-small", "Jump last");
   jumpLast.type = "button";
   controls.appendChild(playPause);
+  controls.appendChild(speedWrap);
   controls.appendChild(progress);
   controls.appendChild(jumpFirst);
   controls.appendChild(jumpLast);
@@ -1174,7 +1283,7 @@ function createClickBurstPlayer(card, burst, options) {
       if (!point) continue;
       const x = Math.round(point.x * canvas.width);
       const y = Math.round(point.y * canvas.height);
-      drawBurstMarker(ctx, x, y, i + 1, markerColor);
+      drawBurstMarker(ctx, x, y, i + 1, markerColor, markerStyle);
     }
 
     progress.textContent = `Frame ${index + 1}/${frames.length}`;
@@ -1183,13 +1292,14 @@ function createClickBurstPlayer(card, burst, options) {
   const startLoop = () => {
     stopLoop();
     if (!isRuntimePlayable()) return;
+    const frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / speedMultiplier));
     timerId = setInterval(() => {
       frameIndex += 1;
       if (frameIndex >= frames.length) {
         frameIndex = 0;
       }
       drawFrame(frameIndex);
-    }, baseFrameDurationMs);
+    }, frameDurationMs);
   };
 
   const setPlaying = (next) => {
@@ -1208,9 +1318,26 @@ function createClickBurstPlayer(card, burst, options) {
     const stepId = last && last.stepId ? last.stepId : "";
     if (stepId && onJump) onJump(stepId);
   };
+  const onSpeedInput = () => {
+    const nextSpeed = Number(clampNumber(
+      speedInput.value,
+      0.25,
+      3,
+      CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed
+    ).toFixed(2));
+    speedMultiplier = nextSpeed;
+    speedValue.textContent = `${nextSpeed.toFixed(2)}x`;
+    if (isPlaying) startLoop();
+  };
+  const onSpeedChange = () => {
+    if (!onSpeedCommit) return;
+    onSpeedCommit(speedMultiplier);
+  };
   playPause.addEventListener("click", onPlayPauseClick);
   jumpFirst.addEventListener("click", onJumpFirstClick);
   jumpLast.addEventListener("click", onJumpLastClick);
+  speedInput.addEventListener("input", onSpeedInput);
+  speedInput.addEventListener("change", onSpeedChange);
 
   const updateVisibilityState = () => {
     if (destroyed) return;
@@ -1263,6 +1390,8 @@ function createClickBurstPlayer(card, burst, options) {
       playPause.removeEventListener("click", onPlayPauseClick);
       jumpFirst.removeEventListener("click", onJumpFirstClick);
       jumpLast.removeEventListener("click", onJumpLastClick);
+      speedInput.removeEventListener("input", onSpeedInput);
+      speedInput.removeEventListener("change", onSpeedChange);
       destroyImages();
       frames.forEach((entry) => {
         if (!entry) return;
@@ -1299,6 +1428,10 @@ function renderClickBursts(target, bursts, options) {
     card.appendChild(head);
 
     const player = createClickBurstPlayer(card, burst, {
+      markerColor: options && options.markerColor,
+      markerStyle: options && options.markerStyle,
+      speedMultiplier: options && options.speedMultiplier,
+      onSpeedCommit: options && options.onSpeedCommit,
       onJump: options && options.onJump
     });
     players.push(player);
@@ -2094,11 +2227,17 @@ function buildExportHtml(report, options = {}) {
     };
   });
   const burstDataJson = JSON.stringify({
+    markerColor: burstSettings.clickBurstMarkerColor,
+    markerStyle: burstSettings.clickBurstMarkerStyle,
+    playbackSpeed: burstSettings.clickBurstPlaybackSpeed,
     bursts: burstData
   }).replace(/</g, "\\u003c");
-  const burstInsertionMap = buildBurstInsertionMap(derivedBursts);
+  const burstInsertionPlan = buildBurstInsertionPlan(burstSourceEvents, events, derivedBursts);
 
   const rowParts = [];
+  (burstInsertionPlan.prelude || []).forEach(({ burstIndex }) => {
+    rowParts.push(`<div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div>`);
+  });
   events.forEach((ev, i) => {
     const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
     const stepTitle = escapeHtml(titleFor(ev));
@@ -2118,7 +2257,7 @@ function buildExportHtml(report, options = {}) {
     const meta = `<div class="step-meta"><span class="meta-chip meta-time">${metaTs || "Time n/a"}</span>${urlChip}</div>`;
     rowParts.push(`<div id="${stepId}" class="step"><div class="step-title">${i + 1}. ${stepTitle}</div>${meta}${wrap}</div>`);
 
-    const insertions = burstInsertionMap.get(stepId) || [];
+    const insertions = burstInsertionPlan.byStepId.get(stepId) || [];
     insertions.forEach(({ burstIndex }) => {
       rowParts.push(`<div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div>`);
     });
@@ -2359,6 +2498,20 @@ body{
   padding:2px 8px;
   cursor:pointer;
 }
+.click-burst-export-speed-control{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+}
+.click-burst-export-speed-slider{
+  width:90px;
+}
+.click-burst-export-speed-value{
+  min-width:36px;
+  text-align:right;
+  color:var(--muted);
+  font-size:10px;
+}
 .click-burst-export-progress{
   margin-left:auto;
   color:var(--muted);
@@ -2386,23 +2539,54 @@ ${rows}
   var slots = Array.prototype.slice.call(document.querySelectorAll(".click-burst-export-slot[data-burst-index]"));
   if (!slots.length) return;
   var bursts = Array.isArray(payload && payload.bursts) ? payload.bursts : [];
-  var markerColor = "${CLICK_BURST_DEFAULTS.clickBurstMarkerColor}";
+  var markerColorRaw = (payload && typeof payload.markerColor === "string") ? payload.markerColor : "${CLICK_BURST_DEFAULTS.clickBurstMarkerColor}";
+  var markerColor = /^#[0-9a-fA-F]{6}$/.test(markerColorRaw) ? markerColorRaw.toLowerCase() : "${CLICK_BURST_DEFAULTS.clickBurstMarkerColor}";
+  var markerStyleRaw = String((payload && payload.markerStyle) || "${CLICK_BURST_DEFAULTS.clickBurstMarkerStyle}").toLowerCase();
+  var markerStyle = (markerStyleRaw === "tech-mono" || markerStyleRaw === "outline-heavy") ? markerStyleRaw : "rounded-bold";
   var autoPlay = ${CLICK_BURST_DEFAULTS.clickBurstAutoPlay ? "true" : "false"};
   var fps = ${CLICK_BURST_DEFAULTS.clickBurstPlaybackFps};
+  var speedRaw = Number(payload && payload.playbackSpeed);
+  var defaultSpeedMultiplier = Number.isFinite(speedRaw) ? Math.max(0.25, Math.min(3, speedRaw)) : ${CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed};
   var markerCap = ${CLICK_BURST_RENDER_MARKER_CAP};
   var baseFrameDurationMs = Math.max(16, Math.round(1000 / fps));
+  var markerScale = ${CLICK_BURST_MARKER_SCALE};
+
+  function hexToRgba(hex, alpha) {
+    var text = String(hex || "").trim();
+    if (!/^#[0-9a-fA-F]{6}$/.test(text)) return "rgba(37, 99, 235, " + alpha + ")";
+    var r = parseInt(text.slice(1, 3), 16);
+    var g = parseInt(text.slice(3, 5), 16);
+    var b = parseInt(text.slice(5, 7), 16);
+    return "rgba(" + r + ", " + g + ", " + b + ", " + alpha + ")";
+  }
 
   function drawMarker(ctx, x, y, n) {
-    var radius = 12;
+    var radius = 12 * markerScale;
+    var fillColor = hexToRgba(markerColor, 0.2);
+    var strokeColor = markerColor;
+    var textColor = "#ffffff";
+    var lineWidth = 6;
+    var font = "800 34px Trebuchet MS, Segoe UI, sans-serif";
+    if (markerStyle === "tech-mono") {
+      fillColor = "rgba(15, 23, 42, 0.78)";
+      textColor = "#e2e8f0";
+      lineWidth = 7;
+      font = "700 30px JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace";
+    } else if (markerStyle === "outline-heavy") {
+      fillColor = "rgba(255, 255, 255, 0.92)";
+      textColor = markerColor;
+      lineWidth = 8;
+      font = "900 34px Trebuchet MS, Segoe UI, sans-serif";
+    }
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(37, 99, 235, 0.18)";
+    ctx.fillStyle = fillColor;
     ctx.fill();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = markerColor;
+    ctx.lineWidth = lineWidth;
+    ctx.strokeStyle = strokeColor;
     ctx.stroke();
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 12px Trebuchet MS, Segoe UI, sans-serif";
+    ctx.fillStyle = textColor;
+    ctx.font = font;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(String(n), x, y);
@@ -2448,6 +2632,21 @@ ${rows}
     toggle.type = "button";
     toggle.textContent = autoPlay ? "Pause" : "Play";
     controls.appendChild(toggle);
+    var speedWrap = document.createElement("label");
+    speedWrap.className = "click-burst-export-speed-control";
+    var speedInput = document.createElement("input");
+    speedInput.type = "range";
+    speedInput.min = "0.25";
+    speedInput.max = "3";
+    speedInput.step = "0.05";
+    speedInput.value = String(defaultSpeedMultiplier);
+    speedInput.className = "click-burst-export-speed-slider";
+    speedWrap.appendChild(speedInput);
+    var speedValue = document.createElement("span");
+    speedValue.className = "click-burst-export-speed-value";
+    speedValue.textContent = defaultSpeedMultiplier.toFixed(2) + "x";
+    speedWrap.appendChild(speedValue);
+    controls.appendChild(speedWrap);
     var progress = document.createElement("span");
     progress.className = "click-burst-export-progress";
     progress.textContent = "Frame 0/0";
@@ -2488,6 +2687,7 @@ ${rows}
       var frameIndex = 0;
       var isPlaying = autoPlay;
       var timer = null;
+      var speedMultiplier = defaultSpeedMultiplier;
 
       function drawFrame(i) {
         var frame = loaded[i];
@@ -2517,13 +2717,14 @@ ${rows}
       function startLoop() {
         stopLoop();
         if (!isPlaying || loaded.length < 2) return;
+        var frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / speedMultiplier));
         timer = setInterval(function () {
           frameIndex += 1;
           if (frameIndex >= loaded.length) {
             frameIndex = 0;
           }
           drawFrame(frameIndex);
-        }, baseFrameDurationMs);
+        }, frameDurationMs);
       }
 
       function setPlaying(next) {
@@ -2534,6 +2735,12 @@ ${rows}
 
       toggle.addEventListener("click", function () {
         setPlaying(!isPlaying);
+      });
+      speedInput.addEventListener("input", function () {
+        var next = Number(speedInput.value);
+        speedMultiplier = Number.isFinite(next) ? Math.max(0.25, Math.min(3, next)) : defaultSpeedMultiplier;
+        speedValue.textContent = speedMultiplier.toFixed(2) + "x";
+        if (isPlaying) startLoop();
       });
 
       drawFrame(frameIndex);
@@ -2589,6 +2796,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const exportThemeLayout = document.getElementById("export-theme-layout");
   const exportThemeMeta = document.getElementById("export-theme-meta");
   const exportThemeAccent = document.getElementById("export-theme-accent");
+  const burstPlaybackSpeed = document.getElementById("burst-playback-speed");
+  const burstPlaybackSpeedValue = document.getElementById("burst-playback-speed-value");
   const exportThemeReset = document.getElementById("export-theme-reset");
   const tocCount = document.getElementById("toc-count");
   const hintsCount = document.getElementById("hints-count");
@@ -2917,6 +3126,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     exportThemeLayout,
     exportThemeMeta,
     exportThemeAccent,
+    burstPlaybackSpeed,
     exportThemeReset,
     quickPreviewBtn,
     exportPreviewRefresh,
@@ -2936,6 +3146,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (exportThemeLayout) exportThemeLayout.value = active.tocLayout;
     if (exportThemeMeta) exportThemeMeta.value = active.tocMeta;
     if (exportThemeAccent) exportThemeAccent.value = active.accentColor;
+    const burstSettings = normalizeClickBurstSettings(report.settings);
+    if (!isPlainObject(report.settings)) report.settings = {};
+    report.settings.clickBurstPlaybackSpeed = burstSettings.clickBurstPlaybackSpeed;
+    if (burstPlaybackSpeed) burstPlaybackSpeed.value = String(burstSettings.clickBurstPlaybackSpeed);
+    if (burstPlaybackSpeedValue) burstPlaybackSpeedValue.textContent = `${burstSettings.clickBurstPlaybackSpeed.toFixed(2)}x`;
   }
 
   syncExportThemeControls();
@@ -3008,6 +3223,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     scheduleInlinePreviewRefresh();
   }
 
+  function setBurstPlaybackSpeedUi(nextSpeed) {
+    if (burstPlaybackSpeed) burstPlaybackSpeed.value = String(nextSpeed);
+    if (burstPlaybackSpeedValue) burstPlaybackSpeedValue.textContent = `${nextSpeed.toFixed(2)}x`;
+  }
+
+  async function persistBurstPlaybackSpeed(nextSpeedRaw, options = {}) {
+    if (!hasReport) return;
+    const rerender = options && options.rerender !== false;
+    const nextSpeed = Number(clampNumber(
+      nextSpeedRaw,
+      0.25,
+      3,
+      CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed
+    ).toFixed(2));
+    if (!isPlainObject(report.settings)) report.settings = {};
+    report.settings.clickBurstPlaybackSpeed = nextSpeed;
+    setBurstPlaybackSpeedUi(nextSpeed);
+    await saveReports(reports);
+    scheduleInlinePreviewRefresh();
+    if (rerender) render();
+  }
+
   if (hasReport && exportThemePreset) {
     exportThemePreset.addEventListener("change", () => { persistExportThemeFromControls(false); });
   }
@@ -3026,6 +3263,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   if (hasReport && exportThemeReset) {
     exportThemeReset.addEventListener("click", () => { persistExportThemeFromControls(true); });
+  }
+  if (hasReport && burstPlaybackSpeed) {
+    burstPlaybackSpeed.addEventListener("input", () => {
+      const nextSpeed = Number(clampNumber(
+        burstPlaybackSpeed.value,
+        0.25,
+        3,
+        CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed
+      ).toFixed(2));
+      setBurstPlaybackSpeedUi(nextSpeed);
+    });
+    burstPlaybackSpeed.addEventListener("change", () => { persistBurstPlaybackSpeed(burstPlaybackSpeed.value); });
   }
 
   function getVisibleEvents() {
@@ -3196,10 +3445,43 @@ document.addEventListener("DOMContentLoaded", async () => {
     const view = buildVisibleViewModel(getVisibleEvents());
     const events = view.displayEvents;
     const burstFrameMap = view.burstFrameMap;
-    const burstInsertionMap = buildBurstInsertionMap(view.bursts);
+    const burstInsertionPlan = buildBurstInsertionPlan(view.sourceEvents, events, view.bursts);
     const eventPositionMap = new Map();
     report.events.forEach((item, pos) => eventPositionMap.set(item, pos));
     updateAux(events, view.bursts, view.sourceEvents);
+
+    const appendInlineBursts = (entries) => {
+      if (!Array.isArray(entries) || !entries.length) return;
+      const burstHost = document.createElement("div");
+      const players = renderClickBursts(
+        burstHost,
+        entries.map((entry) => entry.burst),
+        {
+          markerColor: view.burstSettings.clickBurstMarkerColor,
+          markerStyle: view.burstSettings.clickBurstMarkerStyle,
+          speedMultiplier: view.burstSettings.clickBurstPlaybackSpeed,
+          onSpeedCommit: (value) => { persistBurstPlaybackSpeed(value, { rerender: false }); },
+          onJump: (stepId) => {
+            if (!stepId) return;
+            if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
+            const node = document.getElementById(stepId);
+            if (!node) return;
+            node.scrollIntoView({ behavior: "smooth", block: "center" });
+            node.classList.add("step-flash");
+            setTimeout(() => node.classList.remove("step-flash"), 1200);
+          }
+        }
+      );
+      if (Array.isArray(players) && players.length) {
+        activeBurstPlayers.push(...players);
+      }
+      Array.from(burstHost.children).forEach((child) => {
+        child.classList.add("inline-burst-card");
+        root.appendChild(child);
+      });
+    };
+
+    appendInlineBursts(burstInsertionPlan.prelude || []);
 
     events.forEach((ev, index) => {
       const burstFrame = burstFrameMap.get(ev.stepId);
@@ -3532,32 +3814,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       root.appendChild(wrap);
 
-      const inlineBursts = burstInsertionMap.get(ev.stepId) || [];
-      if (inlineBursts.length) {
-        const burstHost = document.createElement("div");
-        const players = renderClickBursts(
-          burstHost,
-          inlineBursts.map((entry) => entry.burst),
-          {
-            onJump: (stepId) => {
-              if (!stepId) return;
-              if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
-              const node = document.getElementById(stepId);
-              if (!node) return;
-              node.scrollIntoView({ behavior: "smooth", block: "center" });
-              node.classList.add("step-flash");
-              setTimeout(() => node.classList.remove("step-flash"), 1200);
-            }
-          }
-        );
-        if (Array.isArray(players) && players.length) {
-          activeBurstPlayers.push(...players);
-        }
-        Array.from(burstHost.children).forEach((child) => {
-          child.classList.add("inline-burst-card");
-          root.appendChild(child);
-        });
-      }
+      appendInlineBursts(burstInsertionPlan.byStepId.get(ev.stepId) || []);
     });
   }
 

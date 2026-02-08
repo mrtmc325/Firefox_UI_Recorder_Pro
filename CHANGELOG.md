@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+## v1.11.5 - 2026-02-08
+
+### Added
+- Hotkey stop grace window for `toggle-recording`:
+  - first stop hotkey press schedules stop after 2000ms to allow final burst frames
+  - second stop hotkey press during grace forces immediate stop
+- `GET_STATE` now includes hotkey-stop runtime diagnostics:
+  - `pendingHotkeyStop`
+  - `pendingHotkeyStopUntilMs`
+
+### Fixed
+- Restored burst replay speed tuning in the report builder.
+- Exported HTML burst replay now starts at the same speed selected in the report builder.
+- Increased burst click marker visibility (3x larger) and added popup controls for marker color plus 3 number-icon styles.
+- Added hotkey GIF capture FPS selection in popup (`5`, `10`, `15`) and wired runtime capture cadence to the selected value.
+- Synthetic pre-burst source rows are condensed from visible step lists in both builder and exported HTML; replay cards remain inline in chronology.
+
 ## v1.11.4 - 2026-02-08
 
 ### Changed

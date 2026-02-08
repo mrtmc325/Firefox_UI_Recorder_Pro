@@ -23,6 +23,9 @@ let settings = {
   pruneWindowMs: 1200,
   pageWatchEnabled: true,
   pageWatchMs: 500,
+  hotkeyBurstFps: 5,
+  clickBurstMarkerColor: "#2563eb",
+  clickBurstMarkerStyle: "rounded-bold",
 
   redactRules: [
     { name: "shared-secret", pattern: "(shared\\s*secret\\s*[:=]\\s*)([^\\s]+)", replace: "$1[REDACTED]" },
@@ -55,6 +58,8 @@ let burstContinuousTimer = null;
 let burstContinuousInFlight = false;
 let recordingStartedAtMs = 0;
 let lifecycleQueue = Promise.resolve();
+let pendingHotkeyStopTimer = null;
+let pendingHotkeyStopUntilMs = null;
 
 const DEBUG_LOGS = false;
 const EVENT_COMPACT_TRIGGER_COUNT = 600;
@@ -64,9 +69,10 @@ const HOTKEY_BURST_SCREENSHOT_COMPACT_TRIGGER_COUNT = 480;
 const HOTKEY_BURST_SCREENSHOT_KEEP_TARGET = 360;
 const HOTKEY_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB = 160;
 const HOTKEY_BURST_RECENT_WINDOW_MS = 180000;
-const HOTKEY_BURST_FPS = 5;
-const HOTKEY_BURST_FRAME_MS = 1000 / HOTKEY_BURST_FPS;
+const HOTKEY_BURST_DEFAULT_FPS = 5;
+const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
 const HOTKEY_BURST_CAPTURE_EVENT_TYPES = new Set(["click", "input", "change", "submit", "nav", "ui-change", "outcome", "note"]);
+const HOTKEY_STOP_GRACE_MS = 2000;
 
 function formatError(err) {
   if (!err) return "unknown";
@@ -268,6 +274,24 @@ function clampNumber(value, min, max, fallback) {
   return Math.max(min, Math.min(max, num));
 }
 
+function normalizeHexColor(value, fallback) {
+  const text = String(value || "").trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(text)) return text.toLowerCase();
+  return String(fallback || "#2563eb").toLowerCase();
+}
+
+function normalizeMarkerStyle(value) {
+  const style = String(value || "").trim().toLowerCase();
+  if (style === "tech-mono" || style === "outline-heavy") return style;
+  return "rounded-bold";
+}
+
+function normalizeHotkeyBurstFps(value) {
+  const fps = Math.round(Number(value));
+  if (HOTKEY_BURST_FPS_OPTIONS.has(fps)) return fps;
+  return HOTKEY_BURST_DEFAULT_FPS;
+}
+
 function normalizeSettings(base) {
   const out = { ...base };
   out.screenshotDebounceMs = Math.max(0, Number(out.screenshotDebounceMs) || 900);
@@ -284,12 +308,14 @@ function normalizeSettings(base) {
   out.pruneWindowMs = Math.max(100, Number(out.pruneWindowMs) || 1200);
   out.pageWatchEnabled = out.pageWatchEnabled !== false;
   out.pageWatchMs = Math.max(200, Number(out.pageWatchMs) || 500);
+  out.hotkeyBurstFps = normalizeHotkeyBurstFps(out.hotkeyBurstFps);
+  out.clickBurstMarkerColor = normalizeHexColor(out.clickBurstMarkerColor, "#2563eb");
+  out.clickBurstMarkerStyle = normalizeMarkerStyle(out.clickBurstMarkerStyle);
   delete out.clickBurstEnabled;
   delete out.clickBurstWindowMs;
   delete out.clickBurstMaxClicks;
   delete out.clickBurstFlushMs;
   delete out.clickBurstUiProbeMs;
-  delete out.clickBurstMarkerColor;
   delete out.clickBurstAutoPlay;
   delete out.clickBurstIncludeClicks;
   delete out.clickBurstIncludeTyping;
@@ -314,6 +340,15 @@ function getEffectiveSettings(base = settings) {
 
 function isHotkeyBurstModeActive() {
   return !!(isRecording && burstHotkeyModeActive);
+}
+
+function getHotkeyBurstFps() {
+  const effective = getEffectiveSettings();
+  return normalizeHotkeyBurstFps(effective.hotkeyBurstFps);
+}
+
+function getHotkeyBurstFrameMs() {
+  return 1000 / getHotkeyBurstFps();
 }
 
 function stopContinuousBurstCaptureLoop(reason) {
@@ -361,16 +396,17 @@ async function resolveBurstCaptureTab() {
 
 async function runContinuousBurstCaptureTick() {
   burstContinuousTimer = null;
+  const frameMs = getHotkeyBurstFrameMs();
   if (!isHotkeyBurstModeActive()) {
     stopContinuousBurstCaptureLoop("inactive");
     return;
   }
   if (isPaused) {
-    scheduleContinuousBurstCaptureTick(HOTKEY_BURST_FRAME_MS);
+    scheduleContinuousBurstCaptureTick(frameMs);
     return;
   }
   if (burstContinuousInFlight) {
-    scheduleContinuousBurstCaptureTick(HOTKEY_BURST_FRAME_MS);
+    scheduleContinuousBurstCaptureTick(frameMs);
     return;
   }
 
@@ -439,6 +475,45 @@ function ensureContinuousBurstCaptureLoop(reason) {
   scheduleContinuousBurstCaptureTick(0);
 }
 
+function hasPendingHotkeyStop() {
+  return !!pendingHotkeyStopTimer && Number.isFinite(pendingHotkeyStopUntilMs);
+}
+
+function clearPendingHotkeyStop(reason) {
+  const hadPending = hasPendingHotkeyStop();
+  if (pendingHotkeyStopTimer) {
+    clearTimeout(pendingHotkeyStopTimer);
+    pendingHotkeyStopTimer = null;
+  }
+  pendingHotkeyStopUntilMs = null;
+  if (hadPending) {
+    bgLog("hotkey-stop:cleared", { reason });
+  }
+}
+
+async function scheduleHotkeyStopWithGrace(source) {
+  if (!isRecording) {
+    return { ok: false, scheduled: false, reason: "not-recording" };
+  }
+  if (hasPendingHotkeyStop()) {
+    return { ok: true, scheduled: false, pending: true, untilMs: pendingHotkeyStopUntilMs };
+  }
+  pendingHotkeyStopUntilMs = Date.now() + HOTKEY_STOP_GRACE_MS;
+  pendingHotkeyStopTimer = setTimeout(() => {
+    pendingHotkeyStopTimer = null;
+    pendingHotkeyStopUntilMs = null;
+    enqueueLifecycleAction(
+      `command:stop-grace:${Date.now()}`,
+      () => stopRecordingInternal(source || "command:toggle:grace")
+    ).catch((e) => {
+      bgWarn("hotkey-stop:grace-error", { source, error: formatError(e) });
+    });
+  }, HOTKEY_STOP_GRACE_MS);
+  await setBadge("REC+");
+  bgLog("hotkey-stop:scheduled", { source, untilMs: pendingHotkeyStopUntilMs, graceMs: HOTKEY_STOP_GRACE_MS });
+  return { ok: true, scheduled: true, untilMs: pendingHotkeyStopUntilMs, graceMs: HOTKEY_STOP_GRACE_MS };
+}
+
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
@@ -451,8 +526,9 @@ function enqueueBurstCapture(task) {
 
 async function captureBurstFrameFixedRate() {
   return enqueueBurstCapture(async () => {
+    const frameMs = getHotkeyBurstFrameMs();
     const elapsed = Date.now() - burstCaptureLastTs;
-    const waitMs = Math.max(0, HOTKEY_BURST_FRAME_MS - elapsed);
+    const waitMs = Math.max(0, frameMs - elapsed);
     if (waitMs > 0) await sleepMs(waitMs);
 
     const capture = await captureVisiblePng();
@@ -831,6 +907,7 @@ async function startRecordingInternal(source) {
     bgLog("start-recording:ignored", { source, reason: "already-recording", ...stateSummary() });
     return { ok: true, ignored: true, reason: "already-recording" };
   }
+  clearPendingHotkeyStop("start-recording");
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
   isRecording = true;
@@ -860,6 +937,7 @@ async function stopRecordingInternal(source) {
     bgLog("stop-recording:ignored", { source, reason: "not-recording", eventCount: events.length, sessionId });
     return { ok: true, saved: false, ignored: true, persisted: true };
   }
+  clearPendingHotkeyStop("stop-recording");
   bgLog("stop-recording:begin", { source, activeRecordEvents, ...stateSummary() });
   const snapshotSettings = getEffectiveSettings();
   const hadBurstHotkeyMode = burstHotkeyModeActive;
@@ -948,7 +1026,9 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         activeCaptureTabId: effectiveSettings.activeTabOnly ? activeCaptureTabId : null,
         activeCaptureWindowId: effectiveSettings.activeTabOnly ? activeCaptureWindowId : null,
         isActiveCaptureTab,
-        burstHotkeyModeActive
+        burstHotkeyModeActive,
+        pendingHotkeyStop: hasPendingHotkeyStop(),
+        pendingHotkeyStopUntilMs: hasPendingHotkeyStop() ? pendingHotkeyStopUntilMs : null
       };
     }
 
@@ -980,6 +1060,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     }
 
     if (msgType === "STOP_RECORDING") {
+      clearPendingHotkeyStop(`runtime:stop:${requestId}`);
       return await enqueueLifecycleAction(`runtime:stop:${requestId}`, () => stopRecordingInternal(`runtime:${requestId}`));
     }
 
@@ -1161,6 +1242,7 @@ browser.storage.onChanged.addListener(async (changes, areaName) => {
         return;
       }
       bgLog("storage:stop-request", { token, source: changes.__uiRecorderStopSource && changes.__uiRecorderStopSource.newValue });
+      clearPendingHotkeyStop(`storage:stop:${token}`);
       await enqueueLifecycleAction(`storage:stop:${token}`, () => stopRecordingInternal(`storage:${token}`));
     }
   }
@@ -1200,8 +1282,13 @@ browser.commands.onCommand.addListener(async (command) => {
   bgLog("commands:onCommand", { command, isRecording, isPaused, eventCount: events.length, sessionId });
   if (command === "toggle-recording") {
     if (isRecording) {
-      return await enqueueLifecycleAction("command:stop", () => stopRecordingInternal("command:toggle"));
+      if (hasPendingHotkeyStop()) {
+        clearPendingHotkeyStop("command:toggle-immediate");
+        return await enqueueLifecycleAction("command:stop-immediate", () => stopRecordingInternal("command:toggle:immediate"));
+      }
+      return await scheduleHotkeyStopWithGrace("command:toggle:grace");
     }
+    clearPendingHotkeyStop("command:start");
     return await enqueueLifecycleAction("command:start", () => startRecordingInternal("command:toggle"));
   }
   if (command !== "toggle-burst-capture") return;
