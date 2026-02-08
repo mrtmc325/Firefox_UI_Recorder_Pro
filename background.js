@@ -1,4 +1,4 @@
-// UI Workflow Recorder Pro (Firefox MV2) - v1.7.0
+// UI Workflow Recorder Pro (Firefox MV2) - v1.11.0
 // Clean capture, diff-based screenshots, and text-only redaction for reports.
 
 let isRecording = false;
@@ -23,6 +23,22 @@ let settings = {
   pruneWindowMs: 1200,
   pageWatchEnabled: true,
   pageWatchMs: 500,
+  clickBurstEnabled: true,
+  clickBurstTriggerMs: 3000,
+  clickBurstWindowMs: 7000,
+  clickBurstMaxClicks: 10,
+  clickBurstFlushMs: 2456.783,
+  clickBurstUiProbeMs: 450,
+  clickBurstMarkerColor: "#2563eb",
+  clickBurstAutoPlay: true,
+  clickBurstIncludeClicks: true,
+  clickBurstIncludeTyping: true,
+  clickBurstTimeBasedAnyEvent: true,
+  clickBurstCondenseStepScreenshots: true,
+  clickBurstTypingMinChars: 3,
+  clickBurstTypingWindowMs: 500,
+  clickBurstPlaybackFps: 5,
+  clickBurstPlaybackMode: "loop",
 
   redactRules: [
     { name: "shared-secret", pattern: "(shared\\s*secret\\s*[:=]\\s*)([^\\s]+)", replace: "$1[REDACTED]" },
@@ -47,11 +63,26 @@ let lastPopupStopToken = 0;
 let activeCaptureTabId = null;
 let activeCaptureWindowId = null;
 let activeCaptureUpdatedAt = 0;
+let burstHotkeyModeActive = false;
+let burstModeEpoch = 0;
+let burstCaptureLastTs = 0;
+let burstCaptureQueue = Promise.resolve();
+let burstContinuousTimer = null;
+let burstContinuousInFlight = false;
+let recordingStartedAtMs = 0;
+let lifecycleQueue = Promise.resolve();
 
 const DEBUG_LOGS = true;
 const EVENT_COMPACT_TRIGGER_COUNT = 600;
 const SCREENSHOT_COMPACT_TRIGGER_COUNT = 220;
 const SCREENSHOT_KEEP_TARGET = 160;
+const CLICK_BURST_SCREENSHOT_COMPACT_TRIGGER_COUNT = 480;
+const CLICK_BURST_SCREENSHOT_KEEP_TARGET = 360;
+const CLICK_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB = 160;
+const CLICK_BURST_RECENT_WINDOW_MS = 180000;
+const HOTKEY_BURST_FPS = 5;
+const HOTKEY_BURST_FRAME_MS = 1000 / HOTKEY_BURST_FPS;
+const HOTKEY_BURST_CAPTURE_EVENT_TYPES = new Set(["click", "input", "change", "submit", "nav", "ui-change", "outcome", "note"]);
 
 function formatError(err) {
   if (!err) return "unknown";
@@ -71,6 +102,17 @@ function bgWarn(message, data) {
   const prefix = `[UIR BG ${new Date().toISOString()}]`;
   if (data === undefined) console.warn(prefix, message);
   else console.warn(prefix, message, data);
+}
+
+function enqueueLifecycleAction(label, action) {
+  const run = lifecycleQueue.then(
+    () => action(),
+    () => action()
+  );
+  lifecycleQueue = run.catch((e) => {
+    bgWarn("lifecycle-action:error", { label, error: formatError(e) });
+  });
+  return run;
 }
 
 function stateSummary() {
@@ -108,6 +150,13 @@ function resetScreenshotState() {
     pendingShotResolve = null;
   }
   lastShot = { ts: 0, hash: null, dataUrl: null };
+  burstCaptureLastTs = 0;
+  burstCaptureQueue = Promise.resolve();
+  if (burstContinuousTimer) {
+    clearTimeout(burstContinuousTimer);
+    burstContinuousTimer = null;
+  }
+  burstContinuousInFlight = false;
   if (hadPending) bgLog("resetScreenshotState:cleared-pending");
 }
 
@@ -197,7 +246,241 @@ async function notifyActiveTargetTab(reason) {
   }
 }
 
+async function notifyCaptureModeChanged(reason) {
+  const targetIds = new Set();
+  if (typeof activeCaptureTabId === "number") targetIds.add(activeCaptureTabId);
+  try {
+    const tab = await getActiveTab();
+    if (tab && typeof tab.id === "number") targetIds.add(tab.id);
+  } catch (_) {}
+  if (!targetIds.size) return false;
+
+  let sent = 0;
+  for (const tabId of targetIds) {
+    try {
+      await browser.tabs.sendMessage(tabId, {
+        type: "UIR_CAPTURE_MODE_CHANGED",
+        reason: reason || "unknown",
+        burstHotkeyModeActive: !!burstHotkeyModeActive,
+        burstModeEpoch,
+        ts: Date.now()
+      });
+      sent++;
+    } catch (e) {
+      bgLog("capture-mode:notify-skipped", { reason, tabId, error: formatError(e) });
+    }
+  }
+  if (sent > 0) {
+    bgLog("capture-mode:notified", { reason, sent, burstHotkeyModeActive });
+  }
+  return sent > 0;
+}
+
 function nowIso() { return new Date().toISOString(); }
+
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return Number(fallback);
+  return Math.max(min, Math.min(max, num));
+}
+
+function normalizeHexColor(value, fallback) {
+  const s = String(value || "").trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+  return String(fallback || "#2563eb").toLowerCase();
+}
+
+function normalizeClickBurstSettings(base) {
+  const out = { ...base };
+  out.clickBurstEnabled = out.clickBurstEnabled !== false;
+  out.clickBurstTriggerMs = clampNumber(out.clickBurstTriggerMs, 500, 10000, 3000);
+  out.clickBurstWindowMs = clampNumber(out.clickBurstWindowMs, 1000, 30000, 7000);
+  out.clickBurstMaxClicks = Math.round(clampNumber(out.clickBurstMaxClicks, 2, 50, 10));
+  out.clickBurstFlushMs = clampNumber(out.clickBurstFlushMs, 250, 10000, 2456.783);
+  out.clickBurstUiProbeMs = clampNumber(out.clickBurstUiProbeMs, 50, 3000, 450);
+  out.clickBurstMarkerColor = normalizeHexColor(out.clickBurstMarkerColor, "#2563eb");
+  out.clickBurstAutoPlay = out.clickBurstAutoPlay !== false;
+  out.clickBurstIncludeClicks = out.clickBurstIncludeClicks !== false;
+  out.clickBurstIncludeTyping = out.clickBurstIncludeTyping !== false;
+  out.clickBurstTimeBasedAnyEvent = out.clickBurstTimeBasedAnyEvent !== false;
+  out.clickBurstCondenseStepScreenshots = out.clickBurstCondenseStepScreenshots !== false;
+  out.clickBurstTypingMinChars = Math.round(clampNumber(out.clickBurstTypingMinChars, 1, 32, 3));
+  out.clickBurstTypingWindowMs = clampNumber(out.clickBurstTypingWindowMs, 100, 5000, 500);
+  out.clickBurstPlaybackFps = Math.round(clampNumber(out.clickBurstPlaybackFps, 1, 60, 5));
+  out.clickBurstPlaybackMode = "loop";
+  return out;
+}
+
+function getEffectiveSettings(base = settings) {
+  const normalized = normalizeClickBurstSettings(base || settings);
+  if (!burstHotkeyModeActive) return normalized;
+  return {
+    ...normalized,
+    captureMode: "all",
+    clickBurstEnabled: true,
+    clickBurstIncludeClicks: true,
+    clickBurstIncludeTyping: true,
+    clickBurstTimeBasedAnyEvent: true,
+    clickBurstPlaybackFps: 5,
+    pageWatchEnabled: false
+  };
+}
+
+function isHotkeyBurstModeActive() {
+  return !!(isRecording && burstHotkeyModeActive);
+}
+
+function stopContinuousBurstCaptureLoop(reason) {
+  if (burstContinuousTimer) {
+    clearTimeout(burstContinuousTimer);
+    burstContinuousTimer = null;
+  }
+  burstContinuousInFlight = false;
+  bgLog("burst-loop:stopped", { reason, isRecording, burstHotkeyModeActive });
+}
+
+function scheduleContinuousBurstCaptureTick(delayMs) {
+  if (burstContinuousTimer) {
+    clearTimeout(burstContinuousTimer);
+    burstContinuousTimer = null;
+  }
+  const wait = Math.max(0, Number(delayMs) || 0);
+  burstContinuousTimer = setTimeout(runContinuousBurstCaptureTick, wait);
+}
+
+async function resolveBurstCaptureTab() {
+  const effective = getEffectiveSettings();
+  if (effective.activeTabOnly) {
+    if (activeCaptureTabId === null || activeCaptureWindowId === null) {
+      await refreshActiveCaptureTarget("burst-loop:resolve");
+    }
+    if (activeCaptureTabId !== null) {
+      try {
+        return await browser.tabs.get(activeCaptureTabId);
+      } catch (_) {
+        await refreshActiveCaptureTarget("burst-loop:recover");
+        if (activeCaptureTabId !== null) {
+          try { return await browser.tabs.get(activeCaptureTabId); } catch (_) {}
+        }
+      }
+    }
+    return null;
+  }
+  try {
+    return await getActiveTab();
+  } catch (_) {
+    return null;
+  }
+}
+
+async function runContinuousBurstCaptureTick() {
+  burstContinuousTimer = null;
+  if (!isHotkeyBurstModeActive()) {
+    stopContinuousBurstCaptureLoop("inactive");
+    return;
+  }
+  if (isPaused) {
+    scheduleContinuousBurstCaptureTick(HOTKEY_BURST_FRAME_MS);
+    return;
+  }
+  if (burstContinuousInFlight) {
+    scheduleContinuousBurstCaptureTick(HOTKEY_BURST_FRAME_MS);
+    return;
+  }
+
+  burstContinuousInFlight = true;
+  try {
+    const tab = await resolveBurstCaptureTab();
+    if (!tab || !isInjectableTabUrl(tab.url || "")) {
+      bgLog("burst-loop:skip-tab", { hasTab: !!tab, tabId: tab && tab.id, url: tab && tab.url });
+      return;
+    }
+    if (!isHotkeyBurstModeActive() || isPaused) return;
+
+    const shot = await captureBurstFrameFixedRate();
+    if (!shot.dataUrl) {
+      bgLog("burst-loop:capture-skip", { reason: shot.reason || "capture-failed" });
+      return;
+    }
+    if (!isHotkeyBurstModeActive() || isPaused) return;
+
+    const screenshotHash = stableHash(shot.dataUrl);
+    events.push({
+      type: "ui-change",
+      ts: nowIso(),
+      url: tab.url || "",
+      human: "GIF burst frame",
+      label: "GIF burst frame",
+      actionKind: "burst",
+      actionHint: "burst",
+      pageIsLogin: false,
+      pageHasSensitiveText: false,
+      sessionId,
+      tabId: typeof tab.id === "number" ? tab.id : null,
+      windowId: typeof tab.windowId === "number" ? tab.windowId : null,
+      tabTitle: tab.title || "",
+      screenshot: shot.dataUrl,
+      screenshotHash,
+      screenshotSkipped: false,
+      screenshotSkipReason: null,
+      burstHotkeyMode: true,
+      burstModeEpoch,
+      burstCaptureForced: true,
+      burstSynthetic: true,
+      clickUiUpdated: true
+    });
+    const persisted = await persistSafe("burst-loop-frame");
+    if (!persisted.ok) {
+      bgWarn("burst-loop:persist-failed", { eventCount: events.length });
+    }
+  } finally {
+    burstContinuousInFlight = false;
+    if (isHotkeyBurstModeActive()) {
+      scheduleContinuousBurstCaptureTick(0);
+    } else {
+      stopContinuousBurstCaptureLoop("toggle-off");
+    }
+  }
+}
+
+function ensureContinuousBurstCaptureLoop(reason) {
+  if (!isHotkeyBurstModeActive()) {
+    stopContinuousBurstCaptureLoop(`${reason}:inactive`);
+    return;
+  }
+  if (burstContinuousTimer || burstContinuousInFlight) return;
+  bgLog("burst-loop:started", { reason, isRecording, burstHotkeyModeActive });
+  scheduleContinuousBurstCaptureTick(0);
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function enqueueBurstCapture(task) {
+  const run = burstCaptureQueue.then(task, task);
+  burstCaptureQueue = run.catch(() => {});
+  return run;
+}
+
+async function captureBurstFrameFixedRate() {
+  return enqueueBurstCapture(async () => {
+    const elapsed = Date.now() - burstCaptureLastTs;
+    const waitMs = Math.max(0, HOTKEY_BURST_FRAME_MS - elapsed);
+    if (waitMs > 0) await sleepMs(waitMs);
+
+    const capture = await captureVisiblePng();
+    if (!capture.dataUrl) {
+      return { dataUrl: null, hash: null, reused: false, reason: capture.reason || "capture-failed" };
+    }
+
+    const hash = stableHash(capture.dataUrl);
+    const capturedAt = Date.now();
+    burstCaptureLastTs = capturedAt;
+    lastShot = { ts: capturedAt, hash, dataUrl: capture.dataUrl };
+    return { dataUrl: capture.dataUrl, hash, reused: false, reason: null };
+  });
+}
 
 async function persist() { await browser.storage.local.set({ isRecording, isPaused, events, settings, reports, sessionId }); }
 
@@ -219,6 +502,10 @@ async function loadPersisted() {
   reports = Array.isArray(stored.reports) ? stored.reports : [];
   sessionId = stored.sessionId || null;
   if (stored.settings) settings = { ...settings, ...stored.settings };
+  settings = normalizeClickBurstSettings(settings);
+  recordingStartedAtMs = isRecording ? Date.now() : 0;
+  burstHotkeyModeActive = false;
+  burstModeEpoch = 0;
   bgLog("loadPersisted", { isRecording, isPaused, eventCount: events.length, reportCount: reports.length, sessionId });
 }
 
@@ -249,7 +536,8 @@ function applyRedactionToText(text) {
 }
 
 async function captureVisiblePng() {
-  if (settings.activeTabOnly) {
+  const effective = getEffectiveSettings();
+  if (effective.activeTabOnly) {
     if (activeCaptureWindowId === null) {
       bgLog("capture:skipped-no-active-target");
       return { dataUrl: null, reason: "no-active-target" };
@@ -302,15 +590,30 @@ async function debouncedScreenshot() {
 }
 
 async function maybeScreenshot(e) {
-  const force = !!e.forceScreenshot;
+  const effective = getEffectiveSettings();
+  const hotkeyBurstActive = isHotkeyBurstModeActive();
+  const burstClickForce = !!(effective.clickBurstEnabled && effective.clickBurstIncludeClicks !== false && e && e.type === "click");
+  const burstTypingForce = !!(
+    effective.clickBurstEnabled &&
+    effective.clickBurstIncludeTyping !== false &&
+    e &&
+    (e.type === "input" || e.type === "change")
+  );
+  const burstTimeBasedForce = !!(
+    effective.clickBurstEnabled &&
+    effective.clickBurstTimeBasedAnyEvent !== false &&
+    e &&
+    e.type === "ui-change"
+  );
+  const force = !!e.forceScreenshot || burstClickForce || burstTypingForce || burstTimeBasedForce;
 
-  const shot = await debouncedScreenshot();
+  const shot = hotkeyBurstActive ? await captureBurstFrameFixedRate() : await debouncedScreenshot();
   if (!shot.dataUrl) return { screenshot: null, screenshotHash: null, skipped: true, reason: shot.reason || "capture-failed" };
 
   const redacted = shot.dataUrl;
   const redactedHash = stableHash(redacted);
 
-  if (!force && settings.diffEnabled && events.length > 0) {
+  if (!hotkeyBurstActive && !force && effective.diffEnabled && events.length > 0) {
     for (let i = events.length - 1; i >= 0; i--) {
       if (events[i].screenshotHash) {
         if (events[i].screenshotHash === redactedHash) {
@@ -322,6 +625,65 @@ async function maybeScreenshot(e) {
   }
 
   return { screenshot: redacted, screenshotHash: redactedHash, skipped: false, reason: null };
+}
+
+async function appendLifecycleScreenshotEvent(kind, source) {
+  if (!isRecording || !sessionId) return false;
+  const lifecycleKind = kind === "stop" ? "stop" : "start";
+  let tab = null;
+  const effective = getEffectiveSettings();
+  try {
+    if (effective.activeTabOnly) {
+      if (activeCaptureTabId === null || activeCaptureWindowId === null) {
+        await refreshActiveCaptureTarget(`lifecycle:${lifecycleKind}`);
+      }
+      if (typeof activeCaptureTabId === "number") {
+        tab = await browser.tabs.get(activeCaptureTabId);
+      }
+    } else {
+      tab = await getActiveTab();
+    }
+  } catch (_) {
+    tab = null;
+  }
+
+  const shot = await captureVisiblePng();
+  const screenshot = shot && shot.dataUrl ? shot.dataUrl : null;
+  const screenshotHash = screenshot ? stableHash(screenshot) : null;
+  if (screenshot) {
+    const capturedAt = Date.now();
+    lastShot = { ts: capturedAt, hash: screenshotHash, dataUrl: screenshot };
+  }
+
+  events.push({
+    type: "outcome",
+    ts: nowIso(),
+    url: tab && tab.url ? tab.url : "",
+    human: lifecycleKind === "start" ? "Recording started" : "Recording stopped",
+    label: lifecycleKind === "start" ? "Start capture" : "Stop capture",
+    outcome: lifecycleKind,
+    actionKind: "lifecycle",
+    actionHint: lifecycleKind,
+    sessionId,
+    tabId: tab && typeof tab.id === "number" ? tab.id : null,
+    windowId: tab && typeof tab.windowId === "number" ? tab.windowId : null,
+    tabTitle: tab && tab.title ? tab.title : "",
+    screenshot,
+    screenshotHash,
+    screenshotSkipped: !screenshot,
+    screenshotSkipReason: screenshot ? null : ((shot && shot.reason) || "capture-failed"),
+    forceScreenshot: true,
+    lifecycleEvent: lifecycleKind
+  });
+
+  bgLog("lifecycle-screenshot:captured", {
+    kind: lifecycleKind,
+    source,
+    tabId: tab && tab.id,
+    screenshot: !!screenshot,
+    reason: screenshot ? null : ((shot && shot.reason) || "capture-failed")
+  });
+  return true;
 }
 
 function normalizeFieldKey(ev) {
@@ -357,14 +719,15 @@ function pruneInputSteps(list) {
   return out;
 }
 
-function saveReportSnapshot() {
+function saveReportSnapshot(snapshotSettings) {
   if (!events || !events.length) return false;
   const eventCountBefore = events.length;
+  const resolvedSettings = normalizeClickBurstSettings(snapshotSettings || getEffectiveSettings());
   const report = {
     id: `rpt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     createdAt: nowIso(),
     sessionId,
-    settings: { ...settings },
+    settings: { ...resolvedSettings },
     events: pruneInputSteps(events.slice(0))
   };
   reports.unshift(report);
@@ -379,7 +742,8 @@ async function getActiveTab() {
 }
 
 function shouldIgnoreEventType(type) {
-  if (settings.captureMode === "clicks") {
+  const effective = getEffectiveSettings();
+  if (effective.captureMode === "clicks") {
     return type === "input" || type === "change";
   }
   return false;
@@ -397,6 +761,9 @@ function isScreenshotPriorityEvent(ev) {
 }
 
 function compactScreenshotsIfNeeded() {
+  if (isHotkeyBurstModeActive()) return null;
+  const effective = getEffectiveSettings();
+  if (effective.clickBurstEnabled) return compactBurstScreenshotsIfNeeded();
   if (!Array.isArray(events) || !events.length) return null;
   let screenshotCount = 0;
   for (const ev of events) {
@@ -422,6 +789,53 @@ function compactScreenshotsIfNeeded() {
   return { removed, eventCount: events.length, screenshotCount };
 }
 
+function compactBurstScreenshotsIfNeeded() {
+  if (!Array.isArray(events) || !events.length) return null;
+  let screenshotCount = 0;
+  for (const ev of events) {
+    if (hasScreenshotPayload(ev)) screenshotCount++;
+  }
+  if (screenshotCount < CLICK_BURST_SCREENSHOT_COMPACT_TRIGGER_COUNT) return null;
+
+  const keepIndexes = new Set();
+  const perTabClickKeepCount = new Map();
+  const now = Date.now();
+
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (!hasScreenshotPayload(ev)) continue;
+    if (isScreenshotPriorityEvent(ev)) {
+      keepIndexes.add(i);
+      continue;
+    }
+    if (ev && ev.type === "click") {
+      const tabKey = `${ev.windowId ?? "w"}:${ev.tabId ?? "t"}`;
+      const current = perTabClickKeepCount.get(tabKey) || 0;
+      const tsMs = Date.parse(ev.ts || "");
+      const isRecent = Number.isFinite(tsMs) && ((now - tsMs) <= CLICK_BURST_RECENT_WINDOW_MS);
+      if (isRecent || current < CLICK_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB) {
+        keepIndexes.add(i);
+        perTabClickKeepCount.set(tabKey, current + 1);
+      }
+    }
+  }
+
+  let removed = 0;
+  for (let i = 0; i < events.length && screenshotCount > CLICK_BURST_SCREENSHOT_KEEP_TARGET; i++) {
+    if (keepIndexes.has(i)) continue;
+    const ev = events[i];
+    if (!hasScreenshotPayload(ev)) continue;
+    ev.screenshot = null;
+    ev.screenshotHash = null;
+    ev.screenshotSkipped = true;
+    ev.screenshotSkipReason = "compacted-burst-memory";
+    removed++;
+    screenshotCount--;
+  }
+
+  return { removed, eventCount: events.length, screenshotCount, burstMode: true };
+}
+
 function newSessionId() {
   return `sess_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -443,11 +857,19 @@ async function resumeRecording() {
 }
 
 async function startRecordingInternal(source) {
+  if (isRecording) {
+    bgLog("start-recording:ignored", { source, reason: "already-recording", ...stateSummary() });
+    return { ok: true, ignored: true, reason: "already-recording" };
+  }
+  burstHotkeyModeActive = false;
+  burstModeEpoch = 0;
   isRecording = true;
   isPaused = false;
   events = [];
   sessionId = newSessionId();
-  if (settings.activeTabOnly) {
+  recordingStartedAtMs = Date.now();
+  const effective = getEffectiveSettings();
+  if (effective.activeTabOnly) {
     await refreshActiveCaptureTarget("start");
     if (activeCaptureTabId !== null) {
       await ensureContentScriptInTab(activeCaptureTabId, "start");
@@ -456,6 +878,7 @@ async function startRecordingInternal(source) {
   }
   else clearActiveCaptureTarget("start:non-strict");
   resetScreenshotState();
+  await appendLifecycleScreenshotEvent("start", source);
   const persisted = await persistSafe("start-recording");
   await setBadge("REC");
   bgLog("start-recording:done", { source, sessionId, persisted: persisted.ok, ...stateSummary() });
@@ -463,14 +886,28 @@ async function startRecordingInternal(source) {
 }
 
 async function stopRecordingInternal(source) {
+  if (!isRecording) {
+    bgLog("stop-recording:ignored", { source, reason: "not-recording", eventCount: events.length, sessionId });
+    return { ok: true, saved: false, ignored: true, persisted: true };
+  }
   bgLog("stop-recording:begin", { source, activeRecordEvents, ...stateSummary() });
+  const snapshotSettings = getEffectiveSettings();
+  const hadBurstHotkeyMode = burstHotkeyModeActive;
+  stopContinuousBurstCaptureLoop("stop-recording");
+  await appendLifecycleScreenshotEvent("stop", source);
   isRecording = false;
   isPaused = false;
-  const saved = saveReportSnapshot();
+  const saved = saveReportSnapshot(snapshotSettings);
   // Report snapshots already include the completed session.
   // Clear active buffer to avoid doubling storage footprint on stop.
   events = [];
   sessionId = null;
+  recordingStartedAtMs = 0;
+  burstHotkeyModeActive = false;
+  burstModeEpoch = 0;
+  if (hadBurstHotkeyMode) {
+    await notifyCaptureModeChanged("stop-recording");
+  }
   clearActiveCaptureTarget("stop");
   resetScreenshotState();
   const persisted = await persistSafe("stop-recording");
@@ -528,23 +965,26 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
 
   try {
     if (msgType === "GET_STATE") {
+      const effectiveSettings = getEffectiveSettings();
       const hasSenderTab = !!(sender && sender.tab && typeof sender.tab.id === "number");
-      const isActiveCaptureTab = settings.activeTabOnly
+      const isActiveCaptureTab = effectiveSettings.activeTabOnly
         ? (hasSenderTab ? isEventFromActiveTarget(sender.tab) : true)
         : true;
       return {
         isRecording,
         isPaused,
-        settings,
+        settings: effectiveSettings,
         count: events.length,
-        activeCaptureTabId: settings.activeTabOnly ? activeCaptureTabId : null,
-        activeCaptureWindowId: settings.activeTabOnly ? activeCaptureWindowId : null,
-        isActiveCaptureTab
+        activeCaptureTabId: effectiveSettings.activeTabOnly ? activeCaptureTabId : null,
+        activeCaptureWindowId: effectiveSettings.activeTabOnly ? activeCaptureWindowId : null,
+        isActiveCaptureTab,
+        burstHotkeyModeActive
       };
     }
 
     if (msgType === "UPDATE_SETTINGS") {
       settings = { ...settings, ...(msg.settings || {}) };
+      settings = normalizeClickBurstSettings(settings);
       if (settings.activeTabOnly) {
         if (isRecording) {
           await refreshActiveCaptureTarget("settings:update");
@@ -560,25 +1000,27 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         try { await browser.idle.setDetectionInterval(Math.max(15, settings.idleThresholdSec || 60)); } catch (_) {}
       }
       const persisted = await persistSafe("update-settings");
-      if (!persisted.ok) return { ok: false, settings, persisted: false };
-      return { ok: true, settings };
+      const effectiveSettings = getEffectiveSettings();
+      if (!persisted.ok) return { ok: false, settings: effectiveSettings, persisted: false, burstHotkeyModeActive };
+      return { ok: true, settings: effectiveSettings, burstHotkeyModeActive };
     }
 
     if (msgType === "START_RECORDING") {
-      return await startRecordingInternal(`runtime:${requestId}`);
+      return await enqueueLifecycleAction(`runtime:start:${requestId}`, () => startRecordingInternal(`runtime:${requestId}`));
     }
 
     if (msgType === "STOP_RECORDING") {
-      return await stopRecordingInternal(`runtime:${requestId}`);
+      return await enqueueLifecycleAction(`runtime:stop:${requestId}`, () => stopRecordingInternal(`runtime:${requestId}`));
     }
 
     if (msgType === "ADD_NOTE") {
       if (!isRecording) return { ok: false, ignored: true };
-      if (settings.activeTabOnly && (activeCaptureTabId === null || activeCaptureWindowId === null)) {
+      const effectiveSettings = getEffectiveSettings();
+      if (effectiveSettings.activeTabOnly && (activeCaptureTabId === null || activeCaptureWindowId === null)) {
         return { ok: false, ignored: true, reason: "no-active-target" };
       }
       const tab = await getActiveTab();
-      if (settings.activeTabOnly && !isEventFromActiveTarget(tab)) {
+      if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(tab)) {
         return { ok: false, ignored: true, reason: "non-active-tab" };
       }
       const note = String(msg.text || "").trim();
@@ -593,7 +1035,8 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         sessionId,
         tabId: tab && tab.id ? tab.id : null,
         windowId: tab && tab.windowId ? tab.windowId : null,
-        tabTitle: tab && tab.title ? tab.title : ""
+        tabTitle: tab && tab.title ? tab.title : "",
+        ...(isHotkeyBurstModeActive() ? { burstHotkeyMode: true, burstModeEpoch } : {})
       });
       const persisted = await persistSafe("add-note");
       return { ok: persisted.ok, persisted: persisted.ok };
@@ -611,9 +1054,11 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         if (!isRecording || isPaused) return { ok: false, ignored: true };
         const e = msg.event || {};
         eventType = e.type || "unknown";
+        const effectiveSettings = getEffectiveSettings();
+        const hotkeyBurstActive = isHotkeyBurstModeActive();
         if (shouldIgnoreEventType(e.type)) return { ok: false, ignored: true };
         const senderTab = sender && sender.tab ? sender.tab : null;
-        if (settings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
+        if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
           bgLog("record-event:dropped-non-active", {
             requestId,
             eventType,
@@ -638,11 +1083,20 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           windowId: sender && sender.tab ? sender.tab.windowId : null,
           tabTitle: sender && sender.tab ? sender.tab.title : ""
         };
+        if (hotkeyBurstActive) cleaned.burstHotkeyMode = true;
+        if (hotkeyBurstActive) cleaned.burstModeEpoch = burstModeEpoch;
+        if (e && e.burstBypassUiProbe) cleaned.burstBypassUiProbe = true;
         delete cleaned.typedValue;
 
-        const includeScreenshot = ["click","change","input","submit","outcome","note"].includes(e.type)
-          || (e.type === "nav" && (!settings.activeTabOnly || !!e.forceScreenshot))
-          || (e.type === "ui-change" && !!e.forceScreenshot);
+        const includeScreenshot = hotkeyBurstActive
+          ? HOTKEY_BURST_CAPTURE_EVENT_TYPES.has(e.type)
+          : (
+            ["change","input","submit","outcome","note"].includes(e.type)
+            || (e.type === "click" && (effectiveSettings.clickBurstEnabled || !!e.forceScreenshot || !!e.clickUiUpdated))
+            || (e.type === "nav" && (!effectiveSettings.activeTabOnly || !!e.forceScreenshot))
+            || (e.type === "ui-change" && (effectiveSettings.clickBurstEnabled || !!e.forceScreenshot))
+          );
+        if (hotkeyBurstActive && includeScreenshot) cleaned.burstCaptureForced = true;
         if (includeScreenshot) {
           const shot = await maybeScreenshot(e);
           cleaned.screenshot = shot.screenshot;
@@ -656,7 +1110,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           cleaned.screenshotSkipReason = "not-needed";
         }
 
-        if (settings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
+        if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
           bgLog("record-event:dropped-non-active", {
             requestId,
             eventType,
@@ -728,8 +1182,16 @@ browser.storage.onChanged.addListener(async (changes, areaName) => {
     const token = Number(stopChange.newValue);
     if (token > lastPopupStopToken) {
       lastPopupStopToken = token;
+      if (!isRecording) {
+        bgLog("storage:stop-request:ignored", { token, reason: "not-recording" });
+        return;
+      }
+      if (recordingStartedAtMs && token < recordingStartedAtMs) {
+        bgLog("storage:stop-request:ignored", { token, reason: "stale-token", recordingStartedAtMs });
+        return;
+      }
       bgLog("storage:stop-request", { token, source: changes.__uiRecorderStopSource && changes.__uiRecorderStopSource.newValue });
-      await stopRecordingInternal(`storage:${token}`);
+      await enqueueLifecycleAction(`storage:stop:${token}`, () => stopRecordingInternal(`storage:${token}`));
     }
   }
 });
@@ -766,9 +1228,29 @@ browser.windows.onFocusChanged.addListener(async (windowId) => {
 
 browser.commands.onCommand.addListener(async (command) => {
   bgLog("commands:onCommand", { command, isRecording, isPaused, eventCount: events.length, sessionId });
-  if (command !== "toggle-recording") return;
-  if (isRecording) {
-    return await stopRecordingInternal("command:toggle");
+  if (command === "toggle-recording") {
+    if (isRecording) {
+      return await enqueueLifecycleAction("command:stop", () => stopRecordingInternal("command:toggle"));
+    }
+    return await enqueueLifecycleAction("command:start", () => startRecordingInternal("command:toggle"));
   }
-  return await startRecordingInternal("command:toggle");
+  if (command !== "toggle-burst-capture") return;
+  if (!isRecording) {
+    bgLog("capture-mode:toggle-ignored", { reason: "recording-inactive" });
+    return;
+  }
+  burstHotkeyModeActive = !burstHotkeyModeActive;
+  if (burstHotkeyModeActive) burstModeEpoch += 1;
+  const persisted = await persistSafe("toggle-burst-capture");
+  const effective = getEffectiveSettings();
+  await notifyCaptureModeChanged("command:toggle-burst-capture");
+  if (burstHotkeyModeActive) ensureContinuousBurstCaptureLoop("command:on");
+  else stopContinuousBurstCaptureLoop("command:off");
+  bgLog("capture-mode:toggled", {
+    burstHotkeyModeActive,
+    burstModeEpoch,
+    persisted: persisted.ok,
+    effectivePageWatchEnabled: !!effective.pageWatchEnabled,
+    effectiveClickBurstEnabled: !!effective.clickBurstEnabled
+  });
 });

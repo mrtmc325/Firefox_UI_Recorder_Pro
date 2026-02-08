@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "UI Workflow Recorder Pro",
-  "version": "1.9.0",
+  "version": "1.11.0",
   "description": "Record UI workflows with clean step titles, text-only redaction, and advanced reporting tools.",
   "icons": {
     "16": "icons/icon.svg",
@@ -58,6 +58,13 @@
         "default": "Ctrl+Shift+Y"
       },
       "description": "Start/stop recording"
+    },
+    "toggle-burst-capture": {
+      "suggested_key": {
+        "default": "Ctrl+Alt+G",
+        "mac": "Command+Alt+G"
+      },
+      "description": "Toggle high-speed GIF burst mode"
     }
   }
 }

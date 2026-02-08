@@ -37,6 +37,24 @@ const EXPORT_THEME_DEFAULTS = Object.freeze({
   tocMeta: "host",
   accentColor: "#0ea5e9"
 });
+const CLICK_BURST_DEFAULTS = Object.freeze({
+  clickBurstEnabled: true,
+  clickBurstTriggerMs: 3000,
+  clickBurstWindowMs: 7000,
+  clickBurstMaxClicks: 10,
+  clickBurstFlushMs: 2456.783,
+  clickBurstMarkerColor: "#2563eb",
+  clickBurstAutoPlay: true,
+  clickBurstIncludeClicks: true,
+  clickBurstIncludeTyping: true,
+  clickBurstTimeBasedAnyEvent: true,
+  clickBurstCondenseStepScreenshots: true,
+  clickBurstTypingMinChars: 3,
+  clickBurstTypingWindowMs: 500,
+  clickBurstPlaybackFps: 5,
+  clickBurstPlaybackMode: "loop"
+});
+const CLICK_BURST_RENDER_MARKER_CAP = 10;
 
 const EXPORT_THEME_PRESETS = Object.freeze({
   extension: Object.freeze({
@@ -225,6 +243,33 @@ function normalizeExportTheme(raw) {
     : EXPORT_THEME_DEFAULTS.tocMeta;
   const accentColor = normalizeHexColor(incoming.accentColor, EXPORT_THEME_DEFAULTS.accentColor);
   return { preset, font, tocLayout, tocMeta, accentColor };
+}
+
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return Number(fallback);
+  return Math.max(min, Math.min(max, num));
+}
+
+function normalizeClickBurstSettings(raw) {
+  const incoming = isPlainObject(raw) ? raw : {};
+  return {
+    clickBurstEnabled: incoming.clickBurstEnabled !== false,
+    clickBurstTriggerMs: clampNumber(incoming.clickBurstTriggerMs, 500, 10000, CLICK_BURST_DEFAULTS.clickBurstTriggerMs),
+    clickBurstWindowMs: clampNumber(incoming.clickBurstWindowMs, 1000, 30000, CLICK_BURST_DEFAULTS.clickBurstWindowMs),
+    clickBurstMaxClicks: Math.round(clampNumber(incoming.clickBurstMaxClicks, 2, 50, CLICK_BURST_DEFAULTS.clickBurstMaxClicks)),
+    clickBurstFlushMs: clampNumber(incoming.clickBurstFlushMs, 250, 10000, CLICK_BURST_DEFAULTS.clickBurstFlushMs),
+    clickBurstMarkerColor: normalizeHexColor(incoming.clickBurstMarkerColor, CLICK_BURST_DEFAULTS.clickBurstMarkerColor),
+    clickBurstAutoPlay: incoming.clickBurstAutoPlay !== false,
+    clickBurstIncludeClicks: incoming.clickBurstIncludeClicks !== false,
+    clickBurstIncludeTyping: incoming.clickBurstIncludeTyping !== false,
+    clickBurstTimeBasedAnyEvent: incoming.clickBurstTimeBasedAnyEvent !== false,
+    clickBurstCondenseStepScreenshots: incoming.clickBurstCondenseStepScreenshots !== false,
+    clickBurstTypingMinChars: Math.round(clampNumber(incoming.clickBurstTypingMinChars, 1, 32, CLICK_BURST_DEFAULTS.clickBurstTypingMinChars)),
+    clickBurstTypingWindowMs: clampNumber(incoming.clickBurstTypingWindowMs, 100, 5000, CLICK_BURST_DEFAULTS.clickBurstTypingWindowMs),
+    clickBurstPlaybackFps: Math.round(clampNumber(incoming.clickBurstPlaybackFps, 1, 60, CLICK_BURST_DEFAULTS.clickBurstPlaybackFps)),
+    clickBurstPlaybackMode: "loop"
+  };
 }
 
 function encodeText(value) {
@@ -757,6 +802,630 @@ function renderTableOfContents(target, events) {
     list.appendChild(item);
   });
   target.appendChild(list);
+}
+
+function eventTsMs(ev, fallbackMs) {
+  const ts = ev && ev.ts ? Date.parse(ev.ts) : NaN;
+  if (Number.isFinite(ts)) return ts;
+  return Number(fallbackMs) || Date.now();
+}
+
+function normalizedPageKey(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    return `${parsed.origin}${parsed.pathname || "/"}`;
+  } catch (_) {
+    return raw;
+  }
+}
+
+function isTypingEvent(ev) {
+  return !!(ev && (ev.type === "input" || ev.type === "change"));
+}
+
+function eventFieldKey(ev) {
+  if (!ev || typeof ev !== "object") return "";
+  const raw = `${ev.id || ""}|${ev.label || ""}|${ev.human || ""}|${ev.tag || ""}`;
+  return lower(raw).replace(/\s+/g, " ").trim();
+}
+
+function buildTypingQualifiedSet(events, settings) {
+  const qualified = new WeakSet();
+  if (!Array.isArray(events) || !events.length || !settings.clickBurstIncludeTyping) return qualified;
+  const byField = new Map();
+
+  events.forEach((ev) => {
+    if (!isTypingEvent(ev) || !ev.screenshot) return;
+    const context = clickBurstContext(ev);
+    const fieldKey = eventFieldKey(ev) || "field";
+    const mapKey = `${context.tabId}|${context.pageKey}|${fieldKey}`;
+    const tsMs = eventTsMs(ev, Date.now());
+    const rawValue = String(ev.value || "");
+    const rawLen = Number(ev.valueLength);
+    const valueLen = Number.isFinite(rawLen) ? Math.max(0, rawLen) : rawValue.length;
+    const isRedactedValue = rawValue === "[REDACTED]";
+
+    let state = byField.get(mapKey);
+    if (!state || (tsMs - state.windowStartMs) > settings.clickBurstTypingWindowMs) {
+      state = {
+        windowStartMs: tsMs,
+        charsTyped: 0,
+        lastValueLen: valueLen,
+        windowEvents: []
+      };
+    }
+
+    let deltaChars = valueLen - state.lastValueLen;
+    if (!Number.isFinite(deltaChars)) deltaChars = 0;
+    if (deltaChars <= 0 || isRedactedValue) deltaChars = 1;
+    state.charsTyped += deltaChars;
+    state.lastValueLen = valueLen;
+    state.windowEvents.push(ev);
+    if (state.windowEvents.length > 40) state.windowEvents.shift();
+
+    if (state.charsTyped > settings.clickBurstTypingMinChars) {
+      state.windowEvents.forEach((eventRef) => qualified.add(eventRef));
+    }
+    byField.set(mapKey, state);
+  });
+
+  return qualified;
+}
+
+function isInteractionBurstCandidate(ev, settings, typingQualified) {
+  if (!ev || !ev.screenshot) return false;
+  if (ev && ev.burstHotkeyMode) return true;
+  const type = String(ev.type || "").toLowerCase();
+  if (type === "click") return !!settings.clickBurstIncludeClicks;
+  if (isTypingEvent(ev)) return !!settings.clickBurstIncludeTyping && !!(typingQualified && typingQualified.has(ev));
+  if (!settings.clickBurstTimeBasedAnyEvent) return false;
+  if (type === "note" || type === "outcome") return false;
+  return true;
+}
+
+function clickBurstContext(ev) {
+  return {
+    tabId: ev && ev.tabId !== undefined ? ev.tabId : null,
+    pageKey: normalizedPageKey(ev && ev.url),
+    tabTitle: ev && ev.tabTitle ? String(ev.tabTitle) : ""
+  };
+}
+
+function sameClickBurstContext(a, b) {
+  if (!a || !b) return false;
+  return a.tabId === b.tabId && a.pageKey === b.pageKey;
+}
+
+function frameFromEvent(ev, fallbackStepId) {
+  const viewportW = Math.max(1, Number(ev && ev.viewportW) || 1);
+  const viewportH = Math.max(1, Number(ev && ev.viewportH) || 1);
+  const clickX = Number(ev && ev.clickX);
+  const clickY = Number(ev && ev.clickY);
+  const eventX = Number(ev && ev.eventX);
+  const eventY = Number(ev && ev.eventY);
+  let markerX = Number.isFinite(clickX) ? clickX : (Number.isFinite(eventX) ? eventX : null);
+  let markerY = Number.isFinite(clickY) ? clickY : (Number.isFinite(eventY) ? eventY : null);
+
+  if ((!Number.isFinite(markerX) || !Number.isFinite(markerY)) && ev && Array.isArray(ev.redactRects) && ev.redactRects.length) {
+    const first = ev.redactRects[0];
+    if (first && Number.isFinite(first.x) && Number.isFinite(first.y) && Number.isFinite(first.w) && Number.isFinite(first.h)) {
+      markerX = first.x + (first.w / 2);
+      markerY = first.y + (first.h / 2);
+    }
+  }
+
+  const nx = Number.isFinite(markerX) ? Math.max(0, Math.min(1, markerX / viewportW)) : null;
+  const ny = Number.isFinite(markerY) ? Math.max(0, Math.min(1, markerY / viewportH)) : null;
+  return {
+    event: ev,
+    stepId: (ev && ev.stepId) || fallbackStepId || "",
+    screenshot: String(ev && ev.screenshot || ""),
+    marker: (nx !== null && ny !== null) ? { x: nx, y: ny } : null,
+    tsMs: eventTsMs(ev, Date.now()),
+    kind: ev && ev.type ? String(ev.type) : "event"
+  };
+}
+
+function deriveClickBursts(events, rawSettings) {
+  const settings = normalizeClickBurstSettings(rawSettings);
+  if (!Array.isArray(events) || !events.length) return [];
+  const hasHotkeyBurstCandidates = events.some((ev) => !!(ev && ev.burstHotkeyMode && ev.screenshot));
+  if (!settings.clickBurstEnabled && !hasHotkeyBurstCandidates) return [];
+  const typingQualified = buildTypingQualifiedSet(events, settings);
+
+  const triggerMs = settings.clickBurstTriggerMs;
+  const windowMs = settings.clickBurstWindowMs;
+  const maxClicks = settings.clickBurstMaxClicks;
+  const flushMs = settings.clickBurstFlushMs;
+
+  const bursts = [];
+  let burstSeq = 0;
+  let pendingSingle = null;
+  let activeBurst = null;
+
+  const finalizeActive = () => {
+    if (!activeBurst || !Array.isArray(activeBurst.frames)) {
+      activeBurst = null;
+      return;
+    }
+    if (activeBurst.frames.length >= 2) {
+      const first = activeBurst.frames[0];
+      const last = activeBurst.frames[activeBurst.frames.length - 1];
+      bursts.push({
+        id: `burst-${++burstSeq}`,
+        tabId: activeBurst.context.tabId,
+        tabTitle: activeBurst.context.tabTitle,
+        pageKey: activeBurst.context.pageKey,
+        url: activeBurst.url || (first && first.event ? first.event.url : ""),
+        startMs: first ? first.tsMs : activeBurst.startMs,
+        endMs: last ? last.tsMs : activeBurst.lastMs,
+        frames: activeBurst.frames.slice(0),
+        hotkeyMode: !!activeBurst.hotkeyMode,
+        burstModeEpoch: Number.isFinite(activeBurst.burstModeEpoch) ? activeBurst.burstModeEpoch : null
+      });
+    }
+    activeBurst = null;
+  };
+
+  const candidateEpoch = (ev) => {
+    const parsed = Number(ev && ev.burstModeEpoch);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const startHotkeyBurst = (candidate) => {
+    activeBurst = {
+      context: candidate.context,
+      url: candidate.url,
+      startMs: candidate.tsMs,
+      lastMs: candidate.tsMs,
+      frames: [candidate.frame],
+      hotkeyMode: true,
+      burstModeEpoch: candidate.burstModeEpoch
+    };
+  };
+
+  const canAppendToActive = (candidate) => {
+    if (!activeBurst) return false;
+    if (activeBurst.hotkeyMode) {
+      return (
+        !!candidate.hotkeyMode &&
+        sameClickBurstContext(activeBurst.context, candidate.context) &&
+        activeBurst.burstModeEpoch === candidate.burstModeEpoch
+      );
+    }
+
+    const gapMs = candidate.tsMs - activeBurst.lastMs;
+    const elapsedMs = candidate.tsMs - activeBurst.startMs;
+    return (
+      sameClickBurstContext(activeBurst.context, candidate.context) &&
+      gapMs <= flushMs &&
+      elapsedMs <= windowMs &&
+      activeBurst.frames.length < maxClicks
+    );
+  };
+
+  events.forEach((ev, index) => {
+    if (!isInteractionBurstCandidate(ev, settings, typingQualified)) return;
+    const fallbackStepId = `step-${index + 1}`;
+    const frame = frameFromEvent(ev, fallbackStepId);
+    if (!frame.screenshot) return;
+    const context = clickBurstContext(ev);
+    const candidate = {
+      frame,
+      context,
+      tsMs: frame.tsMs,
+      url: String(ev && ev.url || ""),
+      hotkeyMode: !!(ev && ev.burstHotkeyMode),
+      burstModeEpoch: candidateEpoch(ev)
+    };
+
+    if (activeBurst) {
+      if (canAppendToActive(candidate)) {
+        activeBurst.frames.push(candidate.frame);
+        activeBurst.lastMs = candidate.tsMs;
+        return;
+      }
+      finalizeActive();
+      if (candidate.hotkeyMode) {
+        startHotkeyBurst(candidate);
+      } else {
+        pendingSingle = candidate;
+      }
+      return;
+    }
+
+    if (candidate.hotkeyMode) {
+      pendingSingle = null;
+      startHotkeyBurst(candidate);
+      return;
+    }
+
+    if (!pendingSingle) {
+      pendingSingle = candidate;
+      return;
+    }
+
+    const deltaMs = candidate.tsMs - pendingSingle.tsMs;
+    const canStartBurst =
+      sameClickBurstContext(pendingSingle.context, candidate.context) &&
+      deltaMs <= triggerMs;
+
+    if (canStartBurst) {
+      activeBurst = {
+        context: candidate.context,
+        url: candidate.url || pendingSingle.url,
+        startMs: pendingSingle.tsMs,
+        lastMs: candidate.tsMs,
+        frames: [pendingSingle.frame, candidate.frame]
+      };
+      pendingSingle = null;
+      return;
+    }
+
+    pendingSingle = candidate;
+  });
+
+  finalizeActive();
+  return bursts;
+}
+
+function buildBurstFrameMap(bursts) {
+  const map = new Map();
+  if (!Array.isArray(bursts)) return map;
+  bursts.forEach((burst) => {
+    const burstId = burst && burst.id ? String(burst.id) : "";
+    const totalFrames = Array.isArray(burst && burst.frames) ? burst.frames.length : 0;
+    const title = burst && burst.tabTitle ? String(burst.tabTitle) : "";
+    if (!totalFrames) return;
+    burst.frames.forEach((frame, frameIndex) => {
+      const stepId = frame && frame.stepId ? String(frame.stepId) : "";
+      if (!stepId) return;
+      if (!map.has(stepId)) {
+        map.set(stepId, {
+          burstId,
+          totalFrames,
+          frameIndex,
+          title
+        });
+      }
+    });
+  });
+  return map;
+}
+
+function buildBurstInsertionMap(bursts) {
+  const map = new Map();
+  if (!Array.isArray(bursts)) return map;
+  bursts.forEach((burst, burstIndex) => {
+    const frames = Array.isArray(burst && burst.frames) ? burst.frames : [];
+    if (frames.length < 2) return;
+    const firstFrame = frames[0];
+    const stepId = firstFrame && firstFrame.stepId ? String(firstFrame.stepId) : "";
+    if (!stepId) return;
+    const list = map.get(stepId) || [];
+    list.push({ burst, burstIndex });
+    map.set(stepId, list);
+  });
+  return map;
+}
+
+function isImpliedBurstStep(ev, burstFrameMap, burstSettings) {
+  if (!ev || !burstFrameMap || !burstSettings) return false;
+  const stepId = ev && ev.stepId ? String(ev.stepId) : "";
+  if (!stepId) return false;
+  const burstFrame = burstFrameMap.get(stepId);
+  if (!burstFrame) return false;
+  return !!(
+    burstSettings.clickBurstCondenseStepScreenshots &&
+    burstFrame.frameIndex > 0 &&
+    !ev.annotation
+  );
+}
+
+function drawBurstMarker(ctx, x, y, markerIndex, markerColor) {
+  const radius = 12;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(37, 99, 235, 0.18)";
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = markerColor;
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 12px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(markerIndex), x, y);
+}
+
+function createClickBurstPlayer(card, burst, options) {
+  const requestedFps = Number(options && options.fps);
+  const fps = Number.isFinite(requestedFps)
+    ? Math.max(1, Math.min(60, Math.round(requestedFps)))
+    : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
+  const baseFrameDurationMs = Math.max(16, Math.round(1000 / fps));
+  const markerColor = normalizeHexColor(options && options.markerColor, CLICK_BURST_DEFAULTS.clickBurstMarkerColor);
+  const autoPlay = !!(options && options.autoPlay);
+  const onJump = options && typeof options.onJump === "function" ? options.onJump : null;
+  const onDestroy = options && typeof options.onDestroy === "function" ? options.onDestroy : null;
+
+  const media = el("div", "click-burst-media");
+  const canvas = document.createElement("canvas");
+  canvas.className = "click-burst-canvas";
+  canvas.width = 640;
+  canvas.height = 360;
+  media.appendChild(canvas);
+  card.appendChild(media);
+
+  const controls = el("div", "click-burst-controls");
+  const playPause = el("button", "btn ghost btn-small", autoPlay ? "Pause" : "Play");
+  playPause.type = "button";
+  const speedWrap = el("label", "click-burst-speed");
+  speedWrap.appendChild(el("span", "click-burst-speed-label", "Speed"));
+  const speedSlider = document.createElement("input");
+  speedSlider.type = "range";
+  speedSlider.min = "0.25";
+  speedSlider.max = "3";
+  speedSlider.step = "0.05";
+  speedSlider.value = "1";
+  speedSlider.className = "click-burst-speed-slider";
+  const speedValue = el("span", "click-burst-speed-value", "1.00x");
+  speedWrap.appendChild(speedSlider);
+  speedWrap.appendChild(speedValue);
+  const progress = el("span", "click-burst-progress", "Frame 0/0");
+  const jumpFirst = el("button", "btn subtle btn-small", "Jump first");
+  jumpFirst.type = "button";
+  const jumpLast = el("button", "btn subtle btn-small", "Jump last");
+  jumpLast.type = "button";
+  controls.appendChild(playPause);
+  controls.appendChild(speedWrap);
+  controls.appendChild(progress);
+  controls.appendChild(jumpFirst);
+  controls.appendChild(jumpLast);
+  card.appendChild(controls);
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    progress.textContent = "Canvas unavailable";
+    playPause.disabled = true;
+    jumpFirst.disabled = true;
+    jumpLast.disabled = true;
+    return { destroy: () => {} };
+  }
+
+  const frames = (burst && Array.isArray(burst.frames) ? burst.frames : [])
+    .map((frame) => {
+      const src = String(frame && frame.screenshot || "").trim();
+      if (!src) return null;
+      return {
+        src,
+        marker: frame && frame.marker ? frame.marker : null,
+        stepId: frame && frame.stepId ? String(frame.stepId) : "",
+        img: null,
+        failed: false,
+        pending: null
+      };
+    })
+    .filter(Boolean);
+
+  const shouldEvictFrames = frames.length > 180;
+  const evictDistance = shouldEvictFrames ? 48 : Number.POSITIVE_INFINITY;
+
+  let frameIndex = 0;
+  let isPlaying = autoPlay;
+  let timerId = null;
+  let destroyed = false;
+  let speedMultiplier = 1;
+
+  const stopLoop = () => {
+    if (timerId) {
+      clearInterval(timerId);
+      timerId = null;
+    }
+  };
+
+  const destroyImages = () => {
+    frames.forEach((entry) => {
+      if (entry && entry.img) {
+        entry.img.src = "";
+        entry.img = null;
+      }
+      if (entry) {
+        entry.pending = null;
+        entry.failed = false;
+      }
+    });
+  };
+
+  const evictFarFrames = (center) => {
+    if (!Number.isFinite(evictDistance)) return;
+    frames.forEach((entry, idx) => {
+      if (!entry || !entry.img) return;
+      if (idx === 0) return;
+      if (Math.abs(idx - center) <= evictDistance) return;
+      entry.img.src = "";
+      entry.img = null;
+    });
+  };
+
+  const ensureFrameLoaded = (index) => {
+    if (index < 0 || index >= frames.length) return Promise.resolve(null);
+    const frame = frames[index];
+    if (!frame || frame.failed) return Promise.resolve(null);
+    if (frame.img) return Promise.resolve(frame);
+    if (frame.pending) return frame.pending;
+
+    frame.pending = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        frame.pending = null;
+        if (destroyed) {
+          img.src = "";
+          resolve(null);
+          return;
+        }
+        frame.img = img;
+        resolve(frame);
+      };
+      img.onerror = () => {
+        frame.pending = null;
+        frame.failed = true;
+        resolve(null);
+      };
+      img.src = frame.src;
+    });
+    return frame.pending;
+  };
+
+  const prefetchNear = (index) => {
+    ensureFrameLoaded(index - 1);
+    ensureFrameLoaded(index);
+    ensureFrameLoaded(index + 1);
+  };
+
+  const drawPlaceholder = (text) => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "rgba(15, 23, 42, 0.06)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "rgba(71, 85, 105, 0.9)";
+    ctx.font = "600 14px \"Trebuchet MS\", \"Segoe UI\", sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, Math.round(canvas.width / 2), Math.round(canvas.height / 2));
+  };
+
+  const drawFrame = (index) => {
+    if (destroyed) return;
+    const frame = frames[index];
+    if (!frame) return;
+    evictFarFrames(index);
+    prefetchNear(index);
+
+    if (!frame.img) {
+      progress.textContent = `Frame ${index + 1}/${frames.length}`;
+      drawPlaceholder("Loading frame…");
+      ensureFrameLoaded(index).then((loaded) => {
+        if (destroyed || !loaded || frameIndex !== index) return;
+        drawFrame(index);
+      });
+      return;
+    }
+
+    if (canvas.width !== frame.img.width || canvas.height !== frame.img.height) {
+      canvas.width = frame.img.width;
+      canvas.height = frame.img.height;
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(frame.img, 0, 0, canvas.width, canvas.height);
+
+    const markerLimit = Math.min(CLICK_BURST_RENDER_MARKER_CAP, index + 1);
+    for (let i = 0; i < markerLimit; i++) {
+      const point = frames[i] && frames[i].marker ? frames[i].marker : null;
+      if (!point) continue;
+      const x = Math.round(point.x * canvas.width);
+      const y = Math.round(point.y * canvas.height);
+      drawBurstMarker(ctx, x, y, i + 1, markerColor);
+    }
+
+    progress.textContent = `Frame ${index + 1}/${frames.length}`;
+  };
+
+  const startLoop = () => {
+    stopLoop();
+    if (destroyed || !isPlaying || frames.length < 2) return;
+    const frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / Math.max(0.25, Math.min(3, speedMultiplier))));
+    timerId = setInterval(() => {
+      frameIndex += 1;
+      if (frameIndex >= frames.length) {
+        frameIndex = 0;
+      }
+      drawFrame(frameIndex);
+    }, frameDurationMs);
+  };
+
+  const setPlaying = (next) => {
+    isPlaying = !!next;
+    playPause.textContent = isPlaying ? "Pause" : "Play";
+    startLoop();
+  };
+
+  playPause.addEventListener("click", () => setPlaying(!isPlaying));
+  jumpFirst.addEventListener("click", () => {
+    const stepId = burst && burst.frames && burst.frames[0] ? burst.frames[0].stepId : "";
+    if (stepId && onJump) onJump(stepId);
+  });
+  jumpLast.addEventListener("click", () => {
+    const last = burst && burst.frames ? burst.frames[burst.frames.length - 1] : null;
+    const stepId = last && last.stepId ? last.stepId : "";
+    if (stepId && onJump) onJump(stepId);
+  });
+  speedSlider.addEventListener("input", () => {
+    const next = Number(speedSlider.value);
+    speedMultiplier = Number.isFinite(next) ? Math.max(0.25, Math.min(3, next)) : 1;
+    speedValue.textContent = `${speedMultiplier.toFixed(2)}x`;
+    if (isPlaying) startLoop();
+  });
+
+  if (frames.length < 2) {
+    progress.textContent = "Not enough valid frames";
+    playPause.disabled = true;
+    jumpFirst.disabled = true;
+    jumpLast.disabled = true;
+    return { destroy: () => {} };
+  }
+
+  frameIndex = 0;
+  ensureFrameLoaded(0);
+  ensureFrameLoaded(1);
+  drawFrame(frameIndex);
+  setPlaying(autoPlay);
+
+  return {
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      stopLoop();
+      destroyImages();
+      if (onDestroy) onDestroy();
+    }
+  };
+}
+
+function renderClickBursts(target, bursts, options) {
+  if (!target) return [];
+  target.innerHTML = "";
+  if (!Array.isArray(bursts) || !bursts.length) {
+    target.appendChild(el("div", "hint", "No click bursts detected for current filters."));
+    return [];
+  }
+
+  const players = [];
+  bursts.forEach((burst, index) => {
+    const card = el("article", "click-burst-card");
+    const head = el("div", "click-burst-head");
+    const burstTitle = burst.tabTitle || burst.pageKey || `Burst ${index + 1}`;
+    head.appendChild(el("div", "click-burst-title", burstTitle));
+    const startLabel = formatExportTimestamp(new Date(burst.startMs || Date.now()).toISOString());
+    const endLabel = formatExportTimestamp(new Date(burst.endMs || Date.now()).toISOString());
+    const meta = `${burst.frames.length} interactions • ${startLabel} → ${endLabel}`;
+    head.appendChild(el("div", "click-burst-meta", meta));
+    card.appendChild(head);
+
+    const player = createClickBurstPlayer(card, burst, {
+      markerColor: options && options.markerColor,
+      autoPlay: options && options.autoPlay,
+      fps: options && options.fps,
+      playbackMode: options && options.playbackMode,
+      onJump: options && options.onJump
+    });
+    players.push(player);
+    target.appendChild(card);
+  });
+
+  return players;
 }
 
 function renderTimeline(target, events, options) {
@@ -1487,13 +2156,13 @@ function buildExportHtml(report, options = {}) {
   const title = escapeHtml(brand.title || DEFAULT_REPORT_TITLE);
   const subtitle = escapeHtml(brand.subtitle || DEFAULT_REPORT_SUBTITLE);
   const logo = safeDataImageUrl(brand.logo || "");
-  const events = Array.isArray(report.events) ? report.events : [];
+  const sourceEvents = Array.isArray(report.events) ? report.events : [];
   const resolvedSourceStepCount = Number(opts.sourceStepCount);
   const sourceStepCount = Number.isFinite(resolvedSourceStepCount)
     ? Math.max(0, Math.floor(resolvedSourceStepCount))
-    : events.length;
+    : sourceEvents.length;
   const quickPreviewNotice = isQuickPreview
-    ? `<div class="preview-banner">Quick preview: first-step snapshot (${events.length} of ${sourceStepCount} step${sourceStepCount === 1 ? "" : "s"}). Use &quot;Export HTML bundle&quot; for the full report.</div>`
+    ? `<div class="preview-banner">Quick preview: first-step snapshot (${sourceEvents.length} of ${sourceStepCount} step${sourceStepCount === 1 ? "" : "s"}). Use &quot;Export HTML bundle&quot; for the full report.</div>`
     : "";
   const exportTheme = normalizeExportTheme(report.exportTheme);
   const preset = EXPORT_THEME_PRESETS[exportTheme.preset] || EXPORT_THEME_PRESETS.extension;
@@ -1508,6 +2177,12 @@ function buildExportHtml(report, options = {}) {
     outline: "toc-layout-outline"
   });
   const tocLayoutClass = tocLayoutClassByValue[exportTheme.tocLayout] || "toc-layout-grid";
+  const burstSettings = normalizeClickBurstSettings(report && report.settings);
+  const burstSourceEvents = sourceEvents.map((ev, i) => ({ ...(ev || {}), stepId: `step-${i + 1}` }));
+  const derivedBursts = deriveClickBursts(burstSourceEvents, burstSettings);
+  const burstFrameMap = buildBurstFrameMap(derivedBursts);
+  const events = burstSourceEvents.filter((ev) => !isImpliedBurstStep(ev, burstFrameMap, burstSettings));
+
   const tocClass = `toc ${tocLayoutClass}${events.length >= 100 ? " toc-dense" : ""}`;
   const tocMetaFor = (ev) => {
     if (exportTheme.tocMeta === "none") return "";
@@ -1516,12 +2191,40 @@ function buildExportHtml(report, options = {}) {
   };
 
   const tocRows = events.map((ev, i) => {
+    const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
     const stepTitle = escapeHtml(titleFor(ev));
     const metaText = escapeHtml(tocMetaFor(ev));
-    return `<li><a href="#step-${i + 1}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaText ? `<span>${metaText}</span>` : ""}</li>`;
+    return `<li><a href="#${stepId}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaText ? `<span>${metaText}</span>` : ""}</li>`;
   }).join("\n");
 
-  const rows = events.map((ev, i) => {
+  const burstData = derivedBursts.map((burst) => {
+    const startIso = new Date(burst.startMs || Date.now()).toISOString();
+    const endIso = new Date(burst.endMs || Date.now()).toISOString();
+    return {
+      id: burst.id,
+      title: burst.tabTitle || burst.pageKey || "Click burst",
+      meta: `${burst.frames.length} interactions • ${formatExportTimestamp(startIso)} → ${formatExportTimestamp(endIso)}`,
+      frames: (burst.frames || []).map((frame) => ({
+        stepId: frame.stepId || "",
+        screenshot: safeDataImageUrl(frame.screenshot || ""),
+        marker: frame.marker && Number.isFinite(frame.marker.x) && Number.isFinite(frame.marker.y)
+          ? { x: frame.marker.x, y: frame.marker.y }
+          : null
+      }))
+    };
+  });
+  const burstDataJson = JSON.stringify({
+    markerColor: burstSettings.clickBurstMarkerColor,
+    autoPlay: burstSettings.clickBurstAutoPlay,
+    fps: burstSettings.clickBurstPlaybackFps,
+    playbackMode: burstSettings.clickBurstPlaybackMode,
+    bursts: burstData
+  }).replace(/</g, "\\u003c");
+  const burstInsertionMap = buildBurstInsertionMap(derivedBursts);
+
+  const rowParts = [];
+  events.forEach((ev, i) => {
+    const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
     const stepTitle = escapeHtml(titleFor(ev));
     const metaTs = escapeHtml(formatExportTimestamp(ev.ts || ""));
     const parsedUrl = parseExportUrl(ev.url || "");
@@ -1537,8 +2240,14 @@ function buildExportHtml(report, options = {}) {
       ? `<a class="meta-chip meta-url" href="${metaUrlHref}" target="_blank" rel="noopener noreferrer" title="${metaUrlTitle}">${metaUrlLabel}</a>`
       : `<span class="meta-chip meta-url" title="${metaUrlTitle}">${metaUrlLabel}</span>`;
     const meta = `<div class="step-meta"><span class="meta-chip meta-time">${metaTs || "Time n/a"}</span>${urlChip}</div>`;
-    return `<div id="step-${i + 1}" class="step"><div class="step-title">${i + 1}. ${stepTitle}</div>${meta}${wrap}</div>`;
-  }).join("\n");
+    rowParts.push(`<div id="${stepId}" class="step"><div class="step-title">${i + 1}. ${stepTitle}</div>${meta}${wrap}</div>`);
+
+    const insertions = burstInsertionMap.get(stepId) || [];
+    insertions.forEach(({ burstIndex }) => {
+      rowParts.push(`<div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div>`);
+    });
+  });
+  const rows = rowParts.join("\n");
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${title}</title>
@@ -1725,9 +2434,75 @@ body{
   background:linear-gradient(180deg,var(--paper),var(--panel));
   font-size:10.5px;
 }
+.burst-condensed-note{
+  margin-top:6px;
+  padding:6px 8px;
+  border:1px dashed var(--edge);
+  border-left:3px solid var(--accent);
+  border-radius:10px;
+  font-size:10px;
+  color:var(--muted);
+  background:linear-gradient(180deg,var(--paper),var(--panel));
+}
+.burst-source-shot{
+  display:none !important;
+}
 .shot-wrap{position:relative;display:inline-block}
 .shot img{max-width:100%;border:1px solid var(--edge);border-radius:10px}
 .annot{position:absolute;left:0;top:0;width:100%;height:100%}
+.click-burst-export-slot{margin:8px 0}
+.click-burst-export-card{
+  border:1px solid var(--edge);
+  border-left:4px solid var(--accent);
+  border-radius:10px;
+  padding:8px;
+  background:linear-gradient(180deg,var(--panel),var(--paper));
+}
+.click-burst-export-title{font-size:12px;font-weight:700;margin-bottom:2px}
+.click-burst-export-meta{font-size:10px;color:var(--muted);margin-bottom:6px}
+.click-burst-export-canvas{
+  width:100%;
+  border:1px solid var(--edge);
+  border-radius:8px;
+  background:#000;
+}
+.click-burst-export-controls{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  margin-top:6px;
+  flex-wrap:wrap;
+}
+.click-burst-export-controls button{
+  appearance:none;
+  border:1px solid var(--edge);
+  background:var(--paper);
+  color:var(--ink);
+  border-radius:999px;
+  font-size:10px;
+  padding:2px 8px;
+  cursor:pointer;
+}
+.click-burst-export-progress{
+  margin-left:auto;
+  color:var(--muted);
+  font-size:10px;
+}
+.click-burst-export-speed{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  font-size:10px;
+  color:var(--muted);
+}
+.click-burst-export-speed input[type="range"]{
+  width:90px;
+}
+.click-burst-export-speed-value{
+  min-width:34px;
+  text-align:right;
+  color:var(--ink);
+}
 @media print {
   body{margin:0.45in;background:#fff}
   .toc{page-break-inside:avoid}
@@ -1744,6 +2519,195 @@ ${quickPreviewNotice}
   <ol>${tocRows || "<li>No steps captured.</li>"}</ol>
 </section>
 ${rows}
+<script>
+(function () {
+  var payload = ${burstDataJson};
+  var slots = Array.prototype.slice.call(document.querySelectorAll(".click-burst-export-slot[data-burst-index]"));
+  if (!slots.length) return;
+  var bursts = Array.isArray(payload && payload.bursts) ? payload.bursts : [];
+  var markerColor = (payload && payload.markerColor) || "#2563eb";
+  var autoPlay = !!(payload && payload.autoPlay);
+  var fpsRaw = Number(payload && payload.fps);
+  var fps = Number.isFinite(fpsRaw) ? Math.max(1, Math.min(60, Math.round(fpsRaw))) : ${CLICK_BURST_DEFAULTS.clickBurstPlaybackFps};
+  var markerCap = ${CLICK_BURST_RENDER_MARKER_CAP};
+  var baseFrameDurationMs = Math.max(16, Math.round(1000 / fps));
+
+  function drawMarker(ctx, x, y, n) {
+    var radius = 12;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(37, 99, 235, 0.18)";
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = markerColor;
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 12px Trebuchet MS, Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(n), x, y);
+  }
+
+  slots.forEach(function (slot) {
+    var burstIndex = Number(slot.getAttribute("data-burst-index"));
+    var burst = Number.isFinite(burstIndex) ? bursts[burstIndex] : null;
+    if (!burst) {
+      slot.remove();
+      return;
+    }
+    var frames = Array.isArray(burst && burst.frames) ? burst.frames : [];
+    if (frames.length < 2) {
+      slot.remove();
+      return;
+    }
+    var card = document.createElement("article");
+    card.className = "click-burst-export-card";
+    var title = document.createElement("div");
+    title.className = "click-burst-export-title";
+    title.textContent = burst && burst.title ? burst.title : ("Burst replay " + (burstIndex + 1));
+    card.appendChild(title);
+    var meta = document.createElement("div");
+    meta.className = "click-burst-export-meta";
+    meta.textContent = burst && burst.meta ? burst.meta : "";
+    card.appendChild(meta);
+
+    var canvas = document.createElement("canvas");
+    canvas.className = "click-burst-export-canvas";
+    canvas.width = 640;
+    canvas.height = 360;
+    card.appendChild(canvas);
+    var ctx = canvas.getContext("2d");
+    if (!ctx) {
+      slot.appendChild(card);
+      return;
+    }
+
+    var controls = document.createElement("div");
+    controls.className = "click-burst-export-controls";
+    var toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = autoPlay ? "Pause" : "Play";
+    controls.appendChild(toggle);
+    var speedWrap = document.createElement("label");
+    speedWrap.className = "click-burst-export-speed";
+    var speedLabel = document.createElement("span");
+    speedLabel.textContent = "Speed";
+    speedWrap.appendChild(speedLabel);
+    var speed = document.createElement("input");
+    speed.type = "range";
+    speed.min = "0.25";
+    speed.max = "3";
+    speed.step = "0.05";
+    speed.value = "1";
+    speedWrap.appendChild(speed);
+    var speedValue = document.createElement("span");
+    speedValue.className = "click-burst-export-speed-value";
+    speedValue.textContent = "1.00x";
+    speedWrap.appendChild(speedValue);
+    controls.appendChild(speedWrap);
+    var progress = document.createElement("span");
+    progress.className = "click-burst-export-progress";
+    progress.textContent = "Frame 0/0";
+    controls.appendChild(progress);
+    card.appendChild(controls);
+
+    var loaded = [];
+    var loading = frames.map(function (frame) {
+      return new Promise(function (resolve) {
+        var src = frame && typeof frame.screenshot === "string" ? frame.screenshot : "";
+        if (!src) {
+          var stepId = frame && frame.stepId ? frame.stepId : "";
+          var source = stepId ? document.getElementById("step-shot-" + stepId.replace("step-", "")) : null;
+          src = source && source.src ? source.src : "";
+        }
+        if (!src) {
+          resolve(null);
+          return;
+        }
+        var img = new Image();
+        img.onload = function () {
+          resolve({ img: img, marker: frame && frame.marker ? frame.marker : null });
+        };
+        img.onerror = function () { resolve(null); };
+        img.src = src;
+      });
+    });
+
+    Promise.all(loading).then(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry && entry.img) loaded.push(entry);
+      });
+      if (loaded.length < 2) {
+        progress.textContent = "Not enough valid frames";
+        toggle.disabled = true;
+        return;
+      }
+      var frameIndex = 0;
+      var isPlaying = autoPlay;
+      var timer = null;
+      var speedMultiplier = 1;
+
+      function drawFrame(i) {
+        var frame = loaded[i];
+        if (!frame) return;
+        if (canvas.width !== frame.img.width || canvas.height !== frame.img.height) {
+          canvas.width = frame.img.width;
+          canvas.height = frame.img.height;
+        }
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(frame.img, 0, 0, canvas.width, canvas.height);
+        var limit = Math.min(markerCap, i + 1);
+        for (var m = 0; m < limit; m++) {
+          var point = loaded[m] && loaded[m].marker ? loaded[m].marker : null;
+          if (!point) continue;
+          drawMarker(ctx, Math.round(point.x * canvas.width), Math.round(point.y * canvas.height), m + 1);
+        }
+        progress.textContent = "Frame " + (i + 1) + "/" + loaded.length;
+      }
+
+      function stopLoop() {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+      }
+
+      function startLoop() {
+        stopLoop();
+        if (!isPlaying || loaded.length < 2) return;
+        var frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / Math.max(0.25, Math.min(3, speedMultiplier))));
+        timer = setInterval(function () {
+          frameIndex += 1;
+          if (frameIndex >= loaded.length) {
+            frameIndex = 0;
+          }
+          drawFrame(frameIndex);
+        }, frameDurationMs);
+      }
+
+      function setPlaying(next) {
+        isPlaying = !!next;
+        toggle.textContent = isPlaying ? "Pause" : "Play";
+        startLoop();
+      }
+
+      toggle.addEventListener("click", function () {
+        setPlaying(!isPlaying);
+      });
+      speed.addEventListener("input", function () {
+        var next = Number(speed.value);
+        speedMultiplier = Number.isFinite(next) ? Math.max(0.25, Math.min(3, next)) : 1;
+        speedValue.textContent = speedMultiplier.toFixed(2) + "x";
+        if (isPlaying) startLoop();
+      });
+
+      drawFrame(frameIndex);
+      setPlaying(autoPlay);
+    });
+    slot.appendChild(card);
+  });
+})();
+</script>
 </body></html>`;
 }
 
@@ -1861,7 +2825,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   const DENSE_LAYOUT_THRESHOLD = 100;
   const ANNOTATION_SESSION_IDLE_MS = 15_000;
   let activeAnnotationTeardown = null;
+  let activeBurstPlayers = [];
   let previewRefreshTimer = null;
+
+  function destroyBurstPlayers() {
+    if (!Array.isArray(activeBurstPlayers) || !activeBurstPlayers.length) {
+      activeBurstPlayers = [];
+      return;
+    }
+    activeBurstPlayers.forEach((player) => {
+      if (!player || typeof player.destroy !== "function") return;
+      try { player.destroy(); } catch (_) {}
+    });
+    activeBurstPlayers = [];
+  }
 
   function normalizeTheme(theme) {
     return String(theme || "").toLowerCase() === "dark" ? "dark" : "light";
@@ -2009,8 +2986,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (trigger) trigger.click();
   }
 
-  function updatePanelMeta(eventsOverride) {
+  function collectClickBursts(visibleEvents, precomputedBursts) {
+    const burstSettings = normalizeClickBurstSettings(report && report.settings);
+    const bursts = Array.isArray(precomputedBursts)
+      ? precomputedBursts
+      : deriveClickBursts(visibleEvents, burstSettings);
+    return bursts;
+  }
+
+  function updatePanelMeta(eventsOverride, burstsOverride) {
     const visibleEvents = Array.isArray(eventsOverride) ? eventsOverride : getVisibleEvents();
+    const visibleBursts = Array.isArray(burstsOverride) ? burstsOverride : [];
     const stepCount = visibleEvents.length;
     const totalSteps = hasReport && Array.isArray(report.events) ? report.events.length : 0;
     const dense = stepCount >= DENSE_LAYOUT_THRESHOLD || totalSteps >= DENSE_LAYOUT_THRESHOLD;
@@ -2077,6 +3063,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (!hasReport) {
     document.body.classList.remove("report-dense");
+    destroyBurstPlayers();
     root.appendChild(el("p", null, "No saved reports yet. Record a workflow and press Stop to save it, or import a raw ZIP bundle."));
     if (toc) {
       toc.innerHTML = "";
@@ -2215,11 +3202,30 @@ document.addEventListener("DOMContentLoaded", async () => {
     );
   }
 
+  function buildVisibleViewModel(sourceEvents, precomputedBursts) {
+    const burstSettings = normalizeClickBurstSettings(report && report.settings);
+    const source = Array.isArray(sourceEvents) ? sourceEvents : [];
+    assignStepIds(source);
+    const bursts = Array.isArray(precomputedBursts)
+      ? precomputedBursts
+      : deriveClickBursts(source, burstSettings);
+    const burstFrameMap = buildBurstFrameMap(bursts);
+    const displayEvents = source.filter((ev) => !isImpliedBurstStep(ev, burstFrameMap, burstSettings));
+    return {
+      sourceEvents: source,
+      displayEvents,
+      bursts,
+      burstFrameMap,
+      burstSettings
+    };
+  }
+
   function buildQuickPreviewReport() {
     if (!hasReport || !Array.isArray(report.events) || !report.events.length) return null;
-    const visibleEvents = getVisibleEvents();
-    const sourceEvents = visibleEvents.length ? visibleEvents : report.events;
-    const firstEvent = sourceEvents[0];
+    const filteredEvents = getVisibleEvents();
+    const sourceEvents = filteredEvents.length ? filteredEvents : report.events;
+    const view = buildVisibleViewModel(sourceEvents);
+    const firstEvent = view.displayEvents[0] || sourceEvents[0];
     if (!firstEvent) return null;
 
     const previewReport = cloneJson(report);
@@ -2235,7 +3241,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     return {
       report: previewReport,
-      sourceStepCount: sourceEvents.length
+      sourceStepCount: view.displayEvents.length || sourceEvents.length
     };
   }
 
@@ -2284,10 +3290,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     }, 140);
   }
 
-  function updateAux(eventsOverride) {
-    const visibleEvents = Array.isArray(eventsOverride) ? eventsOverride : getVisibleEvents();
-    assignStepIds(visibleEvents);
-    updatePanelMeta(visibleEvents);
+  function updateAux(eventsOverride, burstsOverride, sourceEventsOverride) {
+    const sourceInput = Array.isArray(sourceEventsOverride)
+      ? sourceEventsOverride
+      : Array.isArray(eventsOverride)
+        ? eventsOverride
+        : getVisibleEvents();
+    const view = buildVisibleViewModel(sourceInput, burstsOverride);
+    const visibleEvents = Array.isArray(eventsOverride) ? eventsOverride : view.displayEvents;
+    const clickBursts = collectClickBursts(view.sourceEvents, view.bursts);
+    updatePanelMeta(visibleEvents, clickBursts);
     renderHints(hints, visibleEvents, {
       currentTypeFilter: typeFilter ? typeFilter.value : "all",
       currentUrlFilter: urlFilter ? urlFilter.value : "",
@@ -2334,17 +3346,22 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function render() {
     if (!hasReport) return;
+    destroyBurstPlayers();
     if (activeAnnotationTeardown) {
       try { activeAnnotationTeardown("render-refresh"); } catch (_) {}
       activeAnnotationTeardown = null;
     }
     root.innerHTML = "";
     clearStepIds(report.events);
-    const events = getVisibleEvents();
-    assignStepIds(events);
-    updateAux(events);
+    const view = buildVisibleViewModel(getVisibleEvents());
+    const events = view.displayEvents;
+    const burstFrameMap = view.burstFrameMap;
+    const burstInsertionMap = buildBurstInsertionMap(view.bursts);
+    const burstSettings = view.burstSettings;
+    updateAux(events, view.bursts, view.sourceEvents);
 
     events.forEach((ev, index) => {
+      const burstFrame = burstFrameMap.get(ev.stepId);
       const wrap = el("div", "step");
       wrap.id = ev.stepId;
       const title = el("div", "step-title");
@@ -2363,6 +3380,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       if (ev.prunedCount) {
         title.appendChild(el("span", "badge", `condensed x${ev.prunedCount}`));
+      }
+      if (burstFrame) {
+        title.appendChild(el("span", "badge", `burst ${burstFrame.frameIndex + 1}/${burstFrame.totalFrames}`));
       }
       wrap.appendChild(title);
 
@@ -2670,6 +3690,37 @@ document.addEventListener("DOMContentLoaded", async () => {
         wrap.appendChild(el("div", "step-note", `Screenshot skipped (${ev.screenshotSkipReason || "n/a"}).`));
       }
       root.appendChild(wrap);
+
+      const inlineBursts = burstInsertionMap.get(ev.stepId) || [];
+      if (inlineBursts.length) {
+        const burstHost = document.createElement("div");
+        const players = renderClickBursts(
+          burstHost,
+          inlineBursts.map((entry) => entry.burst),
+          {
+            markerColor: burstSettings.clickBurstMarkerColor,
+            autoPlay: burstSettings.clickBurstAutoPlay,
+            fps: burstSettings.clickBurstPlaybackFps,
+            playbackMode: burstSettings.clickBurstPlaybackMode,
+            onJump: (stepId) => {
+              if (!stepId) return;
+              if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
+              const node = document.getElementById(stepId);
+              if (!node) return;
+              node.scrollIntoView({ behavior: "smooth", block: "center" });
+              node.classList.add("step-flash");
+              setTimeout(() => node.classList.remove("step-flash"), 1200);
+            }
+          }
+        );
+        if (Array.isArray(players) && players.length) {
+          activeBurstPlayers.push(...players);
+        }
+        Array.from(burstHost.children).forEach((child) => {
+          child.classList.add("inline-burst-card");
+          root.appendChild(child);
+        });
+      }
     });
   }
 
@@ -2854,6 +3905,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  if (stepsPanel) {
+    stepsPanel.addEventListener("toggle", () => {
+      if (!stepsPanel.open) {
+        destroyBurstPlayers();
+        return;
+      }
+      render();
+    });
+  }
+
   if (rawBundleBtn) {
     rawBundleBtn.addEventListener("click", async () => {
       if (!hasReport) {
@@ -2915,4 +3976,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     collapsiblePanels.forEach((panel) => { panel.open = true; });
     setTimeout(() => window.print(), 450);
   }
+
+  window.addEventListener("beforeunload", () => {
+    destroyBurstPlayers();
+    if (activeAnnotationTeardown) {
+      try { activeAnnotationTeardown("beforeunload"); } catch (_) {}
+      activeAnnotationTeardown = null;
+    }
+  });
 });

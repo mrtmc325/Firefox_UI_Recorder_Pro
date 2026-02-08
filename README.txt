@@ -1,4 +1,4 @@
-UI Workflow Recorder Pro (Firefox) - v1.9.0
+UI Workflow Recorder Pro (Firefox) - v1.11.0
 
 This file is kept for legacy packaging. Please see README.md for the full documentation.
-Summary: release v1.9.0 adds manifest-synced report builder identity, a compact add-ons-sized icon/version badge, expanded export theming options, and improved quick preview/report selection flow.
+Summary: release v1.11.0 adds inline time-ordered burst replay placement in builder/export, restart reliability hardening, lifecycle start/stop screenshot attempts, and a collapsible advanced-settings popup layout.

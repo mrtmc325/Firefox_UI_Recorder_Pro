@@ -14,7 +14,7 @@
         <div class="subtitle">UI workflow capture</div>
       </div>
     </div>
-    <div class="version">v1.9.0</div>
+    <div class="version">v1.11.0</div>
   </header>
 
   <section class="card actions">
@@ -30,62 +30,167 @@
     </div>
   </section>
 
-  <section class="card">
-    <div class="card-title">Capture Settings</div>
-    <label class="row">
-      Debounce (ms)
-      <input id="debounce" type="number" min="0" step="100" />
-    </label>
-    <label class="row">
-      Capture mode
-      <select id="capture-mode">
-        <option value="all">All events</option>
-        <option value="clicks">Clicks + submit + nav only</option>
-      </select>
-    </label>
-    <label class="row">
-      Follow active tab only (strict)
-      <input id="active-tab-only" type="checkbox" />
-    </label>
-    <label class="row">
-      Diff-based screenshots
-      <input id="diff" type="checkbox" />
-    </label>
-    <label class="row">
-      Redact sensitive text in report
-      <input id="redact" type="checkbox" />
-    </label>
-    <label class="row">
-      Redact usernames on login pages
-      <input id="redact-user" type="checkbox" />
-    </label>
-    <label class="row">
-      Auto-pause on idle
-      <input id="auto-idle" type="checkbox" />
-    </label>
-    <label class="row">
-      Idle threshold (sec)
-      <input id="idle-sec" type="number" min="15" step="15" />
-    </label>
-    <label class="row">
-      Auto-resume on tab focus
-      <input id="resume-focus" type="checkbox" />
-    </label>
-    <label class="row">
-      Prune noisy input steps
-      <input id="prune-inputs" type="checkbox" />
-    </label>
-    <label class="row">
-      Page watch (dynamic UI)
-      <input id="page-watch" type="checkbox" />
-    </label>
-    <label class="row">
-      Page watch interval (ms)
-      <input id="page-watch-ms" type="number" min="200" step="100" />
-    </label>
-    <div class="hint">
-      Screenshots are unmodified. Only report text is redacted. Hotkey: Ctrl+Shift+Y.
-    </div>
+  <section class="card settings-card">
+    <div class="card-title">Settings</div>
+
+    <details class="settings-group" open>
+      <summary class="settings-summary">
+        <span class="settings-summary-title">Capture</span>
+        <span class="settings-summary-meta">Core</span>
+      </summary>
+      <div class="settings-group-body">
+        <label class="row">
+          Debounce (ms)
+          <input id="debounce" type="number" min="0" step="100" />
+        </label>
+        <label class="row">
+          Capture mode
+          <select id="capture-mode">
+            <option value="all">All events</option>
+            <option value="clicks">Clicks + submit + nav only</option>
+          </select>
+        </label>
+        <label class="row">
+          Follow active tab only (strict)
+          <input id="active-tab-only" type="checkbox" />
+        </label>
+        <label class="row">
+          Diff-based screenshots
+          <input id="diff" type="checkbox" />
+        </label>
+        <label class="row">
+          Page watch (dynamic UI)
+          <input id="page-watch" type="checkbox" />
+        </label>
+        <label class="row">
+          Page watch interval (ms)
+          <input id="page-watch-ms" type="number" min="200" step="100" />
+        </label>
+      </div>
+    </details>
+
+    <details class="settings-group">
+      <summary class="settings-summary">
+        <span class="settings-summary-title">Privacy & Stability</span>
+        <span class="settings-summary-meta">Safe Defaults</span>
+      </summary>
+      <div class="settings-group-body">
+        <label class="row">
+          Redact sensitive text in report
+          <input id="redact" type="checkbox" />
+        </label>
+        <label class="row">
+          Redact usernames on login pages
+          <input id="redact-user" type="checkbox" />
+        </label>
+        <label class="row">
+          Auto-pause on idle
+          <input id="auto-idle" type="checkbox" />
+        </label>
+        <label class="row">
+          Idle threshold (sec)
+          <input id="idle-sec" type="number" min="15" step="15" />
+        </label>
+        <label class="row">
+          Auto-resume on tab focus
+          <input id="resume-focus" type="checkbox" />
+        </label>
+        <label class="row">
+          Prune noisy input steps
+          <input id="prune-inputs" type="checkbox" />
+        </label>
+      </div>
+    </details>
+
+    <details class="settings-group" open>
+      <summary class="settings-summary">
+        <span class="settings-summary-title">GIF Burst</span>
+        <span class="settings-summary-meta">Runtime</span>
+      </summary>
+      <div class="settings-group-body">
+        <div class="row burst-mode-state">
+          GIF Burst Mode
+          <span id="burst-mode-chip" class="burst-mode-chip">GIF Burst: OFF</span>
+        </div>
+        <label class="row">
+          Include click events
+          <input id="click-burst-include-clicks" type="checkbox" />
+        </label>
+        <label class="row">
+          Include typing events
+          <input id="click-burst-include-typing" type="checkbox" />
+        </label>
+        <label class="row">
+          Time-based burst grouping (all screenshot events)
+          <input id="click-burst-time-any-event" type="checkbox" />
+        </label>
+        <label class="row">
+          Auto-condense still frames into burst replay
+          <input id="click-burst-condense-steps" type="checkbox" />
+        </label>
+        <label class="row">
+          Autoplay burst loops
+          <input id="click-burst-autoplay" type="checkbox" />
+        </label>
+      </div>
+    </details>
+
+    <details class="settings-group settings-group-advanced">
+      <summary class="settings-summary">
+        <span class="settings-summary-title">Advanced Burst Tuning</span>
+        <span class="settings-summary-meta">Collapsed by default</span>
+      </summary>
+      <div class="settings-group-body">
+        <label class="row">
+          Burst trigger (ms)
+          <input id="click-burst-trigger-ms" type="number" min="500" step="100" />
+        </label>
+        <label class="row">
+          Burst window (ms)
+          <input id="click-burst-window-ms" type="number" min="1000" step="100" />
+        </label>
+        <label class="row">
+          Max clicks per burst
+          <input id="click-burst-max-clicks" type="number" min="2" step="1" />
+        </label>
+        <label class="row">
+          Burst flush inactivity (ms)
+          <input id="click-burst-flush-ms" type="number" min="250" step="0.001" />
+        </label>
+        <label class="row">
+          Click UI probe (ms)
+          <input id="click-burst-ui-probe-ms" type="number" min="50" step="10" />
+        </label>
+        <label class="row">
+          Typing min chars
+          <input id="click-burst-typing-min-chars" type="number" min="1" step="1" />
+        </label>
+        <label class="row">
+          Typing window (ms)
+          <input id="click-burst-typing-window-ms" type="number" min="100" step="50" />
+        </label>
+        <label class="row">
+          Replay FPS
+          <input id="click-burst-fps" type="number" min="1" step="1" />
+        </label>
+        <label class="row">
+          Marker color
+          <input id="click-burst-marker-color" type="color" />
+        </label>
+      </div>
+    </details>
+
+    <details class="settings-group settings-group-help">
+      <summary class="settings-summary">
+        <span class="settings-summary-title">Help</span>
+        <span class="settings-summary-meta">Hotkeys</span>
+      </summary>
+      <div class="settings-group-body">
+        <div class="hint">
+          Screenshots are unmodified. Only report text is redacted. Hotkeys: Ctrl+Shift+Y (record), Cmd+Opt+G/Ctrl+Alt+G (unconditional GIF burst at 5 FPS while recording). While hotkey burst mode is ON, burst trigger/window/max/flush split controls are ignored until mode is toggled OFF.
+        </div>
+      </div>
+    </details>
   </section>
 
   <footer class="statusbar">

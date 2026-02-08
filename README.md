@@ -1,13 +1,28 @@
-# UI Workflow Recorder Pro (Firefox) v1.9.0
+# UI Workflow Recorder Pro (Firefox) v1.11.0
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.9.0`
+- Version: `1.11.0`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
 - Strict active-tab-only capture mode (follows active tab in focused window).
+- Fast-click burst replay capture:
+  - Detects rapid same-page click bursts and renders looped replay cards inline in workflow order.
+  - Blue numbered click markers (ordered progression) with play/pause.
+  - Per-burst speed slider in editor and exported HTML replay cards.
+  - 5 FPS replay in editor and exported HTML.
+  - Keyboard-controlled during recording: `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default).
+  - While burst mode is on, page-watch is temporarily disabled; turning burst mode off restores tuned page-watch behavior.
+  - Hotkey burst mode is unconditional for workflow-driving events and uses a dedicated 5 FPS capture lane (target cadence).
+  - Hotkey burst mode bypasses click UI probe delays, diff dedupe, and normal screenshot debounce/min-interval gates.
+  - Hotkey burst mode ignores burst max/window/flush split limits and keeps one continuous burst until mode is toggled OFF or tab/page context changes.
+  - Popup now shows burst mode status (ON/OFF) instead of a burst enable toggle.
+  - Burst-mode memory safety cap keeps replay fidelity while preventing runaway screenshot growth.
+- Automatic lifecycle screenshots:
+  - Recorder attempts a screenshot-backed step when recording starts.
+  - Recorder attempts a screenshot-backed step when recording stops.
 - Canonical submit capture with dedupe (click + Enter + native submit).
 - Dynamic UI watch with memory-safe observer lifecycle.
 - Dynamic UI screenshot forcing interval:
@@ -77,6 +92,7 @@ Use when UI changes often without navigation.
 
 Expected behavior:
 - `ui-change` steps with controlled screenshot forcing based on the dynamic interval formula.
+- If you toggle burst mode ON with `Cmd+Opt+G`/`Ctrl+Alt+G`, page-watch is temporarily suspended until burst mode is toggled OFF.
 
 ### 2) Login / Sensitive Change Procedure
 Use for auth or security workflows.
@@ -133,8 +149,13 @@ Expected behavior:
 - No external API/network service calls are required.
 - Redaction applies to report text fields; screenshots are not masked automatically.
 
-## Keyboard Shortcut
-- `Ctrl+Shift+Y` toggles start/stop recording.
+## Keyboard Shortcuts
+- `Ctrl+Shift+Y`: start/stop recording.
+- `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default): toggle high-speed GIF burst mode while recording.
+- While ON, GIF burst mode attempts unconditional screenshot capture at a 5 FPS target cadence until toggled OFF.
+- While ON, burst trigger/window/max/flush settings do not split bursts; split occurs only on toggle OFF or tab/page context change.
+- Actual FPS can be lower on slower systems due to browser capture throughput limits.
+- If this shortcut conflicts with Firefox/browser defaults, rebind this command in Firefox extension shortcuts.
 
 ## Files
 - `content.js` capture + page watch + event shaping

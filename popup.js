@@ -7,6 +7,16 @@ function popupLog(message, data) {
   else console.log(prefix, message, data);
 }
 
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return Number(fallback);
+  return Math.max(min, Math.min(max, num));
+}
+
+function clampInteger(value, min, max, fallback) {
+  return Math.round(clampNumber(value, min, max, fallback));
+}
+
 async function writeControlSignal() {
   const now = Date.now();
   const payload = { __uiRecorderStopRequestTs: now, __uiRecorderStopSource: "popup" };
@@ -40,11 +50,20 @@ async function refresh() {
   try { st = await getState(); } catch (_) {}
   if (!st || typeof st !== "object" || !st.settings) {
     popupLog("refresh:fallback-state");
-    st = { isRecording: false, isPaused: false, count: 0, settings: {} };
+    st = { isRecording: false, isPaused: false, count: 0, settings: {}, burstHotkeyModeActive: false };
   }
   popupLog("refresh:state", { isRecording: !!st.isRecording, isPaused: !!st.isPaused, count: st.count || 0 });
-  document.getElementById("status").textContent = st.isRecording ? (st.isPaused ? "Paused" : "Recording...") : "Idle";
+  const burstMode = !!st.burstHotkeyModeActive;
+  const statusText = st.isRecording
+    ? (st.isPaused ? "Paused" : (burstMode ? "Recording... (GIF Burst 5 FPS)" : "Recording..."))
+    : "Idle";
+  document.getElementById("status").textContent = statusText;
   document.getElementById("count").textContent = `Steps captured: ${st.count || 0}`;
+  const burstChip = document.getElementById("burst-mode-chip");
+  if (burstChip) {
+    burstChip.textContent = burstMode ? "GIF Burst: ON (Unconditional 5 FPS)" : "GIF Burst: OFF";
+    burstChip.classList.toggle("active", burstMode);
+  }
 
   document.getElementById("debounce").value = st.settings?.screenshotDebounceMs ?? 900;
   document.getElementById("capture-mode").value = st.settings?.captureMode ?? "all";
@@ -58,6 +77,20 @@ async function refresh() {
   document.getElementById("prune-inputs").checked = !!st.settings?.pruneInputs;
   document.getElementById("page-watch").checked = !!st.settings?.pageWatchEnabled;
   document.getElementById("page-watch-ms").value = st.settings?.pageWatchMs ?? 500;
+  document.getElementById("click-burst-include-clicks").checked = st.settings?.clickBurstIncludeClicks !== false;
+  document.getElementById("click-burst-include-typing").checked = st.settings?.clickBurstIncludeTyping !== false;
+  document.getElementById("click-burst-time-any-event").checked = st.settings?.clickBurstTimeBasedAnyEvent !== false;
+  document.getElementById("click-burst-condense-steps").checked = st.settings?.clickBurstCondenseStepScreenshots !== false;
+  document.getElementById("click-burst-trigger-ms").value = st.settings?.clickBurstTriggerMs ?? 3000;
+  document.getElementById("click-burst-window-ms").value = st.settings?.clickBurstWindowMs ?? 7000;
+  document.getElementById("click-burst-max-clicks").value = st.settings?.clickBurstMaxClicks ?? 10;
+  document.getElementById("click-burst-flush-ms").value = st.settings?.clickBurstFlushMs ?? 2456.783;
+  document.getElementById("click-burst-ui-probe-ms").value = st.settings?.clickBurstUiProbeMs ?? 450;
+  document.getElementById("click-burst-typing-min-chars").value = st.settings?.clickBurstTypingMinChars ?? 3;
+  document.getElementById("click-burst-typing-window-ms").value = st.settings?.clickBurstTypingWindowMs ?? 500;
+  document.getElementById("click-burst-fps").value = st.settings?.clickBurstPlaybackFps ?? 5;
+  document.getElementById("click-burst-marker-color").value = st.settings?.clickBurstMarkerColor ?? "#2563eb";
+  document.getElementById("click-burst-autoplay").checked = st.settings?.clickBurstAutoPlay !== false;
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -133,6 +166,63 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("page-watch-ms").addEventListener("change", async (e) => {
     await updateSettings({ pageWatchMs: Math.max(200, Number(e.target.value || 500)) });
+    await refresh();
+  });
+  document.getElementById("click-burst-include-clicks").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstIncludeClicks: !!e.target.checked });
+    await refresh();
+  });
+  document.getElementById("click-burst-include-typing").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstIncludeTyping: !!e.target.checked });
+    await refresh();
+  });
+  document.getElementById("click-burst-time-any-event").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstTimeBasedAnyEvent: !!e.target.checked });
+    await refresh();
+  });
+  document.getElementById("click-burst-condense-steps").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstCondenseStepScreenshots: !!e.target.checked });
+    await refresh();
+  });
+  document.getElementById("click-burst-trigger-ms").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstTriggerMs: clampNumber(e.target.value, 500, 10000, 3000) });
+    await refresh();
+  });
+  document.getElementById("click-burst-window-ms").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstWindowMs: clampNumber(e.target.value, 1000, 30000, 7000) });
+    await refresh();
+  });
+  document.getElementById("click-burst-max-clicks").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstMaxClicks: clampInteger(e.target.value, 2, 50, 10) });
+    await refresh();
+  });
+  document.getElementById("click-burst-flush-ms").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstFlushMs: clampNumber(e.target.value, 250, 10000, 2456.783) });
+    await refresh();
+  });
+  document.getElementById("click-burst-ui-probe-ms").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstUiProbeMs: clampNumber(e.target.value, 50, 3000, 450) });
+    await refresh();
+  });
+  document.getElementById("click-burst-typing-min-chars").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstTypingMinChars: clampInteger(e.target.value, 1, 32, 3) });
+    await refresh();
+  });
+  document.getElementById("click-burst-typing-window-ms").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstTypingWindowMs: clampNumber(e.target.value, 100, 5000, 500) });
+    await refresh();
+  });
+  document.getElementById("click-burst-fps").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstPlaybackFps: clampInteger(e.target.value, 1, 60, 5) });
+    await refresh();
+  });
+  document.getElementById("click-burst-marker-color").addEventListener("change", async (e) => {
+    const color = String(e.target.value || "").trim();
+    await updateSettings({ clickBurstMarkerColor: /^#[0-9a-fA-F]{6}$/.test(color) ? color.toLowerCase() : "#2563eb" });
+    await refresh();
+  });
+  document.getElementById("click-burst-autoplay").addEventListener("change", async (e) => {
+    await updateSettings({ clickBurstAutoPlay: !!e.target.checked });
     await refresh();
   });
   await refresh();

@@ -84,6 +84,95 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
   margin-bottom: 8px;
 }
 
+body.popup .settings-card .card-title {
+  margin-bottom: 10px;
+}
+
+body.popup .settings-group {
+  margin: 0 0 8px;
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fafc, #f1f5f9);
+  overflow: hidden;
+}
+
+body.popup .settings-group:last-of-type {
+  margin-bottom: 0;
+}
+
+body.popup .settings-group > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+body.popup .settings-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+body.popup .settings-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid transparent;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+body.popup .settings-group[open] > .settings-summary {
+  border-bottom-color: var(--edge);
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+}
+
+body.popup .settings-summary::before {
+  content: "▸";
+  color: #0f766e;
+  font-size: 11px;
+  margin-right: 4px;
+  transform: translateY(-0.5px);
+  transition: transform 140ms ease;
+}
+
+body.popup .settings-group[open] > .settings-summary::before {
+  transform: rotate(90deg);
+}
+
+body.popup .settings-summary-title {
+  flex: 1 1 auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+body.popup .settings-summary-meta {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #0c4a6e;
+  background: rgba(14, 165, 233, 0.12);
+  border: 1px solid rgba(14, 165, 233, 0.25);
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+body.popup .settings-group-body {
+  padding: 8px 10px 10px;
+}
+
+body.popup .settings-group-advanced .settings-summary-meta {
+  color: #365314;
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.24);
+}
+
+body.popup .settings-group-help .settings-summary-meta {
+  color: #6b21a8;
+  background: rgba(168, 85, 247, 0.12);
+  border-color: rgba(168, 85, 247, 0.24);
+}
+
 .actions .action-row {
   display: flex;
   gap: 8px;
@@ -301,6 +390,30 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
   font-size: 13px;
 }
 
+.burst-mode-state {
+  font-weight: 600;
+}
+
+.burst-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 92px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--edge);
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.burst-mode-chip.active {
+  border-color: #0284c7;
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.14), rgba(34, 197, 94, 0.16));
+  color: #0b1220;
+}
+
 .row input[type="number"] {
   width: 110px;
   padding: 6px 8px;
@@ -325,11 +438,29 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
   background: #f8fafc;
 }
 
+.row input[type="color"] {
+  width: 110px;
+  height: 32px;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--edge);
+  background: #f8fafc;
+}
+
 .hint {
   font-size: 12px;
   color: var(--muted);
   margin-top: 6px;
   line-height: 1.35;
+}
+
+.burst-condensed-hint {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--edge);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(241, 245, 249, 0.9));
 }
 
 .statusbar {
@@ -1039,6 +1170,19 @@ body.report.report-dense .timeline-mini-btn {
   font-size: 10px;
 }
 
+body.report.report-dense .click-burst-card {
+  padding: 8px;
+}
+
+body.report.report-dense .click-burst-title {
+  font-size: 12px;
+}
+
+body.report.report-dense .click-burst-meta,
+body.report.report-dense .click-burst-progress {
+  font-size: 10px;
+}
+
 body.report.report-dense .step {
   padding: 10px;
   margin: 8px 0;
@@ -1178,6 +1322,88 @@ body.report.report-dense .annot-tools {
   padding: 3px 7px;
   font-size: 11px;
   line-height: 1.2;
+}
+
+.click-bursts {
+  display: grid;
+  gap: 10px;
+}
+
+.click-burst-card {
+  border: 1px solid var(--edge);
+  border-left: 4px solid var(--accent-2);
+  border-radius: 12px;
+  padding: 10px;
+  background: linear-gradient(180deg, var(--panel), var(--paper));
+  box-shadow: var(--shadow);
+}
+
+.inline-burst-card {
+  margin: 10px 0;
+}
+
+.click-burst-head {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 8px;
+}
+
+.click-burst-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.click-burst-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.click-burst-media {
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: #0b1220;
+  overflow: hidden;
+}
+
+.click-burst-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.click-burst-controls {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.click-burst-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.click-burst-speed-slider {
+  width: 110px;
+}
+
+.click-burst-speed-value {
+  min-width: 34px;
+  text-align: right;
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.click-burst-progress {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .step {
@@ -1457,6 +1683,21 @@ body.report.report-dark .timeline-event:hover {
   box-shadow: 0 12px 22px rgba(0, 0, 0, 0.42);
 }
 
+body.report.report-dark .click-burst-card {
+  background: linear-gradient(180deg, #0f1115, #0c0e12);
+  border-color: #2f333c;
+}
+
+body.report.report-dark .click-burst-media {
+  border-color: #2f333c;
+  background: #030712;
+}
+
+body.report.report-dark .burst-condensed-hint {
+  background: linear-gradient(180deg, rgba(15, 17, 21, 0.95), rgba(10, 12, 16, 0.92));
+  border-color: #3a404b;
+}
+
 body.report.report-dark .step:hover {
   border-color: #4f82cf;
   box-shadow: 0 16px 28px rgba(0, 0, 0, 0.52);
@@ -1501,6 +1742,11 @@ body.report.report-dark .row select {
   background: #090a0c;
   border-color: #2a2d34;
   color: #f2f4f7;
+}
+
+body.report.report-dark .row input[type="color"] {
+  background: #090a0c;
+  border-color: #2a2d34;
 }
 
 body.report.report-dark .export-theme-controls {

@@ -2,6 +2,84 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.11.0 - 2026-02-08
+
+### Added
+- Automatic lifecycle screenshot attempts at both recording boundaries:
+  - screenshot-backed start lifecycle step on recording start
+  - screenshot-backed stop lifecycle step on recording stop
+- Popup settings UI refactored into theme-compliant collapsible sections:
+  - Capture
+  - Privacy & Stability
+  - GIF Burst
+  - Advanced Burst Tuning (collapsed by default)
+  - Help
+
+### Changed
+- Burst replay placement is now inline and time-ordered across the workflow:
+  - report builder no longer isolates replay cards into a dedicated top section
+  - exported HTML now inserts burst replay cards throughout the report flow
+- Builder replay loop stability improved for long bursts:
+  - less aggressive frame eviction
+  - startup frame prefetch/warm load
+  - reliable repeat looping with pause/speed controls preserved
+
+### Fixed
+- Recording restart reliability:
+  - serialized lifecycle transitions for start/stop actions
+  - stale popup stop-token suppression after a new recording begins
+  - duplicate stop-request suppression while already idle
+- Removed implied burst frame noise from visible report step rows while preserving burst replay fidelity.
+
+## v1.10.0 - 2026-02-07
+
+### Added
+- Fast-click burst replay feature:
+  - Burst detection from rapid same-page click sequences.
+  - Inline burst replay cards in report/editor flow (time-ordered with surrounding steps).
+  - Per-burst playback controls (Play/Pause) with frame progress.
+  - Numbered medium-blue click markers over replay frames.
+- Popup advanced burst settings:
+  - burst trigger window
+  - burst max window
+  - max clicks per burst
+  - inactivity flush threshold
+  - click UI probe interval
+  - marker color
+  - autoplay toggle
+- Exported HTML now includes click burst replay cards with pausable loop playback.
+- Click burst playback runs at 5 FPS in editor and exported HTML replay cards.
+- Automatic lifecycle capture attempts on both recording start and recording stop.
+- Keyboard command for burst mode:
+  - `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default) toggles high-speed GIF burst mode while recording.
+
+### Changed
+- Click screenshot capture policy:
+  - with fast-click replay enabled, click screenshots are preserved for generic page clicks (not only UI-update-detected clicks), and diff dedupe is bypassed for click frames.
+- Burst mode activation moved from popup toggle to keyboard-driven runtime mode.
+- While burst mode is active, effective page-watch is forced off; toggling burst mode off restores the user-tuned page-watch setting.
+- Hotkey burst mode now uses a dedicated unconditional capture lane:
+  - workflow-driving events always attempt screenshot capture while ON
+  - target cadence is locked to 5 FPS until the mode is toggled OFF
+  - normal screenshot debounce/min-interval and click UI probe delay are bypassed while ON
+  - burst max/window/flush split settings are ignored while ON (bursts split on toggle OFF or tab/page context change)
+- Click event payload now includes:
+  - click coordinates (`clickX`, `clickY`)
+  - viewport dimensions (`viewportW`, `viewportH`)
+  - scroll offsets (`scrollX`, `scrollY`)
+  - UI update signal (`clickUiUpdated`)
+
+### Fixed
+- Restart race hardening:
+  - serialized start/stop lifecycle actions
+  - stale popup stop-token rejection after a new recording has started
+  - duplicate stop-request suppression when already idle
+- Added cleanup of burst replay timers on rerender/collapse/unload to avoid playback timer buildup.
+- Added burst-mode memory safeguard:
+  - per-tab click frame retention cap
+  - recent-window preservation for new burst context
+  - bounded screenshot compaction once high-watermark is reached
+
 ## v1.9.0 - 2026-02-07
 
 ### Added

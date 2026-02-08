@@ -1,4 +1,4 @@
-// content.js - v1.7.0
+// content.js - v1.11.0
 // Clean capture with optional text redaction and readable step naming.
 
 (function () {
@@ -28,6 +28,7 @@
   const UI_CHANGE_SCREENSHOT_MAX_PAGEWATCH_MS = 10_000;
   const UI_CHANGE_SCREENSHOT_MULTIPLIER = 1.34562;
   const UI_CHANGE_SCREENSHOT_INACTIVITY_MS = 4567.38;
+  const HOTKEY_BURST_INPUT_THROTTLE_MS = Math.round(1000 / 5);
   const ACTION_HINTS = [
     { key: "save", words: ["save", "apply", "update"] },
     { key: "next", words: ["next", "continue"] },
@@ -444,6 +445,21 @@
     return "";
   }
 
+  function getElementCenterPoint(el) {
+    if (!el || !el.getBoundingClientRect) return { x: null, y: null };
+    try {
+      const rect = el.getBoundingClientRect();
+      if (!(rect && rect.width > 0 && rect.height > 0)) return { x: null, y: null };
+      const x = rect.left + (rect.width / 2);
+      const y = rect.top + (rect.height / 2);
+      const safeX = Math.max(0, Math.min(window.innerWidth, Math.round(x)));
+      const safeY = Math.max(0, Math.min(window.innerHeight, Math.round(y)));
+      return { x: safeX, y: safeY };
+    } catch (_) {
+      return { x: null, y: null };
+    }
+  }
+
   function getAttributeText(el) {
     if (!el || !el.getAttribute) return "";
     return [
@@ -708,6 +724,49 @@
     }
   }
 
+  async function detectClickUiUpdateWithin(ms) {
+    const timeoutMs = Math.max(50, Math.min(3000, Number(ms) || 450));
+    const startHref = location.href;
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeoutId = null;
+      let urlTimer = null;
+      let observer = null;
+      const root = document.body || document.documentElement;
+
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        if (urlTimer) clearInterval(urlTimer);
+        if (observer) {
+          try { observer.disconnect(); } catch (_) {}
+        }
+        resolve(!!value);
+      };
+
+      try {
+        if (root) {
+          observer = new MutationObserver((mutations) => {
+            if (mutations && mutations.length) finish(true);
+          });
+          observer.observe(root, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true
+          });
+        }
+      } catch (_) {}
+
+      urlTimer = setInterval(() => {
+        if (location.href !== startHref) finish(true);
+      }, 60);
+
+      timeoutId = setTimeout(() => finish(false), timeoutMs);
+    });
+  }
+
   const SUBMIT_DEDUPE_MS = 1000;
   let lastSubmitEvent = { key: "", ts: 0 };
   let lastNavScreenshotAt = 0;
@@ -751,41 +810,75 @@
 
   // ---- INPUT capture (debounced; redacted) ----
   const inputTimers = new WeakMap();
+  const inputSeq = new WeakMap();
+  let burstInputLastEmitAt = 0;
+
+  async function emitInputEvent(el, st, burstHotkeyMode) {
+    if (!st.isRecording) return;
+    if (st.settings && st.settings.captureMode === "clicks") return;
+
+    const login = findLoginContext();
+    const redaction = collectSensitiveRectsWithFrame();
+    const label = getLabelFor(el);
+    const actionKind = inferActionKind(el);
+    const human = humanize(el);
+    const center = getElementCenterPoint(el);
+    const rawValue = norm(getElementValue(el));
+    const valueLength = rawValue.length;
+
+    const sensitive = isSensitiveField(el) || (login.isLogin && st.settings?.redactLoginUsernames && isLoginUsernameField(el)) || hasSensitiveKeyword(label);
+    await sendEvent({
+      type: "input",
+      url: location.href,
+      tag: el.tagName || "",
+      id: el.id || "",
+      label: sensitive ? "[REDACTED]" : label,
+      human,
+      actionKind,
+      value: sensitive ? "[REDACTED]" : rawValue,
+      valueLength,
+      eventX: center.x,
+      eventY: center.y,
+      pageIsLogin: login.isLogin,
+      pageHasSensitiveText: detectSensitiveTextOrAttrs(),
+      redactRects: redaction.rects,
+      frameIsTop: redaction.frameIsTop,
+      frameOffsetKnown: redaction.frameOffsetKnown,
+      devicePixelRatio: window.devicePixelRatio || 1,
+      burstHotkeyMode: !!burstHotkeyMode,
+      burstCaptureForced: !!burstHotkeyMode,
+      // Force screenshot for first-time login-page input so you see the screen.
+      // In burst hotkey mode force screenshot unconditionally.
+      forceScreenshot: !!login.isLogin || !!burstHotkeyMode
+    });
+  }
+
   function scheduleInputEvent(el) {
     if (!el) return;
     clearTimeout(inputTimers.get(el));
-    const t = setTimeout(async () => {
-      const st = await getState();
-      if (!st.isRecording) return;
-      if (st.settings && st.settings.captureMode === "clicks") return;
+    const seq = (inputSeq.get(el) || 0) + 1;
+    inputSeq.set(el, seq);
 
-      const login = findLoginContext();
-      const redaction = collectSensitiveRectsWithFrame();
-      const label = getLabelFor(el);
-      const actionKind = inferActionKind(el);
-      const human = humanize(el);
+    (async () => {
+      const pre = await getState();
+      const preBurstHotkeyMode = !!pre.burstHotkeyModeActive;
+      const delayMs = preBurstHotkeyMode ? HOTKEY_BURST_INPUT_THROTTLE_MS : 350;
+      if (inputSeq.get(el) !== seq) return;
 
-      const sensitive = isSensitiveField(el) || (login.isLogin && st.settings?.redactLoginUsernames && isLoginUsernameField(el)) || hasSensitiveKeyword(label);
-      await sendEvent({
-        type: "input",
-        url: location.href,
-        tag: el.tagName || "",
-        id: el.id || "",
-        label: sensitive ? "[REDACTED]" : label,
-        human,
-        actionKind,
-        value: sensitive ? "[REDACTED]" : norm(getElementValue(el)),
-        pageIsLogin: login.isLogin,
-        pageHasSensitiveText: detectSensitiveTextOrAttrs(),
-        redactRects: redaction.rects,
-        frameIsTop: redaction.frameIsTop,
-        frameOffsetKnown: redaction.frameOffsetKnown,
-        devicePixelRatio: window.devicePixelRatio || 1,
-        // Force screenshot for first-time login-page input so you see the screen
-        forceScreenshot: !!login.isLogin
-      });
-    }, 350);
-    inputTimers.set(el, t);
+      const timerId = setTimeout(async () => {
+        if (inputSeq.get(el) !== seq) return;
+        const st = await getState();
+        const burstHotkeyMode = !!st.burstHotkeyModeActive;
+        if (burstHotkeyMode) {
+          const now = Date.now();
+          const waitMs = Math.max(0, HOTKEY_BURST_INPUT_THROTTLE_MS - (now - burstInputLastEmitAt));
+          if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+          burstInputLastEmitAt = Date.now();
+        }
+        await emitInputEvent(el, st, burstHotkeyMode);
+      }, delayMs);
+      inputTimers.set(el, timerId);
+    })();
   }
 
   document.addEventListener("input", (e) => {
@@ -801,7 +894,8 @@
 
     const el = e.target;
     const login = findLoginContext();
-    if (isNoiseContainer(el, login)) return;
+    const burstClickCaptureEnabled = st.settings?.clickBurstEnabled !== false;
+    if (!burstClickCaptureEnabled && isNoiseContainer(el, login)) return;
 
     const form = (el && el.form) ? el.form : (el && el.closest ? el.closest("form") : null);
     const inLoginForm = login.isLogin && (!login.form || form === login.form);
@@ -816,6 +910,9 @@
     const actionKind = inferActionKind(el);
     const human = humanize(el);
     const hint = detectActionHint(label || human || (el && el.innerText) || "");
+    const burstHotkeyMode = !!st.burstHotkeyModeActive;
+    const clickProbeMs = Math.max(50, Math.min(3000, Number(st.settings?.clickBurstUiProbeMs ?? 450)));
+    const clickUiUpdated = burstHotkeyMode ? true : await detectClickUiUpdateWithin(clickProbeMs);
 
     const clickingSensitive = isSensitiveField(el) || (login.isLogin && st.settings?.redactLoginUsernames && isLoginUsernameField(el)) || hasSensitiveKeyword(label);
 
@@ -836,7 +933,17 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
-      forceScreenshot: !!login.isLogin
+      clickX: Math.max(0, Math.round(Number(e.clientX) || 0)),
+      clickY: Math.max(0, Math.round(Number(e.clientY) || 0)),
+      viewportW: Math.max(1, Math.round(Number(window.innerWidth) || 1)),
+      viewportH: Math.max(1, Math.round(Number(window.innerHeight) || 1)),
+      scrollX: Math.round(Number(window.scrollX) || 0),
+      scrollY: Math.round(Number(window.scrollY) || 0),
+      clickUiUpdated,
+      burstHotkeyMode,
+      burstBypassUiProbe: burstHotkeyMode,
+      burstCaptureForced: burstHotkeyMode,
+      forceScreenshot: !!login.isLogin || !!burstClickCaptureEnabled || burstHotkeyMode
     });
   }, true);
 
@@ -851,11 +958,15 @@
     const redaction = collectSensitiveRectsWithFrame();
     const label = getLabelFor(el);
     const human = humanize(el);
+    const center = getElementCenterPoint(el);
+    const rawValue = norm(getElementValue(el));
+    const valueLength = rawValue.length;
 
     const type = el && el.getAttribute ? (el.getAttribute("type") || "") : "";
     const role = el && el.getAttribute ? (el.getAttribute("role") || "") : "";
     const checked = (lower(type) === "checkbox" || role === "switch") ? !!el.checked : null;
 
+    const burstHotkeyMode = !!st.burstHotkeyModeActive;
     const sensitive = isSensitiveField(el) || (login.isLogin && st.settings?.redactLoginUsernames && isLoginUsernameField(el)) || hasSensitiveKeyword(label);
 
     await sendEvent({
@@ -866,7 +977,10 @@
       label: sensitive ? "[REDACTED]" : label,
       human,
       selector: "",
-      value: sensitive ? "[REDACTED]" : norm(getElementValue(el)),
+      value: sensitive ? "[REDACTED]" : rawValue,
+      valueLength,
+      eventX: center.x,
+      eventY: center.y,
       checked,
       pageIsLogin: login.isLogin,
       pageHasSensitiveText: detectSensitiveTextOrAttrs(),
@@ -874,7 +988,9 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
-      forceScreenshot: !!login.isLogin
+      burstHotkeyMode,
+      burstCaptureForced: burstHotkeyMode,
+      forceScreenshot: !!login.isLogin || burstHotkeyMode
     });
   }, true);
 
@@ -966,11 +1082,13 @@
   // Initial page: if login, capture a nav step with forced screenshot so you always get the login page in the report.
   setupPageWatch();
   browser.runtime.onMessage.addListener((msg) => {
-    if (!msg || msg.type !== "UIR_ACTIVE_TARGET_UPDATED") return;
+    if (!msg) return;
+    const refreshMessage = msg.type === "UIR_ACTIVE_TARGET_UPDATED" || msg.type === "UIR_CAPTURE_MODE_CHANGED";
+    if (!refreshMessage) return;
     const ctl = window.__uiRecorderPageWatchCtl;
     if (ctl && typeof ctl.requestRefresh === "function") {
       ctl.requestRefresh();
-      contentLog("pageWatch:refresh-from-target-update", { reason: msg.reason || "unknown" });
+      contentLog("pageWatch:refresh-from-runtime-message", { type: msg.type, reason: msg.reason || "unknown" });
     }
   });
 
