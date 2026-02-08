@@ -28,7 +28,7 @@
   const UI_CHANGE_SCREENSHOT_MAX_PAGEWATCH_MS = 10_000;
   const UI_CHANGE_SCREENSHOT_MULTIPLIER = 1.34562;
   const UI_CHANGE_SCREENSHOT_INACTIVITY_MS = 4567.38;
-  const HOTKEY_BURST_INPUT_THROTTLE_MS = Math.round(1000 / 5);
+  const HOTKEY_BURST_DEFAULT_FPS = 5;
   const CLICK_UI_PROBE_MS = 450;
   const ACTION_HINTS = [
     { key: "save", words: ["save", "apply", "update"] },
@@ -50,6 +50,15 @@
 
   function norm(s) { return String(s || "").trim().replace(/\s+/g, " ").slice(0, 240); }
   function lower(s) { return String(s || "").toLowerCase(); }
+  function normalizeHotkeyBurstFps(value) {
+    const fps = Math.round(Number(value));
+    if (fps === 10 || fps === 15) return fps;
+    return HOTKEY_BURST_DEFAULT_FPS;
+  }
+  function getHotkeyBurstInputThrottleMs(st) {
+    const fps = normalizeHotkeyBurstFps(st && st.settings ? st.settings.hotkeyBurstFps : HOTKEY_BURST_DEFAULT_FPS);
+    return Math.max(16, Math.round(1000 / fps));
+  }
   function hasSensitiveKeyword(text) {
     const t = lower(text);
     return SENSITIVE_KEYWORDS.some(k => t.includes(k));
@@ -863,7 +872,8 @@
     (async () => {
       const pre = await getState();
       const preBurstHotkeyMode = !!pre.burstHotkeyModeActive;
-      const delayMs = preBurstHotkeyMode ? HOTKEY_BURST_INPUT_THROTTLE_MS : 350;
+      const preBurstThrottleMs = getHotkeyBurstInputThrottleMs(pre);
+      const delayMs = preBurstHotkeyMode ? preBurstThrottleMs : 350;
       if (inputSeq.get(el) !== seq) return;
 
       const timerId = setTimeout(async () => {
@@ -871,8 +881,9 @@
         const st = await getState();
         const burstHotkeyMode = !!st.burstHotkeyModeActive;
         if (burstHotkeyMode) {
+          const burstThrottleMs = getHotkeyBurstInputThrottleMs(st);
           const now = Date.now();
-          const waitMs = Math.max(0, HOTKEY_BURST_INPUT_THROTTLE_MS - (now - burstInputLastEmitAt));
+          const waitMs = Math.max(0, burstThrottleMs - (now - burstInputLastEmitAt));
           if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
           burstInputLastEmitAt = Date.now();
         }

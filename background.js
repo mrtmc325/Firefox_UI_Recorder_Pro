@@ -49,13 +49,22 @@ let activeRecordEvents = 0;
 let lastPopupStopToken = 0;
 let activeCaptureTabId = null;
 let activeCaptureWindowId = null;
+let activeCaptureTabUrl = "";
+let activeCaptureTabTitle = "";
 let activeCaptureUpdatedAt = 0;
 let burstHotkeyModeActive = false;
 let burstModeEpoch = 0;
+let burstRunId = 0;
+let burstRunTargetFps = 5;
 let burstCaptureLastTs = 0;
 let burstCaptureQueue = Promise.resolve();
 let burstContinuousTimer = null;
 let burstContinuousInFlight = false;
+let burstLoopActive = false;
+let burstLastFrameAtMs = 0;
+let burstLastLoopPauseReason = "mode-off";
+let burstLoopLastPersistAtMs = 0;
+let burstLoopPersistInFlight = false;
 let recordingStartedAtMs = 0;
 let lifecycleQueue = Promise.resolve();
 let pendingHotkeyStopTimer = null;
@@ -71,14 +80,175 @@ const HOTKEY_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB = 160;
 const HOTKEY_BURST_RECENT_WINDOW_MS = 180000;
 const HOTKEY_BURST_DEFAULT_FPS = 5;
 const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
-const HOTKEY_BURST_CAPTURE_EVENT_TYPES = new Set(["click", "input", "change", "submit", "nav", "ui-change", "outcome", "note"]);
 const HOTKEY_STOP_GRACE_MS = 2000;
+const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
+const FRAME_SPOOL_BACKPRESSURE_RESUME_THRESHOLD = 12;
+
+const frameSpool = (
+  typeof self !== "undefined" &&
+  self.UIRFrameSpool &&
+  typeof self.UIRFrameSpool.createService === "function"
+) ? self.UIRFrameSpool.createService({
+  captureQueueMax: 8,
+  processQueueMax: 16,
+  writeQueueMax: 24,
+  log: (event, payload) => bgLog(event, payload),
+  warn: (event, payload) => bgWarn(event, payload)
+}) : null;
+let frameSpoolReadyPromise = null;
+let frameSpoolMaintenanceTimer = null;
+
+function normalizeBurstLoopPauseReason(reason) {
+  const text = String(reason || "").trim().toLowerCase();
+  if (!text) return "mode-off";
+  if (text.includes("paused")) return "paused";
+  if (text.includes("no-active-tab") || text.includes("skip-tab")) return "no-active-tab";
+  if (text.includes("capture-failed") || text.includes("capture-skip")) return "capture-failed";
+  if (text.includes("backpressure")) return "backpressure";
+  if (text.includes("inactive")) return "inactive-recording";
+  if (text.includes("mode-off") || text.includes("toggle-off") || text.includes("command:off") || text.includes("stop-recording")) {
+    return "mode-off";
+  }
+  return text;
+}
 
 function formatError(err) {
   if (!err) return "unknown";
   if (err && err.stack) return err.stack;
   if (err && err.message) return err.message;
   return String(err);
+}
+
+async function ensureFrameSpoolReady() {
+  if (!frameSpool) return false;
+  if (!frameSpoolReadyPromise) {
+    frameSpoolReadyPromise = frameSpool.init()
+      .then(() => true)
+      .catch((err) => {
+        bgWarn("frame-spool:init-failed", { error: formatError(err) });
+        return false;
+      });
+  }
+  return await frameSpoolReadyPromise;
+}
+
+function cloneScreenshotRef(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const frameId = String(raw.frameId || "").trim();
+  if (!frameId) return null;
+  const session = String(raw.sessionId || "").trim();
+  return {
+    frameId,
+    sessionId: session,
+    mime: String(raw.mime || "image/png"),
+    createdAtMs: Number(raw.createdAtMs) || Date.now(),
+    width: Number(raw.width) || null,
+    height: Number(raw.height) || null
+  };
+}
+
+function collectFrameIdsFromEvents(list) {
+  const ids = new Set();
+  const source = Array.isArray(list) ? list : [];
+  source.forEach((ev) => {
+    if (!ev || typeof ev !== "object" || !ev.screenshotRef) return;
+    const ref = cloneScreenshotRef(ev.screenshotRef);
+    if (!ref) return;
+    ids.add(ref.frameId);
+  });
+  return Array.from(ids);
+}
+
+function buildReportFrameMap(reportList) {
+  const map = new Map();
+  const items = Array.isArray(reportList) ? reportList : [];
+  items.forEach((report) => {
+    if (!report || typeof report !== "object") return;
+    const reportId = String(report.id || "").trim();
+    if (!reportId) return;
+    map.set(reportId, collectFrameIdsFromEvents(report.events));
+  });
+  return map;
+}
+
+async function syncFrameSpoolReportRefs(reason) {
+  if (!(await ensureFrameSpoolReady())) return null;
+  try {
+    const reportMap = buildReportFrameMap(reports);
+    const result = await frameSpool.syncReportRefs(reportMap);
+    bgLog("frame-spool:sync-report-refs", {
+      reason,
+      reportCount: result && result.reportCount,
+      refCount: result && result.refCount
+    });
+    return result;
+  } catch (err) {
+    bgWarn("frame-spool:sync-report-refs-failed", { reason, error: formatError(err) });
+    return null;
+  }
+}
+
+async function runFrameSpoolGc(reason, opts = {}) {
+  if (!(await ensureFrameSpoolReady())) return null;
+  try {
+    const activeSessionIds = Array.isArray(opts.activeSessionIds)
+      ? opts.activeSessionIds
+      : (isRecording && sessionId ? [sessionId] : []);
+    const result = await frameSpool.gc({
+      activeSessionIds,
+      orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS,
+      maxBytes: FRAME_SPOOL_BYTE_CAP
+    });
+    bgLog("frame-spool:gc", { reason, ...result });
+    return result;
+  } catch (err) {
+    bgWarn("frame-spool:gc-failed", { reason, error: formatError(err) });
+    return null;
+  }
+}
+
+function scheduleFrameSpoolMaintenance(reason, delayMs = 1200) {
+  if (!frameSpool) return;
+  if (frameSpoolMaintenanceTimer) clearTimeout(frameSpoolMaintenanceTimer);
+  const waitMs = Math.max(200, Number(delayMs) || 1200);
+  frameSpoolMaintenanceTimer = setTimeout(async () => {
+    frameSpoolMaintenanceTimer = null;
+    await syncFrameSpoolReportRefs(`${reason}:sync`);
+    await runFrameSpoolGc(`${reason}:gc`);
+  }, waitMs);
+}
+
+function buildBurstFrameRef(ref) {
+  const normalized = cloneScreenshotRef(ref);
+  if (!normalized) return null;
+  return {
+    frameId: normalized.frameId,
+    sessionId: normalized.sessionId || sessionId || "",
+    mime: normalized.mime,
+    createdAtMs: normalized.createdAtMs,
+    width: normalized.width,
+    height: normalized.height
+  };
+}
+
+async function storeBurstFrameInSpool(dataUrl, meta = {}) {
+  if (!dataUrl || !(await ensureFrameSpoolReady())) return null;
+  try {
+    const enqueueMeta = {
+      sessionId: String(meta.sessionId || sessionId || ""),
+      createdAtMs: Number(meta.createdAtMs) || Date.now(),
+      width: Number(meta.width) || null,
+      height: Number(meta.height) || null
+    };
+    const ref = (typeof frameSpool.enqueueCaptureImmediate === "function")
+      ? frameSpool.enqueueCaptureImmediate(enqueueMeta, dataUrl)
+      : await frameSpool.enqueueCapture(enqueueMeta, dataUrl);
+    return buildBurstFrameRef(ref);
+  } catch (err) {
+    bgWarn("frame-spool:enqueue-failed", { error: formatError(err) });
+    return null;
+  }
 }
 
 function bgLog(message, data) {
@@ -147,6 +317,11 @@ function resetScreenshotState() {
     burstContinuousTimer = null;
   }
   burstContinuousInFlight = false;
+  burstLoopActive = false;
+  burstLastFrameAtMs = 0;
+  burstLastLoopPauseReason = "mode-off";
+  burstLoopLastPersistAtMs = 0;
+  burstLoopPersistInFlight = false;
   if (hadPending) bgLog("resetScreenshotState:cleared-pending");
 }
 
@@ -154,6 +329,8 @@ function clearActiveCaptureTarget(reason) {
   const hadTarget = activeCaptureTabId !== null || activeCaptureWindowId !== null;
   activeCaptureTabId = null;
   activeCaptureWindowId = null;
+  activeCaptureTabUrl = "";
+  activeCaptureTabTitle = "";
   activeCaptureUpdatedAt = Date.now();
   if (hadTarget || reason) {
     bgLog("active-target:cleared", { reason, updatedAt: activeCaptureUpdatedAt });
@@ -170,6 +347,8 @@ async function refreshActiveCaptureTarget(reason) {
     }
     activeCaptureTabId = tab.id;
     activeCaptureWindowId = typeof tab.windowId === "number" ? tab.windowId : null;
+    activeCaptureTabUrl = String(tab.url || "");
+    activeCaptureTabTitle = String(tab.title || "");
     activeCaptureUpdatedAt = Date.now();
     bgLog("active-target:set", {
       reason,
@@ -253,6 +432,10 @@ async function notifyCaptureModeChanged(reason) {
         reason: reason || "unknown",
         burstHotkeyModeActive: !!burstHotkeyModeActive,
         burstModeEpoch,
+        burstRunId,
+        burstLoopActive,
+        burstLastFrameAtMs,
+        burstLastLoopPauseReason,
         ts: Date.now()
       });
       sent++;
@@ -348,7 +531,11 @@ function getHotkeyBurstFps() {
 }
 
 function getHotkeyBurstFrameMs() {
-  return 1000 / getHotkeyBurstFps();
+  const fps = getHotkeyBurstFps();
+  if (isHotkeyBurstModeActive()) {
+    burstRunTargetFps = fps;
+  }
+  return 1000 / fps;
 }
 
 function stopContinuousBurstCaptureLoop(reason) {
@@ -357,6 +544,8 @@ function stopContinuousBurstCaptureLoop(reason) {
     burstContinuousTimer = null;
   }
   burstContinuousInFlight = false;
+  burstLoopActive = false;
+  burstLastLoopPauseReason = normalizeBurstLoopPauseReason(reason);
   bgLog("burst-loop:stopped", { reason, isRecording, burstHotkeyModeActive });
 }
 
@@ -375,15 +564,13 @@ async function resolveBurstCaptureTab() {
     if (activeCaptureTabId === null || activeCaptureWindowId === null) {
       await refreshActiveCaptureTarget("burst-loop:resolve");
     }
-    if (activeCaptureTabId !== null) {
-      try {
-        return await browser.tabs.get(activeCaptureTabId);
-      } catch (_) {
-        await refreshActiveCaptureTarget("burst-loop:recover");
-        if (activeCaptureTabId !== null) {
-          try { return await browser.tabs.get(activeCaptureTabId); } catch (_) {}
-        }
-      }
+    if (activeCaptureTabId !== null && activeCaptureWindowId !== null) {
+      return {
+        id: activeCaptureTabId,
+        windowId: activeCaptureWindowId,
+        url: activeCaptureTabUrl,
+        title: activeCaptureTabTitle
+      };
     }
     return null;
   }
@@ -398,10 +585,12 @@ async function runContinuousBurstCaptureTick() {
   burstContinuousTimer = null;
   const frameMs = getHotkeyBurstFrameMs();
   if (!isHotkeyBurstModeActive()) {
-    stopContinuousBurstCaptureLoop("inactive");
+    stopContinuousBurstCaptureLoop("inactive-recording");
     return;
   }
   if (isPaused) {
+    burstLoopActive = false;
+    burstLastLoopPauseReason = "paused";
     scheduleContinuousBurstCaptureTick(frameMs);
     return;
   }
@@ -412,8 +601,26 @@ async function runContinuousBurstCaptureTick() {
 
   burstContinuousInFlight = true;
   try {
+    if (frameSpool) {
+      const state = frameSpool.getQueueState();
+      const writeQueueCap = Math.max(1, Number(frameSpool.writeQueueMax) || 24);
+      const backpressureActive = state.writeQueue >= writeQueueCap
+        || (
+          burstLastLoopPauseReason === "backpressure"
+          && state.writeQueue > FRAME_SPOOL_BACKPRESSURE_RESUME_THRESHOLD
+        );
+      if (backpressureActive) {
+        burstLoopActive = false;
+        burstLastLoopPauseReason = "backpressure";
+        bgLog("burst-loop:backpressure", state);
+        scheduleContinuousBurstCaptureTick(Math.max(frameMs, 120));
+        return;
+      }
+    }
     const tab = await resolveBurstCaptureTab();
     if (!tab || !isInjectableTabUrl(tab.url || "")) {
+      burstLoopActive = false;
+      burstLastLoopPauseReason = "no-active-tab";
       bgLog("burst-loop:skip-tab", { hasTab: !!tab, tabId: tab && tab.id, url: tab && tab.url });
       return;
     }
@@ -421,12 +628,19 @@ async function runContinuousBurstCaptureTick() {
 
     const shot = await captureBurstFrameFixedRate();
     if (!shot.dataUrl) {
+      burstLoopActive = false;
+      burstLastLoopPauseReason = "capture-failed";
       bgLog("burst-loop:capture-skip", { reason: shot.reason || "capture-failed" });
       return;
     }
     if (!isHotkeyBurstModeActive() || isPaused) return;
 
-    const screenshotHash = stableHash(shot.dataUrl);
+    const screenshotRef = await storeBurstFrameInSpool(shot.dataUrl, {
+      sessionId,
+      createdAtMs: Date.now()
+    });
+    const screenshotInline = screenshotRef ? null : shot.dataUrl;
+
     events.push({
       type: "ui-change",
       ts: nowIso(),
@@ -441,20 +655,23 @@ async function runContinuousBurstCaptureTick() {
       tabId: typeof tab.id === "number" ? tab.id : null,
       windowId: typeof tab.windowId === "number" ? tab.windowId : null,
       tabTitle: tab.title || "",
-      screenshot: shot.dataUrl,
-      screenshotHash,
+      screenshot: screenshotInline,
+      screenshotRef: screenshotRef,
+      screenshotHash: null,
       screenshotSkipped: false,
       screenshotSkipReason: null,
       burstHotkeyMode: true,
       burstModeEpoch,
+      burstRunId,
+      burstTargetFps: burstRunTargetFps,
       burstCaptureForced: true,
       burstSynthetic: true,
       clickUiUpdated: true
     });
-    const persisted = await persistSafe("burst-loop-frame");
-    if (!persisted.ok) {
-      bgWarn("burst-loop:persist-failed", { eventCount: events.length });
-    }
+    maybePersistBurstLoopState();
+    burstLoopActive = true;
+    burstLastFrameAtMs = Date.now();
+    burstLastLoopPauseReason = null;
   } finally {
     burstContinuousInFlight = false;
     if (isHotkeyBurstModeActive()) {
@@ -471,6 +688,8 @@ function ensureContinuousBurstCaptureLoop(reason) {
     return;
   }
   if (burstContinuousTimer || burstContinuousInFlight) return;
+  burstLoopActive = true;
+  burstLastLoopPauseReason = null;
   bgLog("burst-loop:started", { reason, isRecording, burstHotkeyModeActive });
   scheduleContinuousBurstCaptureTick(0);
 }
@@ -536,12 +755,32 @@ async function captureBurstFrameFixedRate() {
       return { dataUrl: null, hash: null, reused: false, reason: capture.reason || "capture-failed" };
     }
 
-    const hash = stableHash(capture.dataUrl);
     const capturedAt = Date.now();
     burstCaptureLastTs = capturedAt;
-    lastShot = { ts: capturedAt, hash, dataUrl: capture.dataUrl };
-    return { dataUrl: capture.dataUrl, hash, reused: false, reason: null };
+    lastShot = { ts: capturedAt, hash: null, dataUrl: capture.dataUrl };
+    return { dataUrl: capture.dataUrl, hash: null, reused: false, reason: null };
   });
+}
+
+function maybePersistBurstLoopState() {
+  if (burstLoopPersistInFlight) return;
+  const frameMs = getHotkeyBurstFrameMs();
+  const minPersistIntervalMs = Math.max(400, Math.round(frameMs * 8));
+  const now = Date.now();
+  if ((now - burstLoopLastPersistAtMs) < minPersistIntervalMs) return;
+
+  burstLoopPersistInFlight = true;
+  persistSafe("burst-loop-frame")
+    .then((persisted) => {
+      if (!persisted.ok) {
+        bgWarn("burst-loop:persist-failed", { eventCount: events.length });
+        return;
+      }
+      burstLoopLastPersistAtMs = Date.now();
+    })
+    .finally(() => {
+      burstLoopPersistInFlight = false;
+    });
 }
 
 async function persist() { await browser.storage.local.set({ isRecording, isPaused, events, settings, reports, sessionId }); }
@@ -568,6 +807,17 @@ async function loadPersisted() {
   recordingStartedAtMs = isRecording ? Date.now() : 0;
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
+  burstRunId = 0;
+  burstRunTargetFps = normalizeHotkeyBurstFps(settings.hotkeyBurstFps);
+  burstLoopActive = false;
+  burstLastFrameAtMs = 0;
+  burstLastLoopPauseReason = "mode-off";
+  if (await ensureFrameSpoolReady()) {
+    await syncFrameSpoolReportRefs("load-persisted");
+    setTimeout(() => {
+      runFrameSpoolGc("startup-deferred").catch(() => {});
+    }, 1200);
+  }
   bgLog("loadPersisted", { isRecording, isPaused, eventCount: events.length, reportCount: reports.length, sessionId });
 }
 
@@ -767,7 +1017,7 @@ function pruneInputSteps(list) {
   return out;
 }
 
-function saveReportSnapshot(snapshotSettings) {
+async function saveReportSnapshot(snapshotSettings) {
   if (!events || !events.length) return false;
   const eventCountBefore = events.length;
   const resolvedSettings = normalizeSettings(snapshotSettings || getEffectiveSettings());
@@ -779,7 +1029,27 @@ function saveReportSnapshot(snapshotSettings) {
     events: pruneInputSteps(events.slice(0))
   };
   reports.unshift(report);
+  const droppedReports = reports.slice(3);
   reports = reports.slice(0, 3);
+
+  if (await ensureFrameSpoolReady()) {
+    try {
+      await syncFrameSpoolReportRefs("snapshot");
+      if (sessionId) {
+        await frameSpool.removeSessionRefs(sessionId);
+      }
+      await runFrameSpoolGc("snapshot", { activeSessionIds: [] });
+      if (droppedReports.length) {
+        bgLog("frame-spool:reports-dropped", {
+          count: droppedReports.length,
+          reportIds: droppedReports.map((r) => r && r.id).filter(Boolean)
+        });
+      }
+    } catch (err) {
+      bgWarn("frame-spool:snapshot-link-failed", { error: formatError(err) });
+    }
+  }
+
   bgLog("saveReportSnapshot", { sessionId, eventCountBefore, prunedEventCount: report.events.length, reportCount: reports.length });
   return true;
 }
@@ -798,7 +1068,18 @@ function shouldIgnoreEventType(type) {
 }
 
 function hasScreenshotPayload(ev) {
-  return !!(ev && typeof ev === "object" && ev.screenshot);
+  return !!(
+    ev &&
+    typeof ev === "object" &&
+    (
+      !!ev.screenshot ||
+      (ev.screenshotRef && typeof ev.screenshotRef === "object" && !!ev.screenshotRef.frameId)
+    )
+  );
+}
+
+function hasInlineScreenshotPayload(ev) {
+  return !!(ev && typeof ev === "object" && !!ev.screenshot);
 }
 
 function isScreenshotPriorityEvent(ev) {
@@ -813,7 +1094,7 @@ function compactScreenshotsIfNeeded() {
   if (!Array.isArray(events) || !events.length) return null;
   let screenshotCount = 0;
   for (const ev of events) {
-    if (hasScreenshotPayload(ev)) screenshotCount++;
+    if (hasInlineScreenshotPayload(ev)) screenshotCount++;
   }
   if (events.length < EVENT_COMPACT_TRIGGER_COUNT && screenshotCount < SCREENSHOT_COMPACT_TRIGGER_COUNT) {
     return null;
@@ -822,9 +1103,10 @@ function compactScreenshotsIfNeeded() {
   let removed = 0;
   for (let i = 0; i < events.length && screenshotCount > SCREENSHOT_KEEP_TARGET; i++) {
     const ev = events[i];
-    if (!hasScreenshotPayload(ev)) continue;
+    if (!hasInlineScreenshotPayload(ev)) continue;
     if (isScreenshotPriorityEvent(ev)) continue;
     ev.screenshot = null;
+    ev.screenshotRef = null;
     ev.screenshotHash = null;
     ev.screenshotSkipped = true;
     ev.screenshotSkipReason = "compacted-memory";
@@ -839,7 +1121,7 @@ function compactBurstScreenshotsIfNeeded() {
   if (!Array.isArray(events) || !events.length) return null;
   let screenshotCount = 0;
   for (const ev of events) {
-    if (hasScreenshotPayload(ev)) screenshotCount++;
+    if (hasInlineScreenshotPayload(ev)) screenshotCount++;
   }
   if (screenshotCount < HOTKEY_BURST_SCREENSHOT_COMPACT_TRIGGER_COUNT) return null;
 
@@ -849,7 +1131,7 @@ function compactBurstScreenshotsIfNeeded() {
 
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
-    if (!hasScreenshotPayload(ev)) continue;
+    if (!hasInlineScreenshotPayload(ev)) continue;
     if (isScreenshotPriorityEvent(ev)) {
       keepIndexes.add(i);
       continue;
@@ -870,8 +1152,9 @@ function compactBurstScreenshotsIfNeeded() {
   for (let i = 0; i < events.length && screenshotCount > HOTKEY_BURST_SCREENSHOT_KEEP_TARGET; i++) {
     if (keepIndexes.has(i)) continue;
     const ev = events[i];
-    if (!hasScreenshotPayload(ev)) continue;
+    if (!hasInlineScreenshotPayload(ev)) continue;
     ev.screenshot = null;
+    ev.screenshotRef = null;
     ev.screenshotHash = null;
     ev.screenshotSkipped = true;
     ev.screenshotSkipReason = "compacted-burst-memory";
@@ -910,6 +1193,11 @@ async function startRecordingInternal(source) {
   clearPendingHotkeyStop("start-recording");
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
+  burstRunId = 0;
+  burstRunTargetFps = normalizeHotkeyBurstFps(settings.hotkeyBurstFps);
+  burstLoopActive = false;
+  burstLastFrameAtMs = 0;
+  burstLastLoopPauseReason = "mode-off";
   isRecording = true;
   isPaused = false;
   events = [];
@@ -945,7 +1233,7 @@ async function stopRecordingInternal(source) {
   await appendLifecycleScreenshotEvent("stop", source);
   isRecording = false;
   isPaused = false;
-  const saved = saveReportSnapshot(snapshotSettings);
+  const saved = await saveReportSnapshot(snapshotSettings);
   // Report snapshots already include the completed session.
   // Clear active buffer to avoid doubling storage footprint on stop.
   events = [];
@@ -953,6 +1241,11 @@ async function stopRecordingInternal(source) {
   recordingStartedAtMs = 0;
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
+  burstRunId = 0;
+  burstRunTargetFps = normalizeHotkeyBurstFps(settings.hotkeyBurstFps);
+  burstLoopActive = false;
+  burstLastFrameAtMs = 0;
+  burstLastLoopPauseReason = "mode-off";
   if (hadBurstHotkeyMode) {
     await notifyCaptureModeChanged("stop-recording");
   }
@@ -1018,6 +1311,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       const isActiveCaptureTab = effectiveSettings.activeTabOnly
         ? (hasSenderTab ? isEventFromActiveTarget(sender.tab) : true)
         : true;
+      const frameSpoolState = frameSpool ? frameSpool.getQueueState() : null;
       return {
         isRecording,
         isPaused,
@@ -1027,6 +1321,11 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         activeCaptureWindowId: effectiveSettings.activeTabOnly ? activeCaptureWindowId : null,
         isActiveCaptureTab,
         burstHotkeyModeActive,
+        burstRunTargetFps,
+        burstLoopActive,
+        burstLastFrameAtMs,
+        burstLastLoopPauseReason,
+        frameSpoolQueueState: frameSpoolState,
         pendingHotkeyStop: hasPendingHotkeyStop(),
         pendingHotkeyStopUntilMs: hasPendingHotkeyStop() ? pendingHotkeyStopUntilMs : null
       };
@@ -1087,7 +1386,8 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         tabId: tab && tab.id ? tab.id : null,
         windowId: tab && tab.windowId ? tab.windowId : null,
         tabTitle: tab && tab.title ? tab.title : "",
-        ...(isHotkeyBurstModeActive() ? { burstHotkeyMode: true, burstModeEpoch } : {})
+        ...(isHotkeyBurstModeActive() ? { burstHotkeyMode: true, burstModeEpoch } : {}),
+        ...(isHotkeyBurstModeActive() ? { burstRunId } : {})
       });
       const persisted = await persistSafe("add-note");
       return { ok: persisted.ok, persisted: persisted.ok };
@@ -1136,11 +1436,13 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         };
         if (hotkeyBurstActive) cleaned.burstHotkeyMode = true;
         if (hotkeyBurstActive) cleaned.burstModeEpoch = burstModeEpoch;
+        if (hotkeyBurstActive) cleaned.burstRunId = burstRunId;
+        if (hotkeyBurstActive) cleaned.burstTargetFps = burstRunTargetFps;
         if (e && e.burstBypassUiProbe) cleaned.burstBypassUiProbe = true;
         delete cleaned.typedValue;
 
         const includeScreenshot = hotkeyBurstActive
-          ? HOTKEY_BURST_CAPTURE_EVENT_TYPES.has(e.type)
+          ? false
           : (
             ["change","input","submit","outcome","note"].includes(e.type)
             || (e.type === "click" && (!!e.forceScreenshot || !!e.clickUiUpdated))
@@ -1151,14 +1453,16 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         if (includeScreenshot) {
           const shot = await maybeScreenshot(e);
           cleaned.screenshot = shot.screenshot;
+          cleaned.screenshotRef = null;
           cleaned.screenshotHash = shot.screenshotHash;
           cleaned.screenshotSkipped = shot.skipped;
           cleaned.screenshotSkipReason = shot.reason;
         } else {
           cleaned.screenshot = null;
+          cleaned.screenshotRef = null;
           cleaned.screenshotHash = null;
           cleaned.screenshotSkipped = true;
-          cleaned.screenshotSkipReason = "not-needed";
+          cleaned.screenshotSkipReason = hotkeyBurstActive ? "gif-loop-owned" : "not-needed";
         }
 
         if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
@@ -1226,6 +1530,13 @@ browser.idle.onStateChanged.addListener(async (state) => {
 
 browser.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName !== "local") return;
+  if (changes.reports) {
+    reports = Array.isArray(changes.reports.newValue) ? changes.reports.newValue : [];
+    scheduleFrameSpoolMaintenance("storage:reports", 900);
+  }
+  if (changes.settings && changes.settings.newValue) {
+    settings = normalizeSettings({ ...settings, ...changes.settings.newValue });
+  }
   const stopChange = changes.__uiRecorderStopRequestTs;
   if (!stopChange) return;
 
@@ -1297,7 +1608,14 @@ browser.commands.onCommand.addListener(async (command) => {
     return;
   }
   burstHotkeyModeActive = !burstHotkeyModeActive;
-  if (burstHotkeyModeActive) burstModeEpoch += 1;
+  if (burstHotkeyModeActive) {
+    burstModeEpoch += 1;
+    burstRunId += 1;
+    burstRunTargetFps = getHotkeyBurstFps();
+    burstLastLoopPauseReason = null;
+  } else {
+    burstRunTargetFps = normalizeHotkeyBurstFps(settings.hotkeyBurstFps);
+  }
   const persisted = await persistSafe("toggle-burst-capture");
   const effective = getEffectiveSettings();
   await notifyCaptureModeChanged("command:toggle-burst-capture");
@@ -1306,6 +1624,7 @@ browser.commands.onCommand.addListener(async (command) => {
   bgLog("capture-mode:toggled", {
     burstHotkeyModeActive,
     burstModeEpoch,
+    burstRunId,
     persisted: persisted.ok,
     effectivePageWatchEnabled: !!effective.pageWatchEnabled
   });

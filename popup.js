@@ -7,22 +7,21 @@ function popupLog(message, data) {
   else console.log(prefix, message, data);
 }
 
-function normalizeHexColor(value, fallback = "#2563eb") {
-  const color = String(value || "").trim();
-  if (/^#[0-9a-fA-F]{6}$/.test(color)) return color.toLowerCase();
-  return fallback;
-}
-
-function normalizeMarkerStyle(value) {
-  const style = String(value || "").trim().toLowerCase();
-  if (style === "tech-mono" || style === "outline-heavy") return style;
-  return "rounded-bold";
-}
-
 function normalizeHotkeyBurstFps(value) {
   const fps = Math.round(Number(value));
   if (fps === 10 || fps === 15) return fps;
   return 5;
+}
+
+function burstPauseReasonLabel(reason) {
+  const key = String(reason || "").trim().toLowerCase();
+  if (!key) return "running";
+  if (key === "mode-off") return "mode off";
+  if (key === "inactive-recording") return "recording inactive";
+  if (key === "paused") return "recording paused";
+  if (key === "no-active-tab") return "no active tab";
+  if (key === "capture-failed") return "capture failed";
+  return key.replace(/-/g, " ");
 }
 
 async function writeControlSignal() {
@@ -77,10 +76,31 @@ async function refresh() {
   document.getElementById("status").textContent = statusText;
   document.getElementById("count").textContent = `Steps captured: ${st.count || 0}`;
   const burstChip = document.getElementById("burst-mode-chip");
-  const burstFps = normalizeHotkeyBurstFps(st.settings?.hotkeyBurstFps);
+  const configuredBurstFps = normalizeHotkeyBurstFps(st.settings?.hotkeyBurstFps);
+  const burstFps = burstMode
+    ? normalizeHotkeyBurstFps(st.burstRunTargetFps ?? configuredBurstFps)
+    : configuredBurstFps;
   if (burstChip) {
     burstChip.textContent = burstMode ? `GIF: ON (${burstFps} FPS)` : `GIF: OFF (${burstFps} FPS)`;
     burstChip.classList.toggle("active", burstMode);
+  }
+  const burstLoopActive = !!st.burstLoopActive;
+  const burstLoopChip = document.getElementById("burst-loop-chip");
+  const burstLoopReason = document.getElementById("burst-loop-reason");
+  const lastFrameAtMs = Number(st.burstLastFrameAtMs);
+  const frameAgeSec = Number.isFinite(lastFrameAtMs) && lastFrameAtMs > 0
+    ? Math.max(0, (Date.now() - lastFrameAtMs) / 1000)
+    : null;
+  if (burstLoopChip) {
+    burstLoopChip.textContent = burstLoopActive ? "Loop: Active" : `Loop: ${burstPauseReasonLabel(st.burstLastLoopPauseReason)}`;
+    burstLoopChip.classList.toggle("active", burstLoopActive);
+  }
+  if (burstLoopReason) {
+    const parts = [];
+    if (burstMode && burstLoopActive) parts.push("Capturing GIF loop frames.");
+    if (burstMode && !burstLoopActive) parts.push(`Paused: ${burstPauseReasonLabel(st.burstLastLoopPauseReason)}.`);
+    if (Number.isFinite(frameAgeSec)) parts.push(`Last frame ${frameAgeSec.toFixed(1)}s ago.`);
+    burstLoopReason.textContent = parts.join(" ") || "Loop state updates while recording.";
   }
 
   document.getElementById("debounce").value = st.settings?.screenshotDebounceMs ?? 900;
@@ -95,9 +115,7 @@ async function refresh() {
   document.getElementById("prune-inputs").checked = !!st.settings?.pruneInputs;
   document.getElementById("page-watch").checked = !!st.settings?.pageWatchEnabled;
   document.getElementById("page-watch-ms").value = st.settings?.pageWatchMs ?? 500;
-  document.getElementById("gif-capture-fps").value = String(burstFps);
-  document.getElementById("gif-marker-color").value = normalizeHexColor(st.settings?.clickBurstMarkerColor, "#2563eb");
-  document.getElementById("gif-marker-style").value = normalizeMarkerStyle(st.settings?.clickBurstMarkerStyle);
+  document.getElementById("gif-capture-fps").value = String(configuredBurstFps);
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -177,14 +195,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("gif-capture-fps").addEventListener("change", async (e) => {
     await updateSettings({ hotkeyBurstFps: normalizeHotkeyBurstFps(e.target.value) });
-    await refresh();
-  });
-  document.getElementById("gif-marker-color").addEventListener("change", async (e) => {
-    await updateSettings({ clickBurstMarkerColor: normalizeHexColor(e.target.value, "#2563eb") });
-    await refresh();
-  });
-  document.getElementById("gif-marker-style").addEventListener("change", async (e) => {
-    await updateSettings({ clickBurstMarkerStyle: normalizeMarkerStyle(e.target.value) });
     await refresh();
   });
   await refresh();

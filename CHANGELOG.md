@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.12.0 - 2026-02-08
+
+### Changed
+- Hotkey GIF burst continuity now groups by burst run (`burstRunId`) instead of tab/page context, so route changes during one run no longer create false multiple recordings.
+- Removed popup GIF marker controls (color/style); hotkey GIF playback now runs marker-free without numbered click overlays.
+- Burst frame persistence now uses disk-backed spool references (`screenshotRef`) for hotkey synthetic frames instead of embedding base64 payloads in every event.
+- Export generation now resolves burst frame refs asynchronously so builder quick preview and full HTML export can render spool-backed bursts.
+- Raw ZIP bundle format bumped to v2 with `frame-manifest.json` and `frames/*` payloads (v1 import compatibility retained).
+
+### Added
+- `GET_STATE` diagnostics for GIF loop runtime:
+  - `burstLoopActive`
+  - `burstLastFrameAtMs`
+  - `burstLastLoopPauseReason`
+- Popup GIF section now shows loop activity and pause reason/last-frame observability for troubleshooting.
+- Triple-collector frame pipeline (capture -> process -> write) in IndexedDB (`uir-frame-spool-v1`) with bounded queue backpressure.
+- Session/report-aware frame reference sync + garbage collection for orphaned burst frames.
+
+### Fixed
+- Eliminated false burst segmentation on UI navigation while GIF mode remains ON.
+- Fixed playback speed mismatch by basing replay timing on measured burst source FPS (builder + exported HTML), so `1.0x` reflects recorded pace even when actual capture FPS is below target.
+- Reduced long-run memory pressure by moving burst frame bytes out of `browser.storage.local` and lazy-loading frame data in the report editor player.
+- Reduced spool-maintenance overhead with debounced report-ref sync/GC and removed avoidable O(n²) scans in frame-spool ref syncing and orphan pruning paths.
+
 ## v1.11.5 - 2026-02-08
 
 ### Added

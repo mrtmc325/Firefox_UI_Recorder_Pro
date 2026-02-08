@@ -25,7 +25,7 @@ function safeDataImageUrl(value) {
 }
 
 const RAW_BUNDLE_FORMAT = "uir-report-bundle";
-const RAW_BUNDLE_VERSION = 1;
+const RAW_BUNDLE_VERSION = 2;
 const REPORT_THEME_STORAGE_KEY = "__uiRecorderReportTheme";
 const DEFAULT_REPORT_TITLE = "Report title";
 const DEFAULT_REPORT_SUBTITLE = "Report short description";
@@ -46,8 +46,27 @@ const CLICK_BURST_DEFAULTS = Object.freeze({
   clickBurstPlaybackFps: 5,
   clickBurstPlaybackSpeed: 1
 });
+const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
 const CLICK_BURST_RENDER_MARKER_CAP = 10;
 const CLICK_BURST_MARKER_SCALE = 3;
+const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
+const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const FRAME_DATA_URL_CACHE_MAX = 40;
+
+const frameSpoolClient = (
+  typeof self !== "undefined" &&
+  self.UIRFrameSpool &&
+  typeof self.UIRFrameSpool.createService === "function"
+) ? self.UIRFrameSpool.createService({
+  captureQueueMax: 4,
+  processQueueMax: 8,
+  writeQueueMax: 12
+}) : null;
+let frameSpoolReadyPromise = null;
+const frameDataUrlCache = new Map();
+let frameSpoolGcTimer = null;
+let frameSpoolSyncTimer = null;
+let frameSpoolPendingReports = null;
 
 const EXPORT_THEME_PRESETS = Object.freeze({
   extension: Object.freeze({
@@ -268,6 +287,151 @@ function normalizeClickBurstSettings(raw) {
   };
 }
 
+function normalizeHotkeyBurstFpsForReport(value) {
+  const fps = Math.round(Number(value));
+  if (HOTKEY_BURST_FPS_OPTIONS.has(fps)) return fps;
+  return CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
+}
+
+function cloneScreenshotRef(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const frameId = String(raw.frameId || "").trim();
+  if (!frameId) return null;
+  return {
+    frameId,
+    sessionId: String(raw.sessionId || "").trim(),
+    mime: String(raw.mime || "image/png"),
+    createdAtMs: Number(raw.createdAtMs) || Date.now(),
+    width: Number(raw.width) || null,
+    height: Number(raw.height) || null
+  };
+}
+
+function collectScreenshotRefsFromEvents(events) {
+  const refs = new Map();
+  const source = Array.isArray(events) ? events : [];
+  source.forEach((ev) => {
+    if (!ev || typeof ev !== "object") return;
+    const ref = cloneScreenshotRef(ev.screenshotRef);
+    if (!ref) return;
+    refs.set(ref.frameId, ref);
+  });
+  return refs;
+}
+
+async function ensureFrameSpoolClientReady() {
+  if (!frameSpoolClient) return false;
+  if (!frameSpoolReadyPromise) {
+    frameSpoolReadyPromise = frameSpoolClient.init()
+      .then(() => true)
+      .catch(() => false);
+  }
+  return await frameSpoolReadyPromise;
+}
+
+function readFrameDataUrlCache(frameId) {
+  const key = String(frameId || "").trim();
+  if (!key || !frameDataUrlCache.has(key)) return "";
+  const value = frameDataUrlCache.get(key);
+  frameDataUrlCache.delete(key);
+  frameDataUrlCache.set(key, value);
+  return value;
+}
+
+function writeFrameDataUrlCache(frameId, dataUrl) {
+  const key = String(frameId || "").trim();
+  const val = String(dataUrl || "");
+  if (!key || !val) return;
+  if (frameDataUrlCache.has(key)) frameDataUrlCache.delete(key);
+  frameDataUrlCache.set(key, val);
+  while (frameDataUrlCache.size > FRAME_DATA_URL_CACHE_MAX) {
+    const oldestKey = frameDataUrlCache.keys().next().value;
+    frameDataUrlCache.delete(oldestKey);
+  }
+}
+
+async function resolveFrameDataUrlFromRef(ref) {
+  const normalized = cloneScreenshotRef(ref);
+  if (!normalized) return "";
+  const cached = readFrameDataUrlCache(normalized.frameId);
+  if (cached) return cached;
+  if (!(await ensureFrameSpoolClientReady())) return "";
+  try {
+    const dataUrl = String(await frameSpoolClient.getFrameDataUrl(normalized.frameId) || "");
+    if (dataUrl) writeFrameDataUrlCache(normalized.frameId, dataUrl);
+    return dataUrl;
+  } catch (_) {
+    return "";
+  }
+}
+
+async function syncFrameSpoolReportRefs(reports) {
+  if (!(await ensureFrameSpoolClientReady())) return null;
+  const list = Array.isArray(reports) ? reports : [];
+  const reportFrameMap = new Map();
+  list.forEach((report) => {
+    if (!report || typeof report !== "object") return;
+    const reportId = String(report.id || "").trim();
+    if (!reportId) return;
+    const frameIds = Array.from(collectScreenshotRefsFromEvents(report.events).keys());
+    reportFrameMap.set(reportId, frameIds);
+  });
+  return await frameSpoolClient.syncReportRefs(reportFrameMap);
+}
+
+function scheduleFrameSpoolGc(delayMs = 1200) {
+  if (!frameSpoolClient) return;
+  if (frameSpoolGcTimer) clearTimeout(frameSpoolGcTimer);
+  frameSpoolGcTimer = setTimeout(async () => {
+    frameSpoolGcTimer = null;
+    if (!(await ensureFrameSpoolClientReady())) return;
+    try {
+      await frameSpoolClient.gc({
+        maxBytes: FRAME_SPOOL_BYTE_CAP,
+        orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS
+      });
+    } catch (_) {}
+  }, Math.max(150, Number(delayMs) || 1200));
+}
+
+function scheduleFrameSpoolSync(reports, delayMs = 600) {
+  if (!frameSpoolClient) return;
+  frameSpoolPendingReports = Array.isArray(reports) ? reports : [];
+  if (frameSpoolSyncTimer) clearTimeout(frameSpoolSyncTimer);
+  frameSpoolSyncTimer = setTimeout(async () => {
+    frameSpoolSyncTimer = null;
+    const targetReports = frameSpoolPendingReports;
+    frameSpoolPendingReports = null;
+    try {
+      await syncFrameSpoolReportRefs(targetReports);
+      scheduleFrameSpoolGc(1200);
+    } catch (_) {}
+  }, Math.max(150, Number(delayMs) || 600));
+}
+
+function dataUrlToBytes(dataUrl) {
+  const s = String(dataUrl || "").trim();
+  const match = /^data:([^;,]+)(;base64)?,(.*)$/i.exec(s);
+  if (!match) return null;
+  const payload = match[3] || "";
+  if (!match[2]) return new TextEncoder().encode(decodeURIComponent(payload));
+  const decoded = atob(payload);
+  const out = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i++) out[i] = decoded.charCodeAt(i);
+  return out;
+}
+
+function bytesToDataUrl(bytes, mime) {
+  const safeMime = String(mime || "image/png").trim() || "image/png";
+  const chunkSize = 0x8000;
+  let binary = "";
+  const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  for (let i = 0; i < input.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, input.subarray(i, Math.min(input.length, i + chunkSize)));
+  }
+  return `data:${safeMime};base64,${btoa(binary)}`;
+}
+
 function encodeText(value) {
   return new TextEncoder().encode(String(value ?? ""));
 }
@@ -462,6 +626,12 @@ function normalizeImportedReport(rawReport) {
   imported.id = `rpt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   imported.createdAt = imported.createdAt || new Date().toISOString();
   imported.sessionId = imported.sessionId || null;
+  imported.events.forEach((ev) => {
+    if (!ev || typeof ev !== "object") return;
+    const ref = cloneScreenshotRef(ev.screenshotRef);
+    if (ref) ev.screenshotRef = ref;
+    else delete ev.screenshotRef;
+  });
   return imported;
 }
 
@@ -476,6 +646,70 @@ function mergeReports(baseReport, incomingReport) {
   if (!merged.brand.subtitle && incomingBrand.subtitle) merged.brand.subtitle = incomingBrand.subtitle;
   if (!merged.brand.logo && incomingBrand.logo) merged.brand.logo = incomingBrand.logo;
   return merged;
+}
+
+function normalizeFrameManifestEntries(rawEntries) {
+  if (!Array.isArray(rawEntries)) return [];
+  return rawEntries.map((entry) => {
+    if (!entry || typeof entry !== "object") return null;
+    const frameId = String(entry.frameId || "").trim();
+    if (!frameId) return null;
+    const file = String(entry.file || "").trim();
+    return {
+      frameId,
+      file,
+      sessionId: String(entry.sessionId || "").trim(),
+      mime: String(entry.mime || "image/png"),
+      createdAtMs: Number(entry.createdAtMs) || Date.now(),
+      width: Number(entry.width) || null,
+      height: Number(entry.height) || null
+    };
+  }).filter(Boolean);
+}
+
+async function restoreFramesFromBundle(archive, frameEntries, importedReport) {
+  const restored = new Map();
+  const fallbackDataUrls = new Map();
+  const canUseSpool = await ensureFrameSpoolClientReady();
+  const entries = normalizeFrameManifestEntries(frameEntries);
+  for (const entry of entries) {
+    const guessedPath = entry.file || `frames/${entry.frameId}.png`;
+    const bytes = archive.get(guessedPath);
+    if (!bytes || !bytes.length) continue;
+    if (canUseSpool) {
+      try {
+        await frameSpoolClient.putFrameFromBytes({
+          frameId: entry.frameId,
+          sessionId: entry.sessionId,
+          mime: entry.mime,
+          createdAtMs: entry.createdAtMs,
+          width: entry.width,
+          height: entry.height
+        }, bytes);
+        restored.set(entry.frameId, true);
+        continue;
+      } catch (_) {}
+    }
+    const dataUrl = bytesToDataUrl(bytes, entry.mime);
+    if (dataUrl) {
+      fallbackDataUrls.set(entry.frameId, dataUrl);
+      writeFrameDataUrlCache(entry.frameId, dataUrl);
+    }
+  }
+
+  const events = Array.isArray(importedReport && importedReport.events) ? importedReport.events : [];
+  events.forEach((ev) => {
+    if (!ev || typeof ev !== "object") return;
+    const ref = cloneScreenshotRef(ev.screenshotRef);
+    if (!ref) return;
+    if (fallbackDataUrls.has(ref.frameId) && !ev.screenshot) {
+      ev.screenshot = fallbackDataUrls.get(ref.frameId);
+    }
+  });
+  return {
+    restoredCount: restored.size,
+    fallbackCount: fallbackDataUrls.size
+  };
 }
 
 function looksAutoGenerated(s) {
@@ -536,6 +770,7 @@ function el(tag, cls, text) {
 
 async function saveReports(reports) {
   await browser.storage.local.set({ reports });
+  scheduleFrameSpoolSync(reports, 450);
 }
 
 function filterEvents(events, query, typeFilter, urlFilter) {
@@ -667,10 +902,17 @@ function buildHints(events) {
     typeCounts.set(tpe, (typeCounts.get(tpe) || 0) + 1);
     const host = hostFromUrl(ev && ev.url);
     if (host) hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
-    if (ev && ev.screenshot) screenshotCount++;
+    const hasShot = !!(
+      ev &&
+      (
+        !!ev.screenshot ||
+        (ev.screenshotRef && typeof ev.screenshotRef === "object" && !!ev.screenshotRef.frameId)
+      )
+    );
+    if (hasShot) screenshotCount++;
     if (!firstSubmitStepId && tpe === "submit" && ev && ev.stepId) firstSubmitStepId = ev.stepId;
     if (!firstNavStepId && tpe === "nav" && ev && ev.stepId) firstNavStepId = ev.stepId;
-    if (!firstNoShotStepId && ev && ev.stepId && !ev.screenshot) firstNoShotStepId = ev.stepId;
+    if (!firstNoShotStepId && ev && ev.stepId && !hasShot) firstNoShotStepId = ev.stepId;
 
     if (ev.type === "input" || ev.type === "change") {
       const t = cleanTitle(ev.label || ev.human || "");
@@ -850,10 +1092,12 @@ function frameFromEvent(ev, fallbackStepId) {
 
   const nx = Number.isFinite(markerX) ? Math.max(0, Math.min(1, markerX / viewportW)) : null;
   const ny = Number.isFinite(markerY) ? Math.max(0, Math.min(1, markerY / viewportH)) : null;
+  const screenshotRef = cloneScreenshotRef(ev && ev.screenshotRef);
   return {
     event: ev,
     stepId: (ev && ev.stepId) || fallbackStepId || "",
     screenshot: String(ev && ev.screenshot || ""),
+    screenshotRef,
     marker: (nx !== null && ny !== null) ? { x: nx, y: ny } : null,
     tsMs: eventTsMs(ev, Date.now()),
     kind: ev && ev.type ? String(ev.type) : "event"
@@ -862,6 +1106,7 @@ function frameFromEvent(ev, fallbackStepId) {
 
 function deriveClickBursts(events, rawSettings) {
   const settings = normalizeClickBurstSettings(rawSettings);
+  const targetFps = normalizeHotkeyBurstFpsForReport(rawSettings && rawSettings.hotkeyBurstFps);
   if (!Array.isArray(events) || !events.length) return [];
   if (!settings.clickBurstEnabled) return [];
 
@@ -877,17 +1122,38 @@ function deriveClickBursts(events, rawSettings) {
     if (activeBurst.frames.length >= 2) {
       const first = activeBurst.frames[0];
       const last = activeBurst.frames[activeBurst.frames.length - 1];
+      const frameCount = activeBurst.frames.length;
+      const startMs = first ? first.tsMs : activeBurst.startMs;
+      const endMs = last ? last.tsMs : activeBurst.lastMs;
+      const durationMs = Math.max(1, Number(endMs) - Number(startMs));
+      const sourceFps = Number(clampNumber(
+        ((frameCount - 1) * 1000) / durationMs,
+        0.25,
+        60,
+        CLICK_BURST_DEFAULTS.clickBurstPlaybackFps
+      ).toFixed(2));
+      const contextChips = [];
+      if (activeBurst.pageShiftCount > 0) {
+        contextChips.push(`${activeBurst.pageShiftCount} page shift${activeBurst.pageShiftCount === 1 ? "" : "s"}`);
+      }
+      if (activeBurst.tabShiftCount > 0) {
+        contextChips.push(`${activeBurst.tabShiftCount} tab shift${activeBurst.tabShiftCount === 1 ? "" : "s"}`);
+      }
       bursts.push({
         id: `burst-${++burstSeq}`,
         tabId: activeBurst.context.tabId,
         tabTitle: activeBurst.context.tabTitle,
         pageKey: activeBurst.context.pageKey,
         url: activeBurst.url || (first && first.event ? first.event.url : ""),
-        startMs: first ? first.tsMs : activeBurst.startMs,
-        endMs: last ? last.tsMs : activeBurst.lastMs,
+        startMs,
+        endMs,
         frames: activeBurst.frames.slice(0),
+        sourceFps,
+        targetFps: Number.isFinite(activeBurst.targetFps) ? activeBurst.targetFps : targetFps,
         hotkeyMode: !!activeBurst.hotkeyMode,
-        burstModeEpoch: Number.isFinite(activeBurst.burstModeEpoch) ? activeBurst.burstModeEpoch : null
+        burstModeEpoch: Number.isFinite(activeBurst.burstModeEpoch) ? activeBurst.burstModeEpoch : null,
+        burstRunId: Number.isFinite(activeBurst.burstRunId) ? activeBurst.burstRunId : null,
+        contextChips
       });
     }
     activeBurst = null;
@@ -898,32 +1164,59 @@ function deriveClickBursts(events, rawSettings) {
     return Number.isFinite(parsed) ? parsed : null;
   };
 
+  const candidateRunId = (ev) => {
+    const parsed = Number(ev && ev.burstRunId);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const candidateRunKey = (ev) => {
+    const runId = candidateRunId(ev);
+    if (Number.isFinite(runId)) return `run:${runId}`;
+    const epoch = candidateEpoch(ev);
+    if (Number.isFinite(epoch)) return `epoch:${epoch}`;
+    return null;
+  };
+
+  const candidateTargetFps = (ev) => {
+    const parsed = Number(ev && ev.burstTargetFps);
+    if (!Number.isFinite(parsed)) return null;
+    return normalizeHotkeyBurstFpsForReport(parsed);
+  };
+
   const startHotkeyBurst = (candidate) => {
     activeBurst = {
       context: candidate.context,
+      lastContext: candidate.context,
       url: candidate.url,
       startMs: candidate.tsMs,
       lastMs: candidate.tsMs,
       frames: [candidate.frame],
       hotkeyMode: true,
-      burstModeEpoch: candidate.burstModeEpoch
+      burstModeEpoch: candidate.burstModeEpoch,
+      burstRunId: candidate.burstRunId,
+      runKey: candidate.runKey,
+      targetFps: Number.isFinite(candidate.targetFps) ? candidate.targetFps : targetFps,
+      pageShiftCount: 0,
+      tabShiftCount: 0
     };
   };
 
   const canAppendToActive = (candidate) => {
     if (!activeBurst) return false;
-    return (
-      !!candidate.hotkeyMode &&
-      activeBurst.burstModeEpoch === candidate.burstModeEpoch &&
-      sameClickBurstContext(activeBurst.context, candidate.context)
-    );
+    if (!candidate.hotkeyMode) return false;
+    if (activeBurst.runKey && candidate.runKey) return activeBurst.runKey === candidate.runKey;
+    if (activeBurst.burstModeEpoch === null && candidate.burstModeEpoch === null) {
+      // Legacy fallback for very old reports missing run/epoch: keep context-based grouping.
+      return sameClickBurstContext(activeBurst.context, candidate.context);
+    }
+    return activeBurst.burstModeEpoch === candidate.burstModeEpoch;
   };
 
   events.forEach((ev, index) => {
-    if (!ev || !ev.burstHotkeyMode || !ev.screenshot) return;
+    if (!ev || !ev.burstHotkeyMode || (!ev.screenshot && !ev.screenshotRef)) return;
     const fallbackStepId = `step-${index + 1}`;
     const frame = frameFromEvent(ev, fallbackStepId);
-    if (!frame.screenshot) return;
+    if (!frame.screenshot && !frame.screenshotRef) return;
     const context = clickBurstContext(ev);
     const candidate = {
       frame,
@@ -931,13 +1224,36 @@ function deriveClickBursts(events, rawSettings) {
       tsMs: frame.tsMs,
       url: String(ev && ev.url || ""),
       hotkeyMode: !!(ev && ev.burstHotkeyMode),
-      burstModeEpoch: candidateEpoch(ev)
+      burstModeEpoch: candidateEpoch(ev),
+      burstRunId: candidateRunId(ev),
+      runKey: candidateRunKey(ev),
+      targetFps: candidateTargetFps(ev)
     };
 
     if (activeBurst) {
       if (canAppendToActive(candidate)) {
+        if (!sameClickBurstContext(activeBurst.lastContext, candidate.context)) {
+          if (
+            activeBurst.lastContext &&
+            candidate.context &&
+            activeBurst.lastContext.tabId !== candidate.context.tabId
+          ) {
+            activeBurst.tabShiftCount += 1;
+          }
+          if (
+            activeBurst.lastContext &&
+            candidate.context &&
+            activeBurst.lastContext.pageKey !== candidate.context.pageKey
+          ) {
+            activeBurst.pageShiftCount += 1;
+          }
+        }
         activeBurst.frames.push(candidate.frame);
+        if (Number.isFinite(candidate.targetFps)) {
+          activeBurst.targetFps = candidate.targetFps;
+        }
         activeBurst.lastMs = candidate.tsMs;
+        activeBurst.lastContext = candidate.context;
         return;
       }
       finalizeActive();
@@ -1078,8 +1394,12 @@ function drawBurstMarker(ctx, x, y, markerIndex, markerColor, markerStyle) {
 }
 
 function createClickBurstPlayer(card, burst, options) {
-  const fps = CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
-  const baseFrameDurationMs = Math.max(16, Math.round(1000 / fps));
+  const sourceFpsRaw = Number(burst && burst.sourceFps);
+  const sourceFps = Number.isFinite(sourceFpsRaw)
+    ? Number(clampNumber(sourceFpsRaw, 0.25, 60, CLICK_BURST_DEFAULTS.clickBurstPlaybackFps).toFixed(2))
+    : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
+  const baseFrameDurationMs = Math.max(16, Math.round(1000 / sourceFps));
+  const showMarkers = !!(options && options.showMarkers);
   const markerColor = normalizeHexColor(
     options && options.markerColor,
     CLICK_BURST_DEFAULTS.clickBurstMarkerColor
@@ -1143,9 +1463,11 @@ function createClickBurstPlayer(card, burst, options) {
   const frames = (burst && Array.isArray(burst.frames) ? burst.frames : [])
     .map((frame) => {
       const src = String(frame && frame.screenshot || "").trim();
-      if (!src) return null;
+      const ref = cloneScreenshotRef(frame && frame.screenshotRef);
+      if (!src && !ref) return null;
       return {
         src,
+        ref,
         marker: frame && frame.marker ? frame.marker : null,
         stepId: frame && frame.stepId ? String(frame.stepId) : "",
         img: null,
@@ -1214,23 +1536,43 @@ function createClickBurstPlayer(card, burst, options) {
     if (frame.pending) return frame.pending;
 
     frame.pending = new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        frame.pending = null;
-        if (destroyed) {
-          img.src = "";
+      const loadFromSrc = (src) => {
+        if (!src) {
+          frame.pending = null;
+          frame.failed = true;
           resolve(null);
           return;
         }
-        frame.img = img;
-        resolve(frame);
+        frame.src = src;
+        const img = new Image();
+        img.onload = () => {
+          frame.pending = null;
+          if (destroyed) {
+            img.src = "";
+            resolve(null);
+            return;
+          }
+          frame.img = img;
+          resolve(frame);
+        };
+        img.onerror = () => {
+          frame.pending = null;
+          frame.failed = true;
+          resolve(null);
+        };
+        img.src = src;
       };
-      img.onerror = () => {
-        frame.pending = null;
-        frame.failed = true;
-        resolve(null);
-      };
-      img.src = frame.src;
+
+      if (!frame.src && frame.ref) {
+        resolveFrameDataUrlFromRef(frame.ref).then((resolved) => {
+          loadFromSrc(resolved);
+        }).catch(() => {
+          loadFromSrc("");
+        });
+        return;
+      }
+
+      loadFromSrc(frame.src);
     });
     return frame.pending;
   };
@@ -1277,13 +1619,15 @@ function createClickBurstPlayer(card, burst, options) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(frame.img, 0, 0, canvas.width, canvas.height);
 
-    const markerLimit = Math.min(CLICK_BURST_RENDER_MARKER_CAP, index + 1);
-    for (let i = 0; i < markerLimit; i++) {
-      const point = frames[i] && frames[i].marker ? frames[i].marker : null;
-      if (!point) continue;
-      const x = Math.round(point.x * canvas.width);
-      const y = Math.round(point.y * canvas.height);
-      drawBurstMarker(ctx, x, y, i + 1, markerColor, markerStyle);
+    if (showMarkers) {
+      const markerLimit = Math.min(CLICK_BURST_RENDER_MARKER_CAP, index + 1);
+      for (let i = 0; i < markerLimit; i++) {
+        const point = frames[i] && frames[i].marker ? frames[i].marker : null;
+        if (!point) continue;
+        const x = Math.round(point.x * canvas.width);
+        const y = Math.round(point.y * canvas.height);
+        drawBurstMarker(ctx, x, y, i + 1, markerColor, markerStyle);
+      }
     }
 
     progress.textContent = `Frame ${index + 1}/${frames.length}`;
@@ -1425,9 +1769,25 @@ function renderClickBursts(target, bursts, options) {
     const endLabel = formatExportTimestamp(new Date(burst.endMs || Date.now()).toISOString());
     const meta = `${burst.frames.length} interactions • ${startLabel} → ${endLabel}`;
     head.appendChild(el("div", "click-burst-meta", meta));
+    const sourceFps = Number.isFinite(Number(burst && burst.sourceFps))
+      ? Number(burst.sourceFps).toFixed(2)
+      : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps.toFixed(2);
+    const targetFps = Number.isFinite(Number(burst && burst.targetFps))
+      ? Math.round(Number(burst.targetFps))
+      : null;
+    const fpsNote = targetFps
+      ? `Source: ${sourceFps} FPS • Target: ${targetFps} FPS`
+      : `Source: ${sourceFps} FPS`;
+    head.appendChild(el("div", "click-burst-fps-note", fpsNote));
+    if (Array.isArray(burst.contextChips) && burst.contextChips.length) {
+      const chipRow = el("div", "click-burst-chips");
+      burst.contextChips.forEach((chip) => chipRow.appendChild(el("span", "chip", String(chip))));
+      head.appendChild(chipRow);
+    }
     card.appendChild(head);
 
     const player = createClickBurstPlayer(card, burst, {
+      showMarkers: !burst.hotkeyMode,
       markerColor: options && options.markerColor,
       markerStyle: options && options.markerStyle,
       speedMultiplier: options && options.speedMultiplier,
@@ -1612,7 +1972,14 @@ function renderTimeline(target, events, options) {
         const actions = el("div", "timeline-event-actions");
         if (onDraw) {
           const drawBtn = el("button", "btn timeline-mini-btn", "Draw");
-          drawBtn.disabled = !(stepId && ev && ev.screenshot);
+          drawBtn.disabled = !(
+            stepId &&
+            ev &&
+            (
+              !!ev.screenshot ||
+              (ev.screenshotRef && typeof ev.screenshotRef === "object" && !!ev.screenshotRef.frameId)
+            )
+          );
           drawBtn.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -2164,6 +2531,14 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
 
 function buildExportHtml(report, options = {}) {
   const opts = isPlainObject(options) ? options : {};
+  const frameDataUrls = isPlainObject(opts.frameDataUrls) ? opts.frameDataUrls : {};
+  const resolveScreenshotForEvent = (ev) => {
+    const inline = safeDataImageUrl(ev && ev.screenshot || "");
+    if (inline) return inline;
+    const ref = cloneScreenshotRef(ev && ev.screenshotRef);
+    if (!ref) return "";
+    return safeDataImageUrl(frameDataUrls[ref.frameId] || "");
+  };
   const isQuickPreview = !!opts.quickPreview;
   const brand = report.brand || {};
   const title = escapeHtml(brand.title || DEFAULT_REPORT_TITLE);
@@ -2213,13 +2588,30 @@ function buildExportHtml(report, options = {}) {
   const burstData = derivedBursts.map((burst) => {
     const startIso = new Date(burst.startMs || Date.now()).toISOString();
     const endIso = new Date(burst.endMs || Date.now()).toISOString();
+    const contextChips = Array.isArray(burst.contextChips)
+      ? burst.contextChips.map((chip) => String(chip || "").trim()).filter(Boolean)
+      : [];
     return {
       id: burst.id,
       title: burst.tabTitle || burst.pageKey || "Click burst",
-      meta: `${burst.frames.length} interactions • ${formatExportTimestamp(startIso)} → ${formatExportTimestamp(endIso)}`,
+      meta: `${burst.frames.length} interactions • ${formatExportTimestamp(startIso)} → ${formatExportTimestamp(endIso)}${contextChips.length ? ` • ${contextChips.join(" • ")}` : ""}`,
+      sourceFps: Number.isFinite(Number(burst.sourceFps)) ? Number(burst.sourceFps) : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps,
+      targetFps: Number.isFinite(Number(burst.targetFps)) ? Math.round(Number(burst.targetFps)) : null,
+      contextChips,
+      showMarkers: !burst.hotkeyMode,
       frames: (burst.frames || []).map((frame) => ({
         stepId: frame.stepId || "",
-        screenshot: safeDataImageUrl(frame.screenshot || ""),
+        screenshot: safeDataImageUrl(
+          frame.screenshot ||
+          (
+            frame &&
+            frame.screenshotRef &&
+            frame.screenshotRef.frameId &&
+            frameDataUrls[frame.screenshotRef.frameId]
+          ) ||
+          ""
+        ),
+        screenshotRef: cloneScreenshotRef(frame && frame.screenshotRef),
         marker: frame.marker && Number.isFinite(frame.marker.x) && Number.isFinite(frame.marker.y)
           ? { x: frame.marker.x, y: frame.marker.y }
           : null
@@ -2246,9 +2638,9 @@ function buildExportHtml(report, options = {}) {
     const metaUrlLabel = escapeHtml(parsedUrl.genericLabel || parsedUrl.shortLabel || "Open page");
     const metaUrlTitle = escapeHtml(parsedUrl.fullLabel || parsedUrl.raw || "");
     const metaUrlHref = escapeHtml(parsedUrl.safeHref || "");
-    const screenshot = safeDataImageUrl(ev.screenshot || "");
+    const screenshot = resolveScreenshotForEvent(ev);
     const annotation = safeDataImageUrl(ev.annotation || "");
-    const img = screenshot ? `<div class="shot"><img src="${screenshot}" alt="Step screenshot"></div>` : "";
+    const img = screenshot ? `<div class="shot"><img id="step-shot-${i + 1}" src="${screenshot}" alt="Step screenshot"></div>` : "";
     const ann = screenshot && annotation ? `<img class="annot" src="${annotation}" alt="Step annotation">` : "";
     const wrap = screenshot ? `<div class="shot-wrap">${img}${ann}</div>` : "";
     const urlChip = metaUrlHref
@@ -2475,6 +2867,27 @@ body{
 }
 .click-burst-export-title{font-size:12px;font-weight:700;margin-bottom:2px}
 .click-burst-export-meta{font-size:10px;color:var(--muted);margin-bottom:6px}
+.click-burst-export-fps-note{
+  font-size:10px;
+  color:var(--muted);
+  margin-bottom:6px;
+}
+.click-burst-export-chips{
+  display:flex;
+  flex-wrap:wrap;
+  gap:4px;
+  margin-bottom:6px;
+}
+.click-burst-export-chip{
+  display:inline-flex;
+  align-items:center;
+  border:1px solid var(--edge);
+  border-radius:999px;
+  font-size:9.5px;
+  padding:2px 7px;
+  background:var(--paper);
+  color:var(--muted);
+}
 .click-burst-export-canvas{
   width:100%;
   border:1px solid var(--edge);
@@ -2544,11 +2957,9 @@ ${rows}
   var markerStyleRaw = String((payload && payload.markerStyle) || "${CLICK_BURST_DEFAULTS.clickBurstMarkerStyle}").toLowerCase();
   var markerStyle = (markerStyleRaw === "tech-mono" || markerStyleRaw === "outline-heavy") ? markerStyleRaw : "rounded-bold";
   var autoPlay = ${CLICK_BURST_DEFAULTS.clickBurstAutoPlay ? "true" : "false"};
-  var fps = ${CLICK_BURST_DEFAULTS.clickBurstPlaybackFps};
   var speedRaw = Number(payload && payload.playbackSpeed);
   var defaultSpeedMultiplier = Number.isFinite(speedRaw) ? Math.max(0.25, Math.min(3, speedRaw)) : ${CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed};
   var markerCap = ${CLICK_BURST_RENDER_MARKER_CAP};
-  var baseFrameDurationMs = Math.max(16, Math.round(1000 / fps));
   var markerScale = ${CLICK_BURST_MARKER_SCALE};
 
   function hexToRgba(hex, alpha) {
@@ -2614,6 +3025,30 @@ ${rows}
     meta.className = "click-burst-export-meta";
     meta.textContent = burst && burst.meta ? burst.meta : "";
     card.appendChild(meta);
+    var sourceFpsRaw = Number(burst && burst.sourceFps);
+    var sourceFps = Number.isFinite(sourceFpsRaw) ? Math.max(0.25, Math.min(60, sourceFpsRaw)) : ${CLICK_BURST_DEFAULTS.clickBurstPlaybackFps};
+    var targetFpsRaw = Number(burst && burst.targetFps);
+    var targetFps = Number.isFinite(targetFpsRaw) ? Math.max(1, Math.round(targetFpsRaw)) : null;
+    var fpsNote = document.createElement("div");
+    fpsNote.className = "click-burst-export-fps-note";
+    fpsNote.textContent = targetFps
+      ? ("Source: " + sourceFps.toFixed(2) + " FPS • Target: " + targetFps + " FPS")
+      : ("Source: " + sourceFps.toFixed(2) + " FPS");
+    card.appendChild(fpsNote);
+    var chips = Array.isArray(burst && burst.contextChips) ? burst.contextChips : [];
+    if (chips.length) {
+      var chipsRow = document.createElement("div");
+      chipsRow.className = "click-burst-export-chips";
+      chips.forEach(function (chip) {
+        var text = String(chip || "").trim();
+        if (!text) return;
+        var node = document.createElement("span");
+        node.className = "click-burst-export-chip";
+        node.textContent = text;
+        chipsRow.appendChild(node);
+      });
+      if (chipsRow.children.length) card.appendChild(chipsRow);
+    }
 
     var canvas = document.createElement("canvas");
     canvas.className = "click-burst-export-canvas";
@@ -2698,11 +3133,14 @@ ${rows}
         }
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(frame.img, 0, 0, canvas.width, canvas.height);
-        var limit = Math.min(markerCap, i + 1);
-        for (var m = 0; m < limit; m++) {
-          var point = loaded[m] && loaded[m].marker ? loaded[m].marker : null;
-          if (!point) continue;
-          drawMarker(ctx, Math.round(point.x * canvas.width), Math.round(point.y * canvas.height), m + 1);
+        var showMarkers = !burst || burst.showMarkers !== false;
+        if (showMarkers) {
+          var limit = Math.min(markerCap, i + 1);
+          for (var m = 0; m < limit; m++) {
+            var point = loaded[m] && loaded[m].marker ? loaded[m].marker : null;
+            if (!point) continue;
+            drawMarker(ctx, Math.round(point.x * canvas.width), Math.round(point.y * canvas.height), m + 1);
+          }
         }
         progress.textContent = "Frame " + (i + 1) + "/" + loaded.length;
       }
@@ -2717,6 +3155,7 @@ ${rows}
       function startLoop() {
         stopLoop();
         if (!isPlaying || loaded.length < 2) return;
+        var baseFrameDurationMs = Math.max(16, Math.round(1000 / sourceFps));
         var frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / speedMultiplier));
         timer = setInterval(function () {
           frameIndex += 1;
@@ -2751,6 +3190,21 @@ ${rows}
 })();
 </script>
 </body></html>`;
+}
+
+async function buildExportHtmlAsync(report, options = {}) {
+  const opts = isPlainObject(options) ? { ...options } : {};
+  const frameDataUrls = isPlainObject(opts.frameDataUrls) ? { ...opts.frameDataUrls } : {};
+  const refs = collectScreenshotRefsFromEvents(report && report.events);
+  if (refs.size) {
+    for (const [frameId, ref] of refs.entries()) {
+      if (frameDataUrls[frameId]) continue;
+      const dataUrl = await resolveFrameDataUrlFromRef(ref);
+      if (!dataUrl) continue;
+      frameDataUrls[frameId] = dataUrl;
+    }
+  }
+  return buildExportHtml(report, { ...opts, frameDataUrls });
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -2799,6 +3253,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const burstPlaybackSpeed = document.getElementById("burst-playback-speed");
   const burstPlaybackSpeedValue = document.getElementById("burst-playback-speed-value");
   const exportThemeReset = document.getElementById("export-theme-reset");
+  const exportPreviewCount = document.getElementById("export-preview-count");
   const tocCount = document.getElementById("toc-count");
   const hintsCount = document.getElementById("hints-count");
   const timelineCount = document.getElementById("timeline-count");
@@ -3050,6 +3505,43 @@ document.addEventListener("DOMContentLoaded", async () => {
       visibleEvents.map((ev) => `${ev && ev.tabId !== undefined ? ev.tabId : "none"}|${ev && ev.tabTitle ? ev.tabTitle : ""}`)
     );
     if (tocCount) tocCount.textContent = `${stepCount} step${stepCount === 1 ? "" : "s"}`;
+    if (exportPreviewCount) {
+      if (!visibleBursts.length) {
+        exportPreviewCount.textContent = "";
+        exportPreviewCount.removeAttribute("title");
+      } else {
+        const sourceFpsValues = visibleBursts
+          .map((burst) => Number(burst && burst.sourceFps))
+          .filter((fps) => Number.isFinite(fps));
+        const targetFpsValues = Array.from(new Set(
+          visibleBursts
+            .map((burst) => Number(burst && burst.targetFps))
+            .filter((fps) => Number.isFinite(fps))
+            .map((fps) => Math.round(fps))
+        )).sort((a, b) => a - b);
+        const sourceAvg = sourceFpsValues.length
+          ? (sourceFpsValues.reduce((sum, fps) => sum + fps, 0) / sourceFpsValues.length)
+          : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
+        const sourceMin = sourceFpsValues.length
+          ? Math.min(...sourceFpsValues)
+          : sourceAvg;
+        const sourceMax = sourceFpsValues.length
+          ? Math.max(...sourceFpsValues)
+          : sourceAvg;
+        const sourceLabel = `Src ${sourceAvg.toFixed(2)} FPS`;
+        let targetLabel = "";
+        if (targetFpsValues.length === 1) {
+          targetLabel = `Tgt ${targetFpsValues[0]} FPS`;
+        } else if (targetFpsValues.length > 1) {
+          targetLabel = "Tgt mixed";
+        }
+        exportPreviewCount.textContent = targetLabel ? `${sourceLabel} • ${targetLabel}` : sourceLabel;
+        exportPreviewCount.setAttribute(
+          "title",
+          `Measured burst FPS range ${sourceMin.toFixed(2)}–${sourceMax.toFixed(2)} across ${visibleBursts.length} burst${visibleBursts.length === 1 ? "" : "s"}.`
+        );
+      }
+    }
     if (hintsCount) hintsCount.textContent = `${stepCount} visible`;
     if (timelineCount) timelineCount.textContent = `${tabKeys.size} tab${tabKeys.size === 1 ? "" : "s"}`;
     if (stepsCount) stepsCount.textContent = `${stepCount} step${stepCount === 1 ? "" : "s"}`;
@@ -3342,7 +3834,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     inlinePreviewHtmlCache = "";
   }
 
-  function renderInlineQuickPreview(showPanel) {
+  async function renderInlineQuickPreview(showPanel) {
     if (!hasReport) {
       setImportStatus("No report available to preview.", true);
       return false;
@@ -3356,7 +3848,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       setImportStatus("No steps available for quick preview.", true);
       return false;
     }
-    const html = buildExportHtml(preview.report, {
+    const html = await buildExportHtmlAsync(preview.report, {
       quickPreview: true,
       sourceStepCount: preview.sourceStepCount
     });
@@ -3375,7 +3867,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (previewRefreshTimer) clearTimeout(previewRefreshTimer);
     previewRefreshTimer = setTimeout(() => {
       previewRefreshTimer = null;
-      renderInlineQuickPreview(false);
+      renderInlineQuickPreview(false).catch(() => {});
     }, 140);
   }
 
@@ -3542,10 +4034,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
       actions.appendChild(deleteStep);
 
-      if (ev.screenshot) {
+      const screenshotRef = cloneScreenshotRef(ev.screenshotRef);
+      const hasScreenshotAsset = !!ev.screenshot || !!screenshotRef;
+      if (hasScreenshotAsset) {
         const removeShot = el("button", "btn", "Remove screenshot");
         removeShot.addEventListener("click", async () => {
           ev.screenshot = null;
+          ev.screenshotRef = null;
           ev.screenshotSkipped = true;
           ev.screenshotSkipReason = "removed";
           await saveReports(reports);
@@ -3566,11 +4061,25 @@ document.addEventListener("DOMContentLoaded", async () => {
         wrap.appendChild(note);
       }
 
-      if (ev.screenshot) {
+      if (hasScreenshotAsset) {
         const shotWrap = el("div", "shot-wrap");
         const img = document.createElement("img");
         img.className = "step-img";
-        img.src = ev.screenshot;
+        img.alt = "Step screenshot";
+        const inlineScreenshot = safeDataImageUrl(ev.screenshot || "");
+        if (inlineScreenshot) {
+          img.src = inlineScreenshot;
+        } else if (screenshotRef) {
+          img.alt = "Loading screenshot…";
+          resolveFrameDataUrlFromRef(screenshotRef).then((resolvedSrc) => {
+            if (!resolvedSrc) {
+              wrap.appendChild(el("div", "step-note", "Screenshot frame unavailable in local spool."));
+              return;
+            }
+            img.src = resolvedSrc;
+            img.alt = "Step screenshot";
+          });
+        }
         shotWrap.appendChild(img);
 
         const tools = el("div", "annot-tools noprint");
@@ -3639,6 +4148,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             mergedCanvas.height = 1;
             if (!mergedDataUrl) return;
             ev.screenshot = mergedDataUrl;
+            ev.screenshotRef = null;
             ev.annotation = "";
             img.src = mergedDataUrl;
             saveReports(reports).catch(() => {});
@@ -3904,6 +4414,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const archive = parseStoredZip(await file.arrayBuffer());
     const manifestBytes = archive.get("manifest.json");
     const reportBytes = archive.get("report.json");
+    const frameManifestBytes = archive.get("frame-manifest.json");
     if (!manifestBytes || !reportBytes) {
       throw new Error("ZIP must include manifest.json and report.json.");
     }
@@ -3929,6 +4440,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       reportPayload = reportPayload.report;
     }
     const importedReport = normalizeImportedReport(reportPayload);
+    if (frameManifestBytes) {
+      try {
+        const parsedFrameManifest = JSON.parse(decodeText(frameManifestBytes));
+        const frameEntries = Array.isArray(parsedFrameManifest && parsedFrameManifest.frames)
+          ? parsedFrameManifest.frames
+          : Array.isArray(parsedFrameManifest)
+            ? parsedFrameManifest
+            : [];
+        await restoreFramesFromBundle(archive, frameEntries, importedReport);
+      } catch (_) {
+        throw new Error("frame-manifest.json is invalid.");
+      }
+    }
 
     if (mode === "merge" && hasReport) {
       const merged = mergeReports(report, importedReport);
@@ -3956,7 +4480,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         setImportStatus("No report available to export.", true);
         return;
       }
-      const html = buildExportHtml(report);
+      const html = await buildExportHtmlAsync(report);
       const blob = new Blob([html], { type: "text/html" });
       const filename = `ui-report-${new Date().toISOString().replace(/[:.]/g, "-")}.html`;
       await downloadBlob(blob, filename);
@@ -3965,16 +4489,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   if (quickPreviewBtn) {
-    quickPreviewBtn.addEventListener("click", () => {
-      if (renderInlineQuickPreview(true)) {
+    quickPreviewBtn.addEventListener("click", async () => {
+      if (await renderInlineQuickPreview(true)) {
         setImportStatus("Rendered inline quick preview (first-step snapshot).", false);
       }
     });
   }
 
   if (exportPreviewRefresh) {
-    exportPreviewRefresh.addEventListener("click", () => {
-      if (renderInlineQuickPreview(true)) {
+    exportPreviewRefresh.addEventListener("click", async () => {
+      if (await renderInlineQuickPreview(true)) {
         setImportStatus("Refreshed inline quick preview.", false);
       }
     });
@@ -3998,7 +4522,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         inlinePreviewHtmlCache = "";
       }
       if (exportPreviewPanel.open) {
-        renderInlineQuickPreview(false);
+        renderInlineQuickPreview(false).catch(() => {});
       }
     });
   }
@@ -4034,20 +4558,60 @@ document.addEventListener("DOMContentLoaded", async () => {
           if (ev && typeof ev === "object") delete ev.stepId;
         });
       }
+      const frameRefs = collectScreenshotRefsFromEvents(payload.report.events);
+      const frameManifest = [];
+      const frameEntries = [];
+      for (const [frameId, ref] of frameRefs.entries()) {
+        let dataUrl = "";
+        const inline = payload.report.events.find((ev) => ev && ev.screenshotRef && ev.screenshotRef.frameId === frameId && ev.screenshot);
+        if (inline && inline.screenshot) {
+          dataUrl = String(inline.screenshot);
+        } else {
+          dataUrl = await resolveFrameDataUrlFromRef(ref);
+        }
+        if (!dataUrl) continue;
+        const bytes = dataUrlToBytes(dataUrl);
+        if (!bytes || !bytes.length) continue;
+        const mime = String(ref.mime || "image/png");
+        const ext = mime.toLowerCase().includes("jpeg") ? "jpg" : "png";
+        const filePath = `frames/${frameId}.${ext}`;
+        frameManifest.push({
+          frameId,
+          file: filePath,
+          sessionId: ref.sessionId || payload.report.sessionId || null,
+          mime,
+          createdAtMs: Number(ref.createdAtMs) || Date.now(),
+          width: Number(ref.width) || null,
+          height: Number(ref.height) || null,
+          byteLength: bytes.length
+        });
+        frameEntries.push({ name: filePath, data: bytes, updatedAt: exportedAt });
+      }
       const readme = [
         "UI Recorder Pro raw bundle",
         "",
         "Files:",
         "- manifest.json : bundle format and version metadata",
         "- report.json   : full editable report payload",
+        "- frame-manifest.json : frame reference metadata (bundle v2)",
+        "- frames/*.png  : burst frame images referenced by screenshotRef",
         "",
         "Re-import this ZIP in the report editor to continue editing."
       ].join("\n");
-      const zipBytes = buildStoredZip([
+      const zipEntries = [
         { name: "manifest.json", data: encodeText(JSON.stringify(manifest, null, 2)), updatedAt: exportedAt },
         { name: "report.json", data: encodeText(JSON.stringify(payload, null, 2)), updatedAt: exportedAt },
         { name: "README.txt", data: encodeText(readme), updatedAt: exportedAt }
-      ]);
+      ];
+      if (frameManifest.length) {
+        zipEntries.push({
+          name: "frame-manifest.json",
+          data: encodeText(JSON.stringify({ frames: frameManifest }, null, 2)),
+          updatedAt: exportedAt
+        });
+        zipEntries.push(...frameEntries);
+      }
+      const zipBytes = buildStoredZip(zipEntries);
       const filename = `ui-report-raw-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
       await downloadBlob(new Blob([zipBytes], { type: "application/zip" }), filename);
       setImportStatus(`Exported raw ZIP bundle: ${filename}`, false);
@@ -4076,6 +4640,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   window.addEventListener("beforeunload", () => {
+    if (frameSpoolSyncTimer) {
+      clearTimeout(frameSpoolSyncTimer);
+      frameSpoolSyncTimer = null;
+      frameSpoolPendingReports = null;
+    }
+    if (frameSpoolGcTimer) {
+      clearTimeout(frameSpoolGcTimer);
+      frameSpoolGcTimer = null;
+    }
     destroyBurstPlayers();
     if (activeAnnotationTeardown) {
       try { activeAnnotationTeardown("beforeunload"); } catch (_) {}

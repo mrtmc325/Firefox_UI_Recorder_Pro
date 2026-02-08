@@ -8,14 +8,19 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.11.5. This release adds hotkey stop grace handling, condenses synthetic pre-burst placeholders, and keeps GIF capture hotkey-only with tunable 5/10/15 FPS capture.</p>
+    <p>Version 1.12.0. This release adds spool-backed burst frame storage, continuous hotkey GIF runs across UI navigation, measured-FPS playback, and loop diagnostics.</p>
 
-    <h2>Version Notes (v1.11.5)</h2>
+    <h2>Version Notes (v1.12.0)</h2>
     <ul>
+      <li>Burst frame storage now uses a disk-backed triple-collector spool pipeline (IndexedDB) so long sessions avoid local-storage screenshot bloat.</li>
+      <li>Hotkey burst capture now writes lightweight <code>screenshotRef</code> metadata into events; frame bytes are lazy-loaded on demand in builder/export.</li>
       <li>Hotkey stop now uses a 2000ms grace window so final GIF burst frames can be captured before recording fully ends.</li>
       <li>Pressing the record hotkey again during the stop grace window performs an immediate stop.</li>
       <li>Synthetic pre-burst source rows are now condensed from visible step lists; replay cards remain inline in chronological flow.</li>
+      <li>Hotkey GIF burst continuity now stays in one run across route/page navigation and only splits on GIF toggle boundaries or recording end.</li>
+      <li>Popup now exposes live GIF loop diagnostics: active/inactive state, last frame timestamp, and pause reason.</li>
       <li>Documentation wording now matches live behavior for hotkey burst split boundaries (epoch/toggle-based), with selectable capture cadence (5/10/15 FPS) and tunable replay speed.</li>
+      <li>Raw ZIP export/import now supports bundle v2 with <code>frame-manifest.json</code> + <code>frames/*</code> for full burst replay fidelity across re-import.</li>
       <li>Report builder step actions now use a precomputed event-position map to reduce per-render lookup overhead on larger reports.</li>
       <li>Default debug logging is now disabled in background/content/popup scripts for lower long-session console noise and overhead.</li>
       <li>Burst replay cards now auto-pause when offscreen and resume when visible.</li>
@@ -23,16 +28,16 @@
       <li>Inline quick preview now unloads iframe content on collapse to avoid hidden memory growth.</li>
       <li>Fast click replay (GIF-style canvas loop) added with per-burst Play/Pause controls.</li>
       <li>Burst replay speed is configurable in the report builder and exported HTML uses the same selected speed.</li>
-      <li>Burst click markers are now 3x larger for visibility, with popup controls for marker color and 3 marker-number styles.</li>
+      <li>Hotkey GIF playback is marker-free (no numbered click overlays), with replay speed controls in builder/export.</li>
       <li>Click burst replay cards are embedded inline with workflow steps (time-ordered), not grouped into a separate top section.</li>
       <li>Exported HTML includes inline click burst replay cards that loop and can be paused.</li>
       <li>Recorder now attempts an automatic screenshot-backed lifecycle step on both <strong>Start</strong> and <strong>Stop</strong>.</li>
       <li>Normal mode keeps click screenshots only when click causes detectable UI update (unless force-screenshot is set).</li>
       <li>Hotkey GIF burst mode is unconditional for workflow-driving events and bypasses click UI probe delay, diff dedupe, and normal screenshot debounce/min-interval gates.</li>
-      <li>Popup shows GIF burst mode status and lightweight pre-record controls for capture FPS (5/10/15) plus click marker appearance.</li>
+      <li>Popup shows GIF burst mode status and lightweight pre-record controls for capture FPS (5/10/15).</li>
       <li>GIF burst mode is keyboard-driven during recording: <strong>Cmd+Opt+G</strong> (macOS target) / <strong>Ctrl+Alt+G</strong> (default).</li>
       <li>When GIF burst mode is ON, page-watch is automatically disabled; when OFF, your tuned page-watch settings resume.</li>
-      <li>In hotkey GIF mode, one burst continues for the active hotkey epoch until mode is toggled OFF.</li>
+      <li>In hotkey GIF mode, one burst continues for the active hotkey run until mode is toggled OFF (or recording ends).</li>
       <li>Report builder header now mirrors extension identity (icon, name, description, and version) using manifest-driven values.</li>
       <li>Header icon/version zone compacted to an add-ons-sized badge for cleaner visual hierarchy.</li>
       <li>Quick Export Preview is now a first-class collapsible section in builder navigation and auto-refreshes while expanded.</li>
@@ -139,8 +144,9 @@
     <h2>Report Export / Import</h2>
     <ul>
       <li><strong>Export HTML bundle</strong>: Portable report with compact TOC, step anchors, and selected export theme profile.</li>
-      <li><strong>Export raw ZIP</strong>: Editable payload for re-import later.</li>
+      <li><strong>Export raw ZIP</strong>: Editable payload for re-import later (bundle v2 includes frame manifest + frame files).</li>
       <li><strong>Import raw ZIP</strong>: Import as new report or merge into active report.</li>
+      <li><strong>Compatibility</strong>: bundle v1 (inline screenshot ZIPs) remains supported on import.</li>
     </ul>
 
     <h2>Keyboard Shortcuts</h2>
@@ -149,8 +155,9 @@
       <li>Hotkey stop grace: first <code>Ctrl+Shift+Y</code> stop press schedules stop in 2000ms; a second press during grace forces immediate stop.</li>
       <li><code>Cmd+Opt+G</code> (macOS target) / <code>Ctrl+Alt+G</code> (default) toggles high-speed GIF burst mode while recording.</li>
       <li>When ON, GIF burst mode attempts unconditional screenshot capture at the selected 5/10/15 FPS target cadence until toggled OFF.</li>
-      <li>GIF burst behavior is hotkey-only; popup tuning is intentionally limited to capture FPS and marker appearance.</li>
+      <li>GIF burst behavior is hotkey-only; popup tuning is intentionally limited to capture FPS.</li>
       <li>Capture FPS is selectable (5/10/15) in popup GIF settings; replay speed is tuned in the report builder and carried into export.</li>
+      <li>Replay timing uses measured source FPS per burst as the 1.0x baseline, so playback pace matches recorded cadence.</li>
       <li>Popup/API stop actions remain immediate and do not use the hotkey stop grace delay.</li>
       <li>If this shortcut conflicts with a browser shortcut, rebind the extension command from Firefox extension shortcuts.</li>
     </ul>
