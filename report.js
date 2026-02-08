@@ -51,6 +51,7 @@ const CLICK_BURST_DEFAULTS = Object.freeze({
   clickBurstTypingMinChars: 3,
   clickBurstTypingWindowMs: 500,
   clickBurstPlaybackFps: 5,
+  // Deprecated internal key kept for backward compatibility with stored data.
   clickBurstPlaybackMode: "loop"
 });
 const CLICK_BURST_RENDER_MARKER_CAP = 10;
@@ -266,6 +267,7 @@ function normalizeClickBurstSettings(raw) {
     clickBurstTypingMinChars: Math.round(clampNumber(incoming.clickBurstTypingMinChars, 1, 32, CLICK_BURST_DEFAULTS.clickBurstTypingMinChars)),
     clickBurstTypingWindowMs: clampNumber(incoming.clickBurstTypingWindowMs, 100, 5000, CLICK_BURST_DEFAULTS.clickBurstTypingWindowMs),
     clickBurstPlaybackFps: Math.round(clampNumber(incoming.clickBurstPlaybackFps, 1, 60, CLICK_BURST_DEFAULTS.clickBurstPlaybackFps)),
+    // Deprecated internal key kept for backward compatibility with stored data.
     clickBurstPlaybackMode: "loop"
   };
 }
@@ -1472,7 +1474,6 @@ function renderClickBursts(target, bursts, options) {
       markerColor: options && options.markerColor,
       autoPlay: options && options.autoPlay,
       fps: options && options.fps,
-      playbackMode: options && options.playbackMode,
       onJump: options && options.onJump
     });
     players.push(player);
@@ -1699,7 +1700,7 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, reports, idx, root) {
+function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, reports) {
   const ctx = canvas.getContext("2d");
   const previewCtx = previewCanvas ? previewCanvas.getContext("2d") : null;
   const ANNOTATION_SAVE_DEBOUNCE_MS = 700;
@@ -2271,7 +2272,6 @@ function buildExportHtml(report, options = {}) {
     markerColor: burstSettings.clickBurstMarkerColor,
     autoPlay: burstSettings.clickBurstAutoPlay,
     fps: burstSettings.clickBurstPlaybackFps,
-    playbackMode: burstSettings.clickBurstPlaybackMode,
     bursts: burstData
   }).replace(/</g, "\\u003c");
   const burstInsertionMap = buildBurstInsertionMap(derivedBursts);
@@ -3417,6 +3417,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     const burstFrameMap = view.burstFrameMap;
     const burstInsertionMap = buildBurstInsertionMap(view.bursts);
     const burstSettings = view.burstSettings;
+    const eventPositionMap = new Map();
+    report.events.forEach((item, pos) => eventPositionMap.set(item, pos));
     updateAux(events, view.bursts, view.sourceEvents);
 
     events.forEach((ev, index) => {
@@ -3450,7 +3452,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       wrap.appendChild(el("div", "step-meta", metaText));
 
       const actions = el("div", "step-actions noprint");
-      const eventPos = report.events.indexOf(ev);
+      const eventPos = eventPositionMap.has(ev) ? eventPositionMap.get(ev) : -1;
       const moveUp = el("button", "btn ghost", "Move up");
       moveUp.disabled = eventPos <= 0;
       moveUp.addEventListener("click", async () => {
@@ -3471,7 +3473,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       const deleteStep = el("button", "btn danger", "Delete step");
       deleteStep.addEventListener("click", async () => {
-        const pos = report.events.indexOf(ev);
+        const pos = eventPositionMap.has(ev) ? eventPositionMap.get(ev) : report.events.indexOf(ev);
         if (pos >= 0) report.events.splice(pos, 1);
         await saveReports(reports);
         render();
@@ -3718,7 +3720,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             previewCanvas.height = h;
             previewCanvas.style.width = `${w}px`;
             previewCanvas.style.height = `${h}px`;
-            annot = setupAnnotationTools(canvas, previewCanvas, img, ev, report, reports, index, root);
+            annot = setupAnnotationTools(canvas, previewCanvas, img, ev, report, reports);
             annot.setMode(mode.value);
             annot.setColor(color.value);
             annot.setSize(Number(size.value));
@@ -3760,7 +3762,6 @@ document.addEventListener("DOMContentLoaded", async () => {
             markerColor: burstSettings.clickBurstMarkerColor,
             autoPlay: burstSettings.clickBurstAutoPlay,
             fps: burstSettings.clickBurstPlaybackFps,
-            playbackMode: burstSettings.clickBurstPlaybackMode,
             onJump: (stepId) => {
               if (!stepId) return;
               if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;

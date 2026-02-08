@@ -1,4 +1,4 @@
-// content.js - v1.11.2
+// content.js - v1.11.3
 // Clean capture with optional text redaction and readable step naming.
 
 (function () {
@@ -23,7 +23,7 @@
   ];
 
   const LOGIN_BUTTON_WORDS = ["log in","login","sign in","signin","continue"];
-  const CONTENT_DEBUG = true;
+  const CONTENT_DEBUG = false;
   const UI_CHANGE_MIN_INTERVAL_MS = 1500;
   const UI_CHANGE_SCREENSHOT_MAX_PAGEWATCH_MS = 10_000;
   const UI_CHANGE_SCREENSHOT_MULTIPLIER = 1.34562;

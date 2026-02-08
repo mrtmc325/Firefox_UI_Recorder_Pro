@@ -1,4 +1,4 @@
-UI Workflow Recorder Pro (Firefox) - v1.11.2
+UI Workflow Recorder Pro (Firefox) - v1.11.3
 
 This file is kept for legacy packaging. Please see README.md for the full documentation.
-Summary: release v1.11.2 hardens long-session report-builder memory behavior by pausing offscreen burst replays and unloading quick-preview iframe content when collapsed.
+Summary: release v1.11.3 syncs docs to current burst behavior, improves report-builder render efficiency, and lowers default runtime debug logging overhead.

@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.11.3 - 2026-02-08
+
+### Changed
+- Documentation accuracy sync:
+  - hotkey burst split behavior now documented as epoch/toggle-boundary based.
+  - replay FPS language now documented as default/tunable instead of fixed.
+- Report builder efficiency cleanup:
+  - replaced per-step `indexOf` lookups with a precomputed event-position map during render.
+  - removed unused burst `playbackMode` pass-through plumbing from report player call sites.
+  - removed unused `setupAnnotationTools` parameters (`idx`, `root`) from declaration and call site.
+
+### Fixed
+- Runtime debug logging defaults now ship disabled for lower long-session console overhead:
+  - `DEBUG_LOGS = false` (background)
+  - `CONTENT_DEBUG = false` (content script)
+  - `POPUP_DEBUG = false` (popup)
+
 ## v1.11.2 - 2026-02-08
 
 ### Changed

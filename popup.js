@@ -1,4 +1,4 @@
-const POPUP_DEBUG = true;
+const POPUP_DEBUG = false;
 
 function popupLog(message, data) {
   if (!POPUP_DEBUG) return;

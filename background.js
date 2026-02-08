@@ -1,4 +1,4 @@
-// UI Workflow Recorder Pro (Firefox MV2) - v1.11.2
+// UI Workflow Recorder Pro (Firefox MV2) - v1.11.3
 // Clean capture, diff-based screenshots, and text-only redaction for reports.
 
 let isRecording = false;
@@ -37,6 +37,7 @@ let settings = {
   clickBurstTypingMinChars: 3,
   clickBurstTypingWindowMs: 500,
   clickBurstPlaybackFps: 5,
+  // Deprecated internal key kept for backward compatibility with stored settings.
   clickBurstPlaybackMode: "loop",
 
   redactRules: [
@@ -71,7 +72,7 @@ let burstContinuousInFlight = false;
 let recordingStartedAtMs = 0;
 let lifecycleQueue = Promise.resolve();
 
-const DEBUG_LOGS = true;
+const DEBUG_LOGS = false;
 const EVENT_COMPACT_TRIGGER_COUNT = 600;
 const SCREENSHOT_COMPACT_TRIGGER_COUNT = 220;
 const SCREENSHOT_KEEP_TARGET = 160;
@@ -305,6 +306,7 @@ function normalizeClickBurstSettings(base) {
   out.clickBurstTypingMinChars = Math.round(clampNumber(out.clickBurstTypingMinChars, 1, 32, 3));
   out.clickBurstTypingWindowMs = clampNumber(out.clickBurstTypingWindowMs, 100, 5000, 500);
   out.clickBurstPlaybackFps = Math.round(clampNumber(out.clickBurstPlaybackFps, 1, 60, 5));
+  // Deprecated internal key kept for backward compatibility with stored settings.
   out.clickBurstPlaybackMode = "loop";
   return out;
 }
