@@ -1,4 +1,4 @@
-UI Workflow Recorder Pro (Firefox) - v1.11.0
+UI Workflow Recorder Pro (Firefox) - v1.11.1
 
 This file is kept for legacy packaging. Please see README.md for the full documentation.
-Summary: release v1.11.0 adds inline time-ordered burst replay placement in builder/export, restart reliability hardening, lifecycle start/stop screenshot attempts, and a collapsible advanced-settings popup layout.
+Summary: release v1.11.1 removes burst trigger interval gating and configuration; burst activation now starts without trigger timing, with cleaner popup advanced burst controls.

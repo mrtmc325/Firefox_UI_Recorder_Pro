@@ -1,4 +1,4 @@
-// UI Workflow Recorder Pro (Firefox MV2) - v1.11.0
+// UI Workflow Recorder Pro (Firefox MV2) - v1.11.1
 // Clean capture, diff-based screenshots, and text-only redaction for reports.
 
 let isRecording = false;
@@ -24,7 +24,6 @@ let settings = {
   pageWatchEnabled: true,
   pageWatchMs: 500,
   clickBurstEnabled: true,
-  clickBurstTriggerMs: 3000,
   clickBurstWindowMs: 7000,
   clickBurstMaxClicks: 10,
   clickBurstFlushMs: 2456.783,
@@ -293,7 +292,6 @@ function normalizeHexColor(value, fallback) {
 function normalizeClickBurstSettings(base) {
   const out = { ...base };
   out.clickBurstEnabled = out.clickBurstEnabled !== false;
-  out.clickBurstTriggerMs = clampNumber(out.clickBurstTriggerMs, 500, 10000, 3000);
   out.clickBurstWindowMs = clampNumber(out.clickBurstWindowMs, 1000, 30000, 7000);
   out.clickBurstMaxClicks = Math.round(clampNumber(out.clickBurstMaxClicks, 2, 50, 10));
   out.clickBurstFlushMs = clampNumber(out.clickBurstFlushMs, 250, 10000, 2456.783);

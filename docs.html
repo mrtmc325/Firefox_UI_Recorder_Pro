@@ -8,10 +8,12 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.11.0. This release adds inline time-ordered burst replay placement, restart hardening, lifecycle start/stop screenshots, and a collapsible advanced-settings popup layout.</p>
+    <p>Version 1.11.1. This release removes burst trigger interval gating/configuration and keeps burst controls cleaner while preserving existing hotkey burst behavior.</p>
 
-    <h2>Version Notes (v1.11.0)</h2>
+    <h2>Version Notes (v1.11.1)</h2>
     <ul>
+      <li>Burst trigger interval control was removed from popup advanced settings.</li>
+      <li>Burst activation now starts from qualifying consecutive events without a trigger-window gate.</li>
       <li>Fast click replay (GIF-style canvas loop) added with per-burst Play/Pause controls.</li>
       <li>Each burst replay now includes a per-card speed slider in the editor and exported HTML.</li>
       <li>Click burst replay cards are embedded inline with workflow steps (time-ordered), not grouped into a separate top section.</li>
@@ -138,7 +140,7 @@
       <li><code>Ctrl+Shift+Y</code> toggles start/stop recording.</li>
       <li><code>Cmd+Opt+G</code> (macOS target) / <code>Ctrl+Alt+G</code> (default) toggles high-speed GIF burst mode while recording.</li>
       <li>When ON, GIF burst mode attempts unconditional screenshot capture at a 5 FPS target cadence until toggled OFF.</li>
-      <li>While ON, burst trigger/window/max/flush controls do not split the burst; split occurs on toggle OFF or tab/page change.</li>
+      <li>While ON, burst window/max/flush controls do not split the burst; split occurs on toggle OFF or tab/page change.</li>
       <li>5 FPS is a target cadence and can be lower on slow systems due to browser capture throughput limits.</li>
       <li>If this shortcut conflicts with a browser shortcut, rebind the extension command from Firefox extension shortcuts.</li>
     </ul>

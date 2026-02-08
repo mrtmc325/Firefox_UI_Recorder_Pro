@@ -81,7 +81,6 @@ async function refresh() {
   document.getElementById("click-burst-include-typing").checked = st.settings?.clickBurstIncludeTyping !== false;
   document.getElementById("click-burst-time-any-event").checked = st.settings?.clickBurstTimeBasedAnyEvent !== false;
   document.getElementById("click-burst-condense-steps").checked = st.settings?.clickBurstCondenseStepScreenshots !== false;
-  document.getElementById("click-burst-trigger-ms").value = st.settings?.clickBurstTriggerMs ?? 3000;
   document.getElementById("click-burst-window-ms").value = st.settings?.clickBurstWindowMs ?? 7000;
   document.getElementById("click-burst-max-clicks").value = st.settings?.clickBurstMaxClicks ?? 10;
   document.getElementById("click-burst-flush-ms").value = st.settings?.clickBurstFlushMs ?? 2456.783;
@@ -182,10 +181,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("click-burst-condense-steps").addEventListener("change", async (e) => {
     await updateSettings({ clickBurstCondenseStepScreenshots: !!e.target.checked });
-    await refresh();
-  });
-  document.getElementById("click-burst-trigger-ms").addEventListener("change", async (e) => {
-    await updateSettings({ clickBurstTriggerMs: clampNumber(e.target.value, 500, 10000, 3000) });
     await refresh();
   });
   document.getElementById("click-burst-window-ms").addEventListener("change", async (e) => {

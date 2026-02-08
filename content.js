@@ -1,4 +1,4 @@
-// content.js - v1.11.0
+// content.js - v1.11.1
 // Clean capture with optional text redaction and readable step naming.
 
 (function () {

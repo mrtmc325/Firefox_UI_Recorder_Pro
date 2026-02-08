@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.11.1 - 2026-02-08
+
+### Changed
+- Removed burst activation interval from popup advanced settings (no `Burst trigger (ms)` control).
+- Burst derivation now starts based on qualifying consecutive same-context events without trigger-window gating.
+- Hotkey burst help/docs text updated to reflect the simplified split controls (`window/max/flush`).
+
+### Fixed
+- Eliminated stale burst-trigger setting wiring in popup/background/report normalization paths.
+
 ## v1.11.0 - 2026-02-08
 
 ### Added

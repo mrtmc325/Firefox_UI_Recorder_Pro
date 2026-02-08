@@ -39,7 +39,6 @@ const EXPORT_THEME_DEFAULTS = Object.freeze({
 });
 const CLICK_BURST_DEFAULTS = Object.freeze({
   clickBurstEnabled: true,
-  clickBurstTriggerMs: 3000,
   clickBurstWindowMs: 7000,
   clickBurstMaxClicks: 10,
   clickBurstFlushMs: 2456.783,
@@ -255,7 +254,6 @@ function normalizeClickBurstSettings(raw) {
   const incoming = isPlainObject(raw) ? raw : {};
   return {
     clickBurstEnabled: incoming.clickBurstEnabled !== false,
-    clickBurstTriggerMs: clampNumber(incoming.clickBurstTriggerMs, 500, 10000, CLICK_BURST_DEFAULTS.clickBurstTriggerMs),
     clickBurstWindowMs: clampNumber(incoming.clickBurstWindowMs, 1000, 30000, CLICK_BURST_DEFAULTS.clickBurstWindowMs),
     clickBurstMaxClicks: Math.round(clampNumber(incoming.clickBurstMaxClicks, 2, 50, CLICK_BURST_DEFAULTS.clickBurstMaxClicks)),
     clickBurstFlushMs: clampNumber(incoming.clickBurstFlushMs, 250, 10000, CLICK_BURST_DEFAULTS.clickBurstFlushMs),
@@ -935,7 +933,6 @@ function deriveClickBursts(events, rawSettings) {
   if (!settings.clickBurstEnabled && !hasHotkeyBurstCandidates) return [];
   const typingQualified = buildTypingQualifiedSet(events, settings);
 
-  const triggerMs = settings.clickBurstTriggerMs;
   const windowMs = settings.clickBurstWindowMs;
   const maxClicks = settings.clickBurstMaxClicks;
   const flushMs = settings.clickBurstFlushMs;
@@ -989,9 +986,10 @@ function deriveClickBursts(events, rawSettings) {
   const canAppendToActive = (candidate) => {
     if (!activeBurst) return false;
     if (activeBurst.hotkeyMode) {
+      // In hotkey burst mode, keep one continuous replay stream for the full
+      // ON epoch. Do not split by tab/page context.
       return (
         !!candidate.hotkeyMode &&
-        sameClickBurstContext(activeBurst.context, candidate.context) &&
         activeBurst.burstModeEpoch === candidate.burstModeEpoch
       );
     }
@@ -1047,10 +1045,7 @@ function deriveClickBursts(events, rawSettings) {
       return;
     }
 
-    const deltaMs = candidate.tsMs - pendingSingle.tsMs;
-    const canStartBurst =
-      sameClickBurstContext(pendingSingle.context, candidate.context) &&
-      deltaMs <= triggerMs;
+    const canStartBurst = sameClickBurstContext(pendingSingle.context, candidate.context);
 
     if (canStartBurst) {
       activeBurst = {
