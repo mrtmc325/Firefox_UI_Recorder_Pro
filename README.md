@@ -1,24 +1,23 @@
-# UI Workflow Recorder Pro (Firefox) v1.11.3
+# UI Workflow Recorder Pro (Firefox) v1.11.4
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.11.3`
+- Version: `1.11.4`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
 - Strict active-tab-only capture mode (follows active tab in focused window).
 - Fast-click burst replay capture:
-  - Detects rapid same-page click bursts and renders looped replay cards inline in workflow order.
+  - Builds burst replay cards from hotkey GIF capture frames and renders them inline in workflow order.
   - Blue numbered click markers (ordered progression) with play/pause.
-  - Per-burst speed slider in editor and exported HTML replay cards.
-  - Replay defaults to 5 FPS in editor and exported HTML (tunable via Replay FPS setting).
+  - Replay runs at a fixed 5 FPS target cadence.
   - Keyboard-controlled during recording: `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default).
   - While burst mode is on, page-watch is temporarily disabled; turning burst mode off restores tuned page-watch behavior.
   - Hotkey burst mode is unconditional for workflow-driving events and uses a dedicated capture lane at a default 5 FPS target cadence.
   - Hotkey burst mode bypasses click UI probe delays, diff dedupe, and normal screenshot debounce/min-interval gates.
-  - Hotkey burst mode ignores burst max/window/flush split limits and keeps one continuous burst for the active hotkey epoch until mode is toggled OFF.
-  - Popup now shows burst mode status (ON/OFF) instead of a burst enable toggle.
+  - Hotkey burst mode keeps one continuous burst for the active hotkey epoch until mode is toggled OFF.
+  - Popup shows burst mode status only (ON/OFF); burst behavior is no longer configurable in popup.
   - Burst-mode memory safety cap keeps replay fidelity while preventing runaway screenshot growth.
 - Automatic lifecycle screenshots:
   - Recorder attempts a screenshot-backed step when recording starts.
@@ -153,7 +152,7 @@ Expected behavior:
 - `Ctrl+Shift+Y`: start/stop recording.
 - `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default): toggle high-speed GIF burst mode while recording.
 - While ON, GIF burst mode attempts unconditional screenshot capture at a default 5 FPS target cadence until toggled OFF.
-- While ON, burst window/max/flush settings do not split bursts; split occurs only on hotkey toggle boundary (epoch change).
+- GIF burst behavior is hotkey-only and fixed; popup burst tuning controls are removed.
 - Actual FPS can be lower on slower systems due to browser capture throughput limits.
 - If this shortcut conflicts with Firefox/browser defaults, rebind this command in Firefox extension shortcuts.
 

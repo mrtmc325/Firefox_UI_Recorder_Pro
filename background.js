@@ -23,22 +23,6 @@ let settings = {
   pruneWindowMs: 1200,
   pageWatchEnabled: true,
   pageWatchMs: 500,
-  clickBurstEnabled: true,
-  clickBurstWindowMs: 7000,
-  clickBurstMaxClicks: 10,
-  clickBurstFlushMs: 2456.783,
-  clickBurstUiProbeMs: 450,
-  clickBurstMarkerColor: "#2563eb",
-  clickBurstAutoPlay: true,
-  clickBurstIncludeClicks: true,
-  clickBurstIncludeTyping: true,
-  clickBurstTimeBasedAnyEvent: true,
-  clickBurstCondenseStepScreenshots: true,
-  clickBurstTypingMinChars: 3,
-  clickBurstTypingWindowMs: 500,
-  clickBurstPlaybackFps: 5,
-  // Deprecated internal key kept for backward compatibility with stored settings.
-  clickBurstPlaybackMode: "loop",
 
   redactRules: [
     { name: "shared-secret", pattern: "(shared\\s*secret\\s*[:=]\\s*)([^\\s]+)", replace: "$1[REDACTED]" },
@@ -76,10 +60,10 @@ const DEBUG_LOGS = false;
 const EVENT_COMPACT_TRIGGER_COUNT = 600;
 const SCREENSHOT_COMPACT_TRIGGER_COUNT = 220;
 const SCREENSHOT_KEEP_TARGET = 160;
-const CLICK_BURST_SCREENSHOT_COMPACT_TRIGGER_COUNT = 480;
-const CLICK_BURST_SCREENSHOT_KEEP_TARGET = 360;
-const CLICK_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB = 160;
-const CLICK_BURST_RECENT_WINDOW_MS = 180000;
+const HOTKEY_BURST_SCREENSHOT_COMPACT_TRIGGER_COUNT = 480;
+const HOTKEY_BURST_SCREENSHOT_KEEP_TARGET = 360;
+const HOTKEY_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB = 160;
+const HOTKEY_BURST_RECENT_WINDOW_MS = 180000;
 const HOTKEY_BURST_FPS = 5;
 const HOTKEY_BURST_FRAME_MS = 1000 / HOTKEY_BURST_FPS;
 const HOTKEY_BURST_CAPTURE_EVENT_TYPES = new Set(["click", "input", "change", "submit", "nav", "ui-change", "outcome", "note"]);
@@ -284,44 +268,46 @@ function clampNumber(value, min, max, fallback) {
   return Math.max(min, Math.min(max, num));
 }
 
-function normalizeHexColor(value, fallback) {
-  const s = String(value || "").trim();
-  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
-  return String(fallback || "#2563eb").toLowerCase();
-}
-
-function normalizeClickBurstSettings(base) {
+function normalizeSettings(base) {
   const out = { ...base };
-  out.clickBurstEnabled = out.clickBurstEnabled !== false;
-  out.clickBurstWindowMs = clampNumber(out.clickBurstWindowMs, 1000, 30000, 7000);
-  out.clickBurstMaxClicks = Math.round(clampNumber(out.clickBurstMaxClicks, 2, 50, 10));
-  out.clickBurstFlushMs = clampNumber(out.clickBurstFlushMs, 250, 10000, 2456.783);
-  out.clickBurstUiProbeMs = clampNumber(out.clickBurstUiProbeMs, 50, 3000, 450);
-  out.clickBurstMarkerColor = normalizeHexColor(out.clickBurstMarkerColor, "#2563eb");
-  out.clickBurstAutoPlay = out.clickBurstAutoPlay !== false;
-  out.clickBurstIncludeClicks = out.clickBurstIncludeClicks !== false;
-  out.clickBurstIncludeTyping = out.clickBurstIncludeTyping !== false;
-  out.clickBurstTimeBasedAnyEvent = out.clickBurstTimeBasedAnyEvent !== false;
-  out.clickBurstCondenseStepScreenshots = out.clickBurstCondenseStepScreenshots !== false;
-  out.clickBurstTypingMinChars = Math.round(clampNumber(out.clickBurstTypingMinChars, 1, 32, 3));
-  out.clickBurstTypingWindowMs = clampNumber(out.clickBurstTypingWindowMs, 100, 5000, 500);
-  out.clickBurstPlaybackFps = Math.round(clampNumber(out.clickBurstPlaybackFps, 1, 60, 5));
-  // Deprecated internal key kept for backward compatibility with stored settings.
-  out.clickBurstPlaybackMode = "loop";
+  out.screenshotDebounceMs = Math.max(0, Number(out.screenshotDebounceMs) || 900);
+  out.screenshotMinIntervalMs = Math.max(0, Number(out.screenshotMinIntervalMs) || 800);
+  out.diffEnabled = out.diffEnabled !== false;
+  out.redactEnabled = out.redactEnabled !== false;
+  out.redactLoginUsernames = out.redactLoginUsernames !== false;
+  out.captureMode = out.captureMode === "clicks" ? "clicks" : "all";
+  out.activeTabOnly = out.activeTabOnly !== false;
+  out.autoPauseOnIdle = !!out.autoPauseOnIdle;
+  out.idleThresholdSec = Math.max(15, Math.round(Number(out.idleThresholdSec) || 60));
+  out.resumeOnFocus = out.resumeOnFocus !== false;
+  out.pruneInputs = out.pruneInputs !== false;
+  out.pruneWindowMs = Math.max(100, Number(out.pruneWindowMs) || 1200);
+  out.pageWatchEnabled = out.pageWatchEnabled !== false;
+  out.pageWatchMs = Math.max(200, Number(out.pageWatchMs) || 500);
+  delete out.clickBurstEnabled;
+  delete out.clickBurstWindowMs;
+  delete out.clickBurstMaxClicks;
+  delete out.clickBurstFlushMs;
+  delete out.clickBurstUiProbeMs;
+  delete out.clickBurstMarkerColor;
+  delete out.clickBurstAutoPlay;
+  delete out.clickBurstIncludeClicks;
+  delete out.clickBurstIncludeTyping;
+  delete out.clickBurstTimeBasedAnyEvent;
+  delete out.clickBurstCondenseStepScreenshots;
+  delete out.clickBurstTypingMinChars;
+  delete out.clickBurstTypingWindowMs;
+  delete out.clickBurstPlaybackFps;
+  delete out.clickBurstPlaybackMode;
   return out;
 }
 
 function getEffectiveSettings(base = settings) {
-  const normalized = normalizeClickBurstSettings(base || settings);
+  const normalized = normalizeSettings(base || settings);
   if (!burstHotkeyModeActive) return normalized;
   return {
     ...normalized,
     captureMode: "all",
-    clickBurstEnabled: true,
-    clickBurstIncludeClicks: true,
-    clickBurstIncludeTyping: true,
-    clickBurstTimeBasedAnyEvent: true,
-    clickBurstPlaybackFps: 5,
     pageWatchEnabled: false
   };
 }
@@ -502,7 +488,7 @@ async function loadPersisted() {
   reports = Array.isArray(stored.reports) ? stored.reports : [];
   sessionId = stored.sessionId || null;
   if (stored.settings) settings = { ...settings, ...stored.settings };
-  settings = normalizeClickBurstSettings(settings);
+  settings = normalizeSettings(settings);
   recordingStartedAtMs = isRecording ? Date.now() : 0;
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
@@ -590,22 +576,8 @@ async function debouncedScreenshot() {
 }
 
 async function maybeScreenshot(e) {
-  const effective = getEffectiveSettings();
   const hotkeyBurstActive = isHotkeyBurstModeActive();
-  const burstClickForce = !!(effective.clickBurstEnabled && effective.clickBurstIncludeClicks !== false && e && e.type === "click");
-  const burstTypingForce = !!(
-    effective.clickBurstEnabled &&
-    effective.clickBurstIncludeTyping !== false &&
-    e &&
-    (e.type === "input" || e.type === "change")
-  );
-  const burstTimeBasedForce = !!(
-    effective.clickBurstEnabled &&
-    effective.clickBurstTimeBasedAnyEvent !== false &&
-    e &&
-    e.type === "ui-change"
-  );
-  const force = !!e.forceScreenshot || burstClickForce || burstTypingForce || burstTimeBasedForce;
+  const force = !!(e && e.forceScreenshot);
 
   const shot = hotkeyBurstActive ? await captureBurstFrameFixedRate() : await debouncedScreenshot();
   if (!shot.dataUrl) return { screenshot: null, screenshotHash: null, skipped: true, reason: shot.reason || "capture-failed" };
@@ -613,7 +585,7 @@ async function maybeScreenshot(e) {
   const redacted = shot.dataUrl;
   const redactedHash = stableHash(redacted);
 
-  if (!hotkeyBurstActive && !force && effective.diffEnabled && events.length > 0) {
+  if (!hotkeyBurstActive && !force && settings.diffEnabled && events.length > 0) {
     for (let i = events.length - 1; i >= 0; i--) {
       if (events[i].screenshotHash) {
         if (events[i].screenshotHash === redactedHash) {
@@ -722,7 +694,7 @@ function pruneInputSteps(list) {
 function saveReportSnapshot(snapshotSettings) {
   if (!events || !events.length) return false;
   const eventCountBefore = events.length;
-  const resolvedSettings = normalizeClickBurstSettings(snapshotSettings || getEffectiveSettings());
+  const resolvedSettings = normalizeSettings(snapshotSettings || getEffectiveSettings());
   const report = {
     id: `rpt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     createdAt: nowIso(),
@@ -761,9 +733,7 @@ function isScreenshotPriorityEvent(ev) {
 }
 
 function compactScreenshotsIfNeeded() {
-  if (isHotkeyBurstModeActive()) return null;
-  const effective = getEffectiveSettings();
-  if (effective.clickBurstEnabled) return compactBurstScreenshotsIfNeeded();
+  if (isHotkeyBurstModeActive()) return compactBurstScreenshotsIfNeeded();
   if (!Array.isArray(events) || !events.length) return null;
   let screenshotCount = 0;
   for (const ev of events) {
@@ -795,7 +765,7 @@ function compactBurstScreenshotsIfNeeded() {
   for (const ev of events) {
     if (hasScreenshotPayload(ev)) screenshotCount++;
   }
-  if (screenshotCount < CLICK_BURST_SCREENSHOT_COMPACT_TRIGGER_COUNT) return null;
+  if (screenshotCount < HOTKEY_BURST_SCREENSHOT_COMPACT_TRIGGER_COUNT) return null;
 
   const keepIndexes = new Set();
   const perTabClickKeepCount = new Map();
@@ -812,8 +782,8 @@ function compactBurstScreenshotsIfNeeded() {
       const tabKey = `${ev.windowId ?? "w"}:${ev.tabId ?? "t"}`;
       const current = perTabClickKeepCount.get(tabKey) || 0;
       const tsMs = Date.parse(ev.ts || "");
-      const isRecent = Number.isFinite(tsMs) && ((now - tsMs) <= CLICK_BURST_RECENT_WINDOW_MS);
-      if (isRecent || current < CLICK_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB) {
+      const isRecent = Number.isFinite(tsMs) && ((now - tsMs) <= HOTKEY_BURST_RECENT_WINDOW_MS);
+      if (isRecent || current < HOTKEY_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB) {
         keepIndexes.add(i);
         perTabClickKeepCount.set(tabKey, current + 1);
       }
@@ -821,7 +791,7 @@ function compactBurstScreenshotsIfNeeded() {
   }
 
   let removed = 0;
-  for (let i = 0; i < events.length && screenshotCount > CLICK_BURST_SCREENSHOT_KEEP_TARGET; i++) {
+  for (let i = 0; i < events.length && screenshotCount > HOTKEY_BURST_SCREENSHOT_KEEP_TARGET; i++) {
     if (keepIndexes.has(i)) continue;
     const ev = events[i];
     if (!hasScreenshotPayload(ev)) continue;
@@ -984,7 +954,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
 
     if (msgType === "UPDATE_SETTINGS") {
       settings = { ...settings, ...(msg.settings || {}) };
-      settings = normalizeClickBurstSettings(settings);
+      settings = normalizeSettings(settings);
       if (settings.activeTabOnly) {
         if (isRecording) {
           await refreshActiveCaptureTarget("settings:update");
@@ -1092,9 +1062,9 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           ? HOTKEY_BURST_CAPTURE_EVENT_TYPES.has(e.type)
           : (
             ["change","input","submit","outcome","note"].includes(e.type)
-            || (e.type === "click" && (effectiveSettings.clickBurstEnabled || !!e.forceScreenshot || !!e.clickUiUpdated))
+            || (e.type === "click" && (!!e.forceScreenshot || !!e.clickUiUpdated))
             || (e.type === "nav" && (!effectiveSettings.activeTabOnly || !!e.forceScreenshot))
-            || (e.type === "ui-change" && (effectiveSettings.clickBurstEnabled || !!e.forceScreenshot))
+            || (e.type === "ui-change" && !!e.forceScreenshot)
           );
         if (hotkeyBurstActive && includeScreenshot) cleaned.burstCaptureForced = true;
         if (includeScreenshot) {
@@ -1250,7 +1220,6 @@ browser.commands.onCommand.addListener(async (command) => {
     burstHotkeyModeActive,
     burstModeEpoch,
     persisted: persisted.ok,
-    effectivePageWatchEnabled: !!effective.pageWatchEnabled,
-    effectiveClickBurstEnabled: !!effective.clickBurstEnabled
+    effectivePageWatchEnabled: !!effective.pageWatchEnabled
   });
 });

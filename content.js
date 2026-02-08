@@ -29,6 +29,7 @@
   const UI_CHANGE_SCREENSHOT_MULTIPLIER = 1.34562;
   const UI_CHANGE_SCREENSHOT_INACTIVITY_MS = 4567.38;
   const HOTKEY_BURST_INPUT_THROTTLE_MS = Math.round(1000 / 5);
+  const CLICK_UI_PROBE_MS = 450;
   const ACTION_HINTS = [
     { key: "save", words: ["save", "apply", "update"] },
     { key: "next", words: ["next", "continue"] },
@@ -894,8 +895,7 @@
 
     const el = e.target;
     const login = findLoginContext();
-    const burstClickCaptureEnabled = st.settings?.clickBurstEnabled !== false;
-    if (!burstClickCaptureEnabled && isNoiseContainer(el, login)) return;
+    if (isNoiseContainer(el, login)) return;
 
     const form = (el && el.form) ? el.form : (el && el.closest ? el.closest("form") : null);
     const inLoginForm = login.isLogin && (!login.form || form === login.form);
@@ -911,8 +911,7 @@
     const human = humanize(el);
     const hint = detectActionHint(label || human || (el && el.innerText) || "");
     const burstHotkeyMode = !!st.burstHotkeyModeActive;
-    const clickProbeMs = Math.max(50, Math.min(3000, Number(st.settings?.clickBurstUiProbeMs ?? 450)));
-    const clickUiUpdated = burstHotkeyMode ? true : await detectClickUiUpdateWithin(clickProbeMs);
+    const clickUiUpdated = burstHotkeyMode ? true : await detectClickUiUpdateWithin(CLICK_UI_PROBE_MS);
 
     const clickingSensitive = isSensitiveField(el) || (login.isLogin && st.settings?.redactLoginUsernames && isLoginUsernameField(el)) || hasSensitiveKeyword(label);
 
@@ -943,7 +942,7 @@
       burstHotkeyMode,
       burstBypassUiProbe: burstHotkeyMode,
       burstCaptureForced: burstHotkeyMode,
-      forceScreenshot: !!login.isLogin || !!burstClickCaptureEnabled || burstHotkeyMode
+      forceScreenshot: !!login.isLogin || burstHotkeyMode
     });
   }, true);
 

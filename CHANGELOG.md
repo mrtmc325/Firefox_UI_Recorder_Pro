@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.11.4 - 2026-02-08
+
+### Changed
+- Removed GIF burst tuning controls from popup UI.
+- GIF capture is now hotkey-only runtime behavior (`Cmd+Opt+G` / `Ctrl+Alt+G`), with fixed 5 FPS target cadence.
+- Removed burst speed tuning from report playback and exported HTML burst replay controls.
+
 ## v1.11.3 - 2026-02-08
 
 ### Changed

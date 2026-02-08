@@ -39,20 +39,10 @@ const EXPORT_THEME_DEFAULTS = Object.freeze({
 });
 const CLICK_BURST_DEFAULTS = Object.freeze({
   clickBurstEnabled: true,
-  clickBurstWindowMs: 7000,
-  clickBurstMaxClicks: 10,
-  clickBurstFlushMs: 2456.783,
   clickBurstMarkerColor: "#2563eb",
   clickBurstAutoPlay: true,
-  clickBurstIncludeClicks: true,
-  clickBurstIncludeTyping: true,
-  clickBurstTimeBasedAnyEvent: true,
   clickBurstCondenseStepScreenshots: true,
-  clickBurstTypingMinChars: 3,
-  clickBurstTypingWindowMs: 500,
-  clickBurstPlaybackFps: 5,
-  // Deprecated internal key kept for backward compatibility with stored data.
-  clickBurstPlaybackMode: "loop"
+  clickBurstPlaybackFps: 5
 });
 const CLICK_BURST_RENDER_MARKER_CAP = 10;
 
@@ -245,31 +235,9 @@ function normalizeExportTheme(raw) {
   return { preset, font, tocLayout, tocMeta, accentColor };
 }
 
-function clampNumber(value, min, max, fallback) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return Number(fallback);
-  return Math.max(min, Math.min(max, num));
-}
-
 function normalizeClickBurstSettings(raw) {
-  const incoming = isPlainObject(raw) ? raw : {};
-  return {
-    clickBurstEnabled: incoming.clickBurstEnabled !== false,
-    clickBurstWindowMs: clampNumber(incoming.clickBurstWindowMs, 1000, 30000, CLICK_BURST_DEFAULTS.clickBurstWindowMs),
-    clickBurstMaxClicks: Math.round(clampNumber(incoming.clickBurstMaxClicks, 2, 50, CLICK_BURST_DEFAULTS.clickBurstMaxClicks)),
-    clickBurstFlushMs: clampNumber(incoming.clickBurstFlushMs, 250, 10000, CLICK_BURST_DEFAULTS.clickBurstFlushMs),
-    clickBurstMarkerColor: normalizeHexColor(incoming.clickBurstMarkerColor, CLICK_BURST_DEFAULTS.clickBurstMarkerColor),
-    clickBurstAutoPlay: incoming.clickBurstAutoPlay !== false,
-    clickBurstIncludeClicks: incoming.clickBurstIncludeClicks !== false,
-    clickBurstIncludeTyping: incoming.clickBurstIncludeTyping !== false,
-    clickBurstTimeBasedAnyEvent: incoming.clickBurstTimeBasedAnyEvent !== false,
-    clickBurstCondenseStepScreenshots: incoming.clickBurstCondenseStepScreenshots !== false,
-    clickBurstTypingMinChars: Math.round(clampNumber(incoming.clickBurstTypingMinChars, 1, 32, CLICK_BURST_DEFAULTS.clickBurstTypingMinChars)),
-    clickBurstTypingWindowMs: clampNumber(incoming.clickBurstTypingWindowMs, 100, 5000, CLICK_BURST_DEFAULTS.clickBurstTypingWindowMs),
-    clickBurstPlaybackFps: Math.round(clampNumber(incoming.clickBurstPlaybackFps, 1, 60, CLICK_BURST_DEFAULTS.clickBurstPlaybackFps)),
-    // Deprecated internal key kept for backward compatibility with stored data.
-    clickBurstPlaybackMode: "loop"
-  };
+  if (!isPlainObject(raw)) return { ...CLICK_BURST_DEFAULTS };
+  return { ...CLICK_BURST_DEFAULTS };
 }
 
 function encodeText(value) {
@@ -821,70 +789,6 @@ function normalizedPageKey(url) {
   }
 }
 
-function isTypingEvent(ev) {
-  return !!(ev && (ev.type === "input" || ev.type === "change"));
-}
-
-function eventFieldKey(ev) {
-  if (!ev || typeof ev !== "object") return "";
-  const raw = `${ev.id || ""}|${ev.label || ""}|${ev.human || ""}|${ev.tag || ""}`;
-  return lower(raw).replace(/\s+/g, " ").trim();
-}
-
-function buildTypingQualifiedSet(events, settings) {
-  const qualified = new WeakSet();
-  if (!Array.isArray(events) || !events.length || !settings.clickBurstIncludeTyping) return qualified;
-  const byField = new Map();
-
-  events.forEach((ev) => {
-    if (!isTypingEvent(ev) || !ev.screenshot) return;
-    const context = clickBurstContext(ev);
-    const fieldKey = eventFieldKey(ev) || "field";
-    const mapKey = `${context.tabId}|${context.pageKey}|${fieldKey}`;
-    const tsMs = eventTsMs(ev, Date.now());
-    const rawValue = String(ev.value || "");
-    const rawLen = Number(ev.valueLength);
-    const valueLen = Number.isFinite(rawLen) ? Math.max(0, rawLen) : rawValue.length;
-    const isRedactedValue = rawValue === "[REDACTED]";
-
-    let state = byField.get(mapKey);
-    if (!state || (tsMs - state.windowStartMs) > settings.clickBurstTypingWindowMs) {
-      state = {
-        windowStartMs: tsMs,
-        charsTyped: 0,
-        lastValueLen: valueLen,
-        windowEvents: []
-      };
-    }
-
-    let deltaChars = valueLen - state.lastValueLen;
-    if (!Number.isFinite(deltaChars)) deltaChars = 0;
-    if (deltaChars <= 0 || isRedactedValue) deltaChars = 1;
-    state.charsTyped += deltaChars;
-    state.lastValueLen = valueLen;
-    state.windowEvents.push(ev);
-    if (state.windowEvents.length > 40) state.windowEvents.shift();
-
-    if (state.charsTyped > settings.clickBurstTypingMinChars) {
-      state.windowEvents.forEach((eventRef) => qualified.add(eventRef));
-    }
-    byField.set(mapKey, state);
-  });
-
-  return qualified;
-}
-
-function isInteractionBurstCandidate(ev, settings, typingQualified) {
-  if (!ev || !ev.screenshot) return false;
-  if (ev && ev.burstHotkeyMode) return true;
-  const type = String(ev.type || "").toLowerCase();
-  if (type === "click") return !!settings.clickBurstIncludeClicks;
-  if (isTypingEvent(ev)) return !!settings.clickBurstIncludeTyping && !!(typingQualified && typingQualified.has(ev));
-  if (!settings.clickBurstTimeBasedAnyEvent) return false;
-  if (type === "note" || type === "outcome") return false;
-  return true;
-}
-
 function clickBurstContext(ev) {
   return {
     tabId: ev && ev.tabId !== undefined ? ev.tabId : null,
@@ -931,17 +835,10 @@ function frameFromEvent(ev, fallbackStepId) {
 function deriveClickBursts(events, rawSettings) {
   const settings = normalizeClickBurstSettings(rawSettings);
   if (!Array.isArray(events) || !events.length) return [];
-  const hasHotkeyBurstCandidates = events.some((ev) => !!(ev && ev.burstHotkeyMode && ev.screenshot));
-  if (!settings.clickBurstEnabled && !hasHotkeyBurstCandidates) return [];
-  const typingQualified = buildTypingQualifiedSet(events, settings);
-
-  const windowMs = settings.clickBurstWindowMs;
-  const maxClicks = settings.clickBurstMaxClicks;
-  const flushMs = settings.clickBurstFlushMs;
+  if (!settings.clickBurstEnabled) return [];
 
   const bursts = [];
   let burstSeq = 0;
-  let pendingSingle = null;
   let activeBurst = null;
 
   const finalizeActive = () => {
@@ -987,27 +884,15 @@ function deriveClickBursts(events, rawSettings) {
 
   const canAppendToActive = (candidate) => {
     if (!activeBurst) return false;
-    if (activeBurst.hotkeyMode) {
-      // In hotkey burst mode, keep one continuous replay stream for the full
-      // ON epoch. Do not split by tab/page context.
-      return (
-        !!candidate.hotkeyMode &&
-        activeBurst.burstModeEpoch === candidate.burstModeEpoch
-      );
-    }
-
-    const gapMs = candidate.tsMs - activeBurst.lastMs;
-    const elapsedMs = candidate.tsMs - activeBurst.startMs;
     return (
-      sameClickBurstContext(activeBurst.context, candidate.context) &&
-      gapMs <= flushMs &&
-      elapsedMs <= windowMs &&
-      activeBurst.frames.length < maxClicks
+      !!candidate.hotkeyMode &&
+      activeBurst.burstModeEpoch === candidate.burstModeEpoch &&
+      sameClickBurstContext(activeBurst.context, candidate.context)
     );
   };
 
   events.forEach((ev, index) => {
-    if (!isInteractionBurstCandidate(ev, settings, typingQualified)) return;
+    if (!ev || !ev.burstHotkeyMode || !ev.screenshot) return;
     const fallbackStepId = `step-${index + 1}`;
     const frame = frameFromEvent(ev, fallbackStepId);
     if (!frame.screenshot) return;
@@ -1028,40 +913,10 @@ function deriveClickBursts(events, rawSettings) {
         return;
       }
       finalizeActive();
-      if (candidate.hotkeyMode) {
-        startHotkeyBurst(candidate);
-      } else {
-        pendingSingle = candidate;
-      }
-      return;
-    }
-
-    if (candidate.hotkeyMode) {
-      pendingSingle = null;
       startHotkeyBurst(candidate);
       return;
     }
-
-    if (!pendingSingle) {
-      pendingSingle = candidate;
-      return;
-    }
-
-    const canStartBurst = sameClickBurstContext(pendingSingle.context, candidate.context);
-
-    if (canStartBurst) {
-      activeBurst = {
-        context: candidate.context,
-        url: candidate.url || pendingSingle.url,
-        startMs: pendingSingle.tsMs,
-        lastMs: candidate.tsMs,
-        frames: [pendingSingle.frame, candidate.frame]
-      };
-      pendingSingle = null;
-      return;
-    }
-
-    pendingSingle = candidate;
+    startHotkeyBurst(candidate);
   });
 
   finalizeActive();
@@ -1138,13 +993,10 @@ function drawBurstMarker(ctx, x, y, markerIndex, markerColor) {
 }
 
 function createClickBurstPlayer(card, burst, options) {
-  const requestedFps = Number(options && options.fps);
-  const fps = Number.isFinite(requestedFps)
-    ? Math.max(1, Math.min(60, Math.round(requestedFps)))
-    : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
+  const fps = CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
   const baseFrameDurationMs = Math.max(16, Math.round(1000 / fps));
-  const markerColor = normalizeHexColor(options && options.markerColor, CLICK_BURST_DEFAULTS.clickBurstMarkerColor);
-  const autoPlay = !!(options && options.autoPlay);
+  const markerColor = CLICK_BURST_DEFAULTS.clickBurstMarkerColor;
+  const autoPlay = CLICK_BURST_DEFAULTS.clickBurstAutoPlay;
   const onJump = options && typeof options.onJump === "function" ? options.onJump : null;
   const onDestroy = options && typeof options.onDestroy === "function" ? options.onDestroy : null;
 
@@ -1159,25 +1011,12 @@ function createClickBurstPlayer(card, burst, options) {
   const controls = el("div", "click-burst-controls");
   const playPause = el("button", "btn ghost btn-small", autoPlay ? "Pause" : "Play");
   playPause.type = "button";
-  const speedWrap = el("label", "click-burst-speed");
-  speedWrap.appendChild(el("span", "click-burst-speed-label", "Speed"));
-  const speedSlider = document.createElement("input");
-  speedSlider.type = "range";
-  speedSlider.min = "0.25";
-  speedSlider.max = "3";
-  speedSlider.step = "0.05";
-  speedSlider.value = "1";
-  speedSlider.className = "click-burst-speed-slider";
-  const speedValue = el("span", "click-burst-speed-value", "1.00x");
-  speedWrap.appendChild(speedSlider);
-  speedWrap.appendChild(speedValue);
   const progress = el("span", "click-burst-progress", "Frame 0/0");
   const jumpFirst = el("button", "btn subtle btn-small", "Jump first");
   jumpFirst.type = "button";
   const jumpLast = el("button", "btn subtle btn-small", "Jump last");
   jumpLast.type = "button";
   controls.appendChild(playPause);
-  controls.appendChild(speedWrap);
   controls.appendChild(progress);
   controls.appendChild(jumpFirst);
   controls.appendChild(jumpLast);
@@ -1214,7 +1053,6 @@ function createClickBurstPlayer(card, burst, options) {
   let isPlaying = autoPlay;
   let timerId = null;
   let destroyed = false;
-  let speedMultiplier = 1;
   let visibleInViewport = true;
   let pageVisible = typeof document !== "undefined" ? !document.hidden : true;
   let visibilityObserver = null;
@@ -1345,14 +1183,13 @@ function createClickBurstPlayer(card, burst, options) {
   const startLoop = () => {
     stopLoop();
     if (!isRuntimePlayable()) return;
-    const frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / Math.max(0.25, Math.min(3, speedMultiplier))));
     timerId = setInterval(() => {
       frameIndex += 1;
       if (frameIndex >= frames.length) {
         frameIndex = 0;
       }
       drawFrame(frameIndex);
-    }, frameDurationMs);
+    }, baseFrameDurationMs);
   };
 
   const setPlaying = (next) => {
@@ -1371,17 +1208,9 @@ function createClickBurstPlayer(card, burst, options) {
     const stepId = last && last.stepId ? last.stepId : "";
     if (stepId && onJump) onJump(stepId);
   };
-  const onSpeedInput = () => {
-    const next = Number(speedSlider.value);
-    speedMultiplier = Number.isFinite(next) ? Math.max(0.25, Math.min(3, next)) : 1;
-    speedValue.textContent = `${speedMultiplier.toFixed(2)}x`;
-    if (isPlaying) startLoop();
-  };
-
   playPause.addEventListener("click", onPlayPauseClick);
   jumpFirst.addEventListener("click", onJumpFirstClick);
   jumpLast.addEventListener("click", onJumpLastClick);
-  speedSlider.addEventListener("input", onSpeedInput);
 
   const updateVisibilityState = () => {
     if (destroyed) return;
@@ -1434,7 +1263,6 @@ function createClickBurstPlayer(card, burst, options) {
       playPause.removeEventListener("click", onPlayPauseClick);
       jumpFirst.removeEventListener("click", onJumpFirstClick);
       jumpLast.removeEventListener("click", onJumpLastClick);
-      speedSlider.removeEventListener("input", onSpeedInput);
       destroyImages();
       frames.forEach((entry) => {
         if (!entry) return;
@@ -1471,9 +1299,6 @@ function renderClickBursts(target, bursts, options) {
     card.appendChild(head);
 
     const player = createClickBurstPlayer(card, burst, {
-      markerColor: options && options.markerColor,
-      autoPlay: options && options.autoPlay,
-      fps: options && options.fps,
       onJump: options && options.onJump
     });
     players.push(player);
@@ -2269,9 +2094,6 @@ function buildExportHtml(report, options = {}) {
     };
   });
   const burstDataJson = JSON.stringify({
-    markerColor: burstSettings.clickBurstMarkerColor,
-    autoPlay: burstSettings.clickBurstAutoPlay,
-    fps: burstSettings.clickBurstPlaybackFps,
     bursts: burstData
   }).replace(/</g, "\\u003c");
   const burstInsertionMap = buildBurstInsertionMap(derivedBursts);
@@ -2542,21 +2364,6 @@ body{
   color:var(--muted);
   font-size:10px;
 }
-.click-burst-export-speed{
-  display:inline-flex;
-  align-items:center;
-  gap:4px;
-  font-size:10px;
-  color:var(--muted);
-}
-.click-burst-export-speed input[type="range"]{
-  width:90px;
-}
-.click-burst-export-speed-value{
-  min-width:34px;
-  text-align:right;
-  color:var(--ink);
-}
 @media print {
   body{margin:0.45in;background:#fff}
   .toc{page-break-inside:avoid}
@@ -2579,10 +2386,9 @@ ${rows}
   var slots = Array.prototype.slice.call(document.querySelectorAll(".click-burst-export-slot[data-burst-index]"));
   if (!slots.length) return;
   var bursts = Array.isArray(payload && payload.bursts) ? payload.bursts : [];
-  var markerColor = (payload && payload.markerColor) || "#2563eb";
-  var autoPlay = !!(payload && payload.autoPlay);
-  var fpsRaw = Number(payload && payload.fps);
-  var fps = Number.isFinite(fpsRaw) ? Math.max(1, Math.min(60, Math.round(fpsRaw))) : ${CLICK_BURST_DEFAULTS.clickBurstPlaybackFps};
+  var markerColor = "${CLICK_BURST_DEFAULTS.clickBurstMarkerColor}";
+  var autoPlay = ${CLICK_BURST_DEFAULTS.clickBurstAutoPlay ? "true" : "false"};
+  var fps = ${CLICK_BURST_DEFAULTS.clickBurstPlaybackFps};
   var markerCap = ${CLICK_BURST_RENDER_MARKER_CAP};
   var baseFrameDurationMs = Math.max(16, Math.round(1000 / fps));
 
@@ -2642,23 +2448,6 @@ ${rows}
     toggle.type = "button";
     toggle.textContent = autoPlay ? "Pause" : "Play";
     controls.appendChild(toggle);
-    var speedWrap = document.createElement("label");
-    speedWrap.className = "click-burst-export-speed";
-    var speedLabel = document.createElement("span");
-    speedLabel.textContent = "Speed";
-    speedWrap.appendChild(speedLabel);
-    var speed = document.createElement("input");
-    speed.type = "range";
-    speed.min = "0.25";
-    speed.max = "3";
-    speed.step = "0.05";
-    speed.value = "1";
-    speedWrap.appendChild(speed);
-    var speedValue = document.createElement("span");
-    speedValue.className = "click-burst-export-speed-value";
-    speedValue.textContent = "1.00x";
-    speedWrap.appendChild(speedValue);
-    controls.appendChild(speedWrap);
     var progress = document.createElement("span");
     progress.className = "click-burst-export-progress";
     progress.textContent = "Frame 0/0";
@@ -2699,7 +2488,6 @@ ${rows}
       var frameIndex = 0;
       var isPlaying = autoPlay;
       var timer = null;
-      var speedMultiplier = 1;
 
       function drawFrame(i) {
         var frame = loaded[i];
@@ -2729,14 +2517,13 @@ ${rows}
       function startLoop() {
         stopLoop();
         if (!isPlaying || loaded.length < 2) return;
-        var frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / Math.max(0.25, Math.min(3, speedMultiplier))));
         timer = setInterval(function () {
           frameIndex += 1;
           if (frameIndex >= loaded.length) {
             frameIndex = 0;
           }
           drawFrame(frameIndex);
-        }, frameDurationMs);
+        }, baseFrameDurationMs);
       }
 
       function setPlaying(next) {
@@ -2747,12 +2534,6 @@ ${rows}
 
       toggle.addEventListener("click", function () {
         setPlaying(!isPlaying);
-      });
-      speed.addEventListener("input", function () {
-        var next = Number(speed.value);
-        speedMultiplier = Number.isFinite(next) ? Math.max(0.25, Math.min(3, next)) : 1;
-        speedValue.textContent = speedMultiplier.toFixed(2) + "x";
-        if (isPlaying) startLoop();
       });
 
       drawFrame(frameIndex);
@@ -3416,7 +3197,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     const events = view.displayEvents;
     const burstFrameMap = view.burstFrameMap;
     const burstInsertionMap = buildBurstInsertionMap(view.bursts);
-    const burstSettings = view.burstSettings;
     const eventPositionMap = new Map();
     report.events.forEach((item, pos) => eventPositionMap.set(item, pos));
     updateAux(events, view.bursts, view.sourceEvents);
@@ -3759,9 +3539,6 @@ document.addEventListener("DOMContentLoaded", async () => {
           burstHost,
           inlineBursts.map((entry) => entry.burst),
           {
-            markerColor: burstSettings.clickBurstMarkerColor,
-            autoPlay: burstSettings.clickBurstAutoPlay,
-            fps: burstSettings.clickBurstPlaybackFps,
             onJump: (stepId) => {
               if (!stepId) return;
               if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
