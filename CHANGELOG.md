@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.13.1 - 2026-02-09
+
+### Changed
+- Controls navigation no longer forces the settings shell open; section expansion now follows explicit user toggles.
+- Theme toggle moved into the settings identity stripe and restyled as a rail-aligned rectangular control to match the updated shell layout.
+- Report identity and export-theme subgroup defaults are now collapsed for quieter first-open behavior.
+
+### Fixed
+- Corrected controls-rail alignment and spacing inconsistencies in popup-style parity mode.
+- Removed unexpected auto-open behavior for identity/theme groups when opening reports from the extension.
+
 ## v1.13.0 - 2026-02-09
 
 ### Changed
