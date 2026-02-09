@@ -83,16 +83,16 @@ const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
 const HOTKEY_STOP_GRACE_MS = 2000;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
-const FRAME_SPOOL_BACKPRESSURE_RESUME_THRESHOLD = 12;
+const FRAME_SPOOL_BACKPRESSURE_RESUME_THRESHOLD = 8;
 
 const frameSpool = (
   typeof self !== "undefined" &&
   self.UIRFrameSpool &&
   typeof self.UIRFrameSpool.createService === "function"
 ) ? self.UIRFrameSpool.createService({
-  captureQueueMax: 8,
-  processQueueMax: 16,
-  writeQueueMax: 24,
+  captureQueueMax: 6,
+  processQueueMax: 12,
+  writeQueueMax: 18,
   log: (event, payload) => bgLog(event, payload),
   warn: (event, payload) => bgWarn(event, payload)
 }) : null;
@@ -765,7 +765,7 @@ async function captureBurstFrameFixedRate() {
 function maybePersistBurstLoopState() {
   if (burstLoopPersistInFlight) return;
   const frameMs = getHotkeyBurstFrameMs();
-  const minPersistIntervalMs = Math.max(400, Math.round(frameMs * 8));
+  const minPersistIntervalMs = Math.max(2500, Math.round(frameMs * 20));
   const now = Date.now();
   if ((now - burstLoopLastPersistAtMs) < minPersistIntervalMs) return;
 

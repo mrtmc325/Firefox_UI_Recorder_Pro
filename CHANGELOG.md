@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.13.3 - 2026-02-09
+
+### Changed
+- Memory hardening for burst playback/frame loading:
+  - reduced in-editor burst prefetch and concurrent frame decode limits for lower idle pressure.
+  - burst player now evicts far frame images more aggressively and avoids retaining ref-backed frame data URLs in card state.
+- Background burst spool defaults tuned to safer queue depths with tighter resume thresholds to reduce backpressure oscillation.
+- Burst-loop persistence cadence reduced to avoid frequent full-state serialization during long recordings.
+- Cross-tab timeline interaction bursts can now be drag/dropped as whole burst blocks (swap up/down remains available).
+
+### Fixed
+- Released transient spool payload memory after conversion/write:
+  - clear queued `dataUrl` strings once converted to blobs.
+  - clear per-item blobs/meta after IndexedDB write completion.
+- Reduced long-idle report-editor churn by throttling burst-frame status recomputation and skipping offscreen prefetch work.
+- Timeline column headers now stay bound to tab/site labels and no longer inherit burst display titles.
+
 ## v1.13.2 - 2026-02-09
 
 ### Changed

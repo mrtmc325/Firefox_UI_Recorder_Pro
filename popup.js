@@ -120,6 +120,9 @@ async function refresh() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   popupLog("DOMContentLoaded");
+  Array.from(document.querySelectorAll(".settings-card .settings-group")).forEach((group) => {
+    if (group && typeof group.open === "boolean") group.open = false;
+  });
   document.getElementById("start").addEventListener("click", async () => {
     await sendMessageSafe({ type: "START_RECORDING" });
     await refresh();

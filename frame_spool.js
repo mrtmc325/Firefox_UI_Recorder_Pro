@@ -161,9 +161,9 @@
 
   function FrameSpoolService(options) {
     var opts = options || {};
-    this.captureQueueMax = Math.max(1, Number(opts.captureQueueMax) || 8);
-    this.processQueueMax = Math.max(1, Number(opts.processQueueMax) || 16);
-    this.writeQueueMax = Math.max(1, Number(opts.writeQueueMax) || 24);
+    this.captureQueueMax = Math.max(1, Number(opts.captureQueueMax) || 6);
+    this.processQueueMax = Math.max(1, Number(opts.processQueueMax) || 12);
+    this.writeQueueMax = Math.max(1, Number(opts.writeQueueMax) || 18);
     this.captureQueue = [];
     this.processQueue = [];
     this.writeQueue = [];
@@ -373,6 +373,7 @@
         try {
           if (!item.frameId) item.frameId = createFrameId();
           item.blob = dataUrlToBlob(item.dataUrl);
+          item.dataUrl = "";
           item.mime = String(item.blob.type || "image/png");
           item.byteLength = Number(item.blob.size) || 0;
           item.createdAtMs = Number(item.meta && item.meta.createdAtMs) || item.createdAtMs || nowMs();
@@ -402,6 +403,10 @@
         } catch (err) {
           item.reject(err);
           this._warnEvent("frame-spool:write-error", { error: String((err && err.message) || err) });
+        } finally {
+          item.dataUrl = "";
+          item.blob = null;
+          item.meta = null;
         }
       }
     } finally {

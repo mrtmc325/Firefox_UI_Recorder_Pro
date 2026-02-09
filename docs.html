@@ -8,16 +8,22 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.13.2. This patch nests settings under Builder Navigation controls and aligns open/close behavior across report and popup surfaces.</p>
+    <p>Version 1.13.3. This patch adds timeline interaction burst drag/drop parity, fixes timeline header labeling, and includes additional burst memory hardening.</p>
 
-    <h2>Version Notes (v1.13.2)</h2>
+    <h2>Version Notes (v1.13.3)</h2>
     <ul>
+      <li>Cross-tab timeline now supports drag/drop for interaction burst rows, moving entire burst blocks while preserving burst integrity.</li>
+      <li>Timeline column headers now use true tab/site labels only; burst display titles no longer leak into column headers.</li>
+      <li>Burst player/frame pipeline memory hardening added for lower idle pressure in long-running report-editor sessions.</li>
       <li>Builder navigation now owns the controls shell, so the full settings payload expands/collapses directly under <strong>Controls</strong> in the left rail.</li>
       <li>Workflow center nav links now toggle their matching sections open/closed on click instead of forcing open only.</li>
       <li>Popup <strong>Capture</strong> group no longer auto-opens by default.</li>
       <li>Controls hash routing keeps deep-link support (<code>#section-controls</code>) while avoiding unrelated auto-expansion.</li>
       <li>Burst frame storage now uses a disk-backed triple-collector spool pipeline (IndexedDB) so long sessions avoid local-storage screenshot bloat.</li>
       <li>Hotkey burst capture now writes lightweight <code>screenshotRef</code> metadata into events; frame bytes are lazy-loaded on demand in builder/export.</li>
+      <li>Burst spool now releases transient queue payloads (<code>dataUrl</code>/blob/meta) immediately after conversion/write to reduce peak heap usage.</li>
+      <li>Burst spool queue caps/resume thresholds were reduced to limit backpressure churn and idle memory buildup during long recordings.</li>
+      <li>Burst playback now uses lower prefetch/decode concurrency and avoids retaining ref-backed frame data URLs after eviction.</li>
       <li>Hotkey stop now uses a 2000ms grace window so final GIF burst frames can be captured before recording fully ends.</li>
       <li>Pressing the record hotkey again during the stop grace window performs an immediate stop.</li>
       <li>Synthetic pre-burst source rows are now condensed from visible step lists; replay cards remain inline in chronological flow.</li>

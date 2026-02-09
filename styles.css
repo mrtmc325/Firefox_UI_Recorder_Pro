@@ -559,16 +559,8 @@ body.report {
   margin-top: 2px;
 }
 
-.report-nav-card-builder .report-nav-links-primary {
-  gap: 6px;
-}
-
 .report-nav-card-builder .report-nav-links-secondary {
   margin-top: 2px;
-}
-
-.report-nav-card-builder .nav-link-controls {
-  margin-bottom: 2px;
 }
 
 .report-config-shell > summary::-webkit-details-marker {
@@ -921,12 +913,12 @@ body.report #section-controls.settings-card .settings-group-body {
 }
 
 .report-config-shell .theme-toggle-rail {
-  width: 48px;
-  height: 40px;
-  min-width: 48px;
-  min-height: 40px;
-  margin-top: 4px;
-  border-radius: 10px;
+  width: 52px;
+  height: 34px;
+  min-width: 52px;
+  min-height: 34px;
+  margin-top: auto;
+  border-radius: 9px;
 }
 
 .section-context-badge {
@@ -2066,6 +2058,21 @@ body.report.report-dense .annot-tools {
   text-transform: var(--report-h3-transform);
   color: var(--ink);
   word-break: break-word;
+  border-radius: 8px;
+  padding: 2px 4px;
+  outline: none;
+}
+
+.click-burst-title[contenteditable="true"]:focus {
+  background: rgba(14, 165, 233, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(14, 165, 233, 0.32);
+}
+
+.click-burst-actions {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 8px;
+  flex-wrap: wrap;
 }
 
 .click-burst-meta {
@@ -2141,6 +2148,14 @@ body.report.report-dense .annot-tools {
   background: var(--panel);
   box-shadow: var(--shadow);
   transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.step.step-burst {
+  padding: 10px 12px;
+}
+
+.step.step-burst .inline-burst-card {
+  margin: 8px 0 0;
 }
 
 .step:hover {
@@ -2332,6 +2347,11 @@ body.report.report-dark .report-nav-card {
   border-color: #24262b;
 }
 
+body.report.report-dark .report-nav-card-builder #section-controls.report-config-shell.report-config-card {
+  border-color: #2a2d34;
+  background: linear-gradient(180deg, #101216, #0d0f13);
+}
+
 body.report.report-dark .config-shell-summary {
   background: linear-gradient(135deg, rgba(96, 142, 219, 0.16), rgba(34, 197, 94, 0.1));
 }
@@ -2361,6 +2381,10 @@ body.report.report-dark .controls-card-title {
 body.report.report-dark .settings-app-stripe {
   border-color: #2a2d34;
   background: linear-gradient(180deg, #101216, #0d0f13);
+}
+
+body.report.report-dark #section-controls .config-shell-body {
+  background: linear-gradient(180deg, #0e1116, #0b0d11);
 }
 
 body.report.report-dark .report-nav-card:hover {

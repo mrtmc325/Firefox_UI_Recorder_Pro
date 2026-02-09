@@ -59,13 +59,14 @@ const CLICK_BURST_RENDER_MARKER_CAP = 10;
 const CLICK_BURST_MARKER_SCALE = 3;
 const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const FRAME_DATA_URL_CACHE_MAX = 40;
+const FRAME_DATA_URL_CACHE_MAX = 24;
+const FRAME_DATA_URL_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const FRAME_REF_RESOLVE_RETRIES_DEFAULT = 16;
 const FRAME_REF_RESOLVE_RETRY_MS_DEFAULT = 120;
 const FRAME_REF_RESOLVE_RETRY_MAX_MS = 1000;
 const FRAME_REF_PLAYER_MAX_RETRIES = 20;
-const FRAME_REF_PLAYER_MAX_CONCURRENT_LOADS = 6;
-const FRAME_REF_PLAYER_PREFETCH_AHEAD = 6;
+const FRAME_REF_PLAYER_MAX_CONCURRENT_LOADS = 3;
+const FRAME_REF_PLAYER_PREFETCH_AHEAD = 2;
 
 const frameSpoolClient = (
   typeof self !== "undefined" &&
@@ -78,6 +79,7 @@ const frameSpoolClient = (
 }) : null;
 let frameSpoolReadyPromise = null;
 const frameDataUrlCache = new Map();
+let frameDataUrlCacheBytes = 0;
 let frameSpoolGcTimer = null;
 let frameSpoolSyncTimer = null;
 let frameSpoolPendingReports = null;
@@ -468,20 +470,32 @@ async function ensureFrameSpoolClientReady() {
 function readFrameDataUrlCache(frameId) {
   const key = String(frameId || "").trim();
   if (!key || !frameDataUrlCache.has(key)) return "";
-  const value = frameDataUrlCache.get(key);
+  const entry = frameDataUrlCache.get(key);
   frameDataUrlCache.delete(key);
-  frameDataUrlCache.set(key, value);
-  return value;
+  frameDataUrlCache.set(key, entry);
+  return entry && entry.dataUrl ? entry.dataUrl : "";
 }
 
 function writeFrameDataUrlCache(frameId, dataUrl) {
   const key = String(frameId || "").trim();
   const val = String(dataUrl || "");
   if (!key || !val) return;
-  if (frameDataUrlCache.has(key)) frameDataUrlCache.delete(key);
-  frameDataUrlCache.set(key, val);
-  while (frameDataUrlCache.size > FRAME_DATA_URL_CACHE_MAX) {
+  const byteLength = val.length * 2;
+  if (frameDataUrlCache.has(key)) {
+    const existing = frameDataUrlCache.get(key);
+    frameDataUrlCacheBytes = Math.max(0, frameDataUrlCacheBytes - Number(existing && existing.byteLength || 0));
+    frameDataUrlCache.delete(key);
+  }
+  frameDataUrlCache.set(key, { dataUrl: val, byteLength });
+  frameDataUrlCacheBytes += byteLength;
+  while (
+    frameDataUrlCache.size > FRAME_DATA_URL_CACHE_MAX ||
+    frameDataUrlCacheBytes > FRAME_DATA_URL_CACHE_MAX_BYTES
+  ) {
     const oldestKey = frameDataUrlCache.keys().next().value;
+    if (!oldestKey) break;
+    const oldest = frameDataUrlCache.get(oldestKey);
+    frameDataUrlCacheBytes = Math.max(0, frameDataUrlCacheBytes - Number(oldest && oldest.byteLength || 0));
     frameDataUrlCache.delete(oldestKey);
   }
 }
@@ -1262,6 +1276,16 @@ function sameClickBurstContext(a, b) {
   return a.tabId === b.tabId && a.pageKey === b.pageKey;
 }
 
+function burstDisplayTitle(burst, fallbackIndex = 0) {
+  const customTitle = String(burst && burst.customTitle || "").trim();
+  if (customTitle) return customTitle;
+  const tabTitle = String(burst && burst.tabTitle || "").trim();
+  if (tabTitle) return tabTitle;
+  const pageKey = String(burst && burst.pageKey || "").trim();
+  if (pageKey) return pageKey;
+  return `Burst ${Number(fallbackIndex) + 1}`;
+}
+
 function frameFromEvent(ev, fallbackStepId) {
   const viewportW = Math.max(1, Number(ev && ev.viewportW) || 1);
   const viewportH = Math.max(1, Number(ev && ev.viewportH) || 1);
@@ -1333,6 +1357,7 @@ function deriveClickBursts(events, rawSettings) {
         id: `burst-${++burstSeq}`,
         tabId: activeBurst.context.tabId,
         tabTitle: activeBurst.context.tabTitle,
+        customTitle: activeBurst.customTitle || "",
         pageKey: activeBurst.context.pageKey,
         url: activeBurst.url || (first && first.event ? first.event.url : ""),
         startMs,
@@ -1373,6 +1398,11 @@ function deriveClickBursts(events, rawSettings) {
     return normalizeHotkeyBurstFpsForReport(parsed);
   };
 
+  const candidateCustomTitle = (ev) => {
+    const text = String(ev && ev.burstTitle || "").trim();
+    return text || "";
+  };
+
   const startHotkeyBurst = (candidate) => {
     activeBurst = {
       context: candidate.context,
@@ -1386,6 +1416,7 @@ function deriveClickBursts(events, rawSettings) {
       burstRunId: candidate.burstRunId,
       runKey: candidate.runKey,
       targetFps: Number.isFinite(candidate.targetFps) ? candidate.targetFps : targetFps,
+      customTitle: candidate.customTitle || "",
       pageShiftCount: 0,
       tabShiftCount: 0
     };
@@ -1417,7 +1448,8 @@ function deriveClickBursts(events, rawSettings) {
       burstModeEpoch: candidateEpoch(ev),
       burstRunId: candidateRunId(ev),
       runKey: candidateRunKey(ev),
-      targetFps: candidateTargetFps(ev)
+      targetFps: candidateTargetFps(ev),
+      customTitle: candidateCustomTitle(ev)
     };
 
     if (activeBurst) {
@@ -1442,6 +1474,9 @@ function deriveClickBursts(events, rawSettings) {
         if (Number.isFinite(candidate.targetFps)) {
           activeBurst.targetFps = candidate.targetFps;
         }
+        if (!activeBurst.customTitle && candidate.customTitle) {
+          activeBurst.customTitle = candidate.customTitle;
+        }
         activeBurst.lastMs = candidate.tsMs;
         activeBurst.lastContext = candidate.context;
         return;
@@ -1463,7 +1498,8 @@ function buildBurstFrameMap(bursts) {
   bursts.forEach((burst) => {
     const burstId = burst && burst.id ? String(burst.id) : "";
     const totalFrames = Array.isArray(burst && burst.frames) ? burst.frames.length : 0;
-    const title = burst && burst.tabTitle ? String(burst.tabTitle) : "";
+    const title = burstDisplayTitle(burst);
+    const hotkeyMode = !!(burst && burst.hotkeyMode);
     if (!totalFrames) return;
     burst.frames.forEach((frame, frameIndex) => {
       const stepId = frame && frame.stepId ? String(frame.stepId) : "";
@@ -1473,7 +1509,8 @@ function buildBurstFrameMap(bursts) {
           burstId,
           totalFrames,
           frameIndex,
-          title
+          title,
+          hotkeyMode
         });
       }
     });
@@ -1533,6 +1570,52 @@ function buildBurstInsertionPlan(sourceEvents, displayEvents, bursts) {
   return { byStepId, prelude };
 }
 
+function burstDomId(burst, fallbackIndex = 0) {
+  const raw = String(
+    (burst && burst.id) ? burst.id : `idx-${Number(fallbackIndex) + 1}`
+  );
+  const safe = raw.replace(/[^a-zA-Z0-9_-]+/g, "-");
+  return `burst-card-${safe}`;
+}
+
+function buildTimelineDisplayEvents(displayEvents, burstInsertionPlan) {
+  const output = [];
+  const appendBurstEntries = (entries) => {
+    if (!Array.isArray(entries) || !entries.length) return;
+    entries.forEach((entry, localIndex) => {
+      const burst = entry && entry.burst ? entry.burst : null;
+      if (!burst || !Array.isArray(burst.frames) || burst.frames.length < 2) return;
+      const stepId = burstDomId(burst, Number(entry && entry.burstIndex) || localIndex);
+      const tsIso = new Date(Number(burst.startMs) || Date.now()).toISOString();
+      output.push({
+        __isBurstItem: true,
+        __burst: burst,
+        __burstIndex: Number(entry && entry.burstIndex) || localIndex,
+        __timelineLabel: burstDisplayTitle(burst, Number(entry && entry.burstIndex) || localIndex),
+        stepId,
+        ts: tsIso,
+        type: "interaction",
+        url: String(burst && burst.url || ""),
+        tabId: burst && burst.tabId !== undefined ? burst.tabId : null,
+        tabTitle: String(burst && burst.tabTitle || ""),
+        editedTitle: burstDisplayTitle(burst, Number(entry && entry.burstIndex) || localIndex)
+      });
+    });
+  };
+
+  appendBurstEntries(burstInsertionPlan && burstInsertionPlan.prelude ? burstInsertionPlan.prelude : []);
+  (Array.isArray(displayEvents) ? displayEvents : []).forEach((ev) => {
+    output.push(ev);
+    const key = ev && ev.stepId ? String(ev.stepId) : "";
+    if (!key) return;
+    const entries = burstInsertionPlan && burstInsertionPlan.byStepId
+      ? burstInsertionPlan.byStepId.get(key)
+      : null;
+    appendBurstEntries(entries || []);
+  });
+  return output;
+}
+
 function eventHasScreenshotAsset(ev) {
   if (!ev || typeof ev !== "object") return false;
   const hasInline = typeof ev.screenshot === "string" && !!ev.screenshot.trim();
@@ -1562,6 +1645,9 @@ function isImpliedBurstStep(ev, burstFrameMap, burstSettings) {
   if (!stepId) return false;
   const burstFrame = burstFrameMap.get(stepId);
   if (!burstFrame) return false;
+  if (burstFrame.hotkeyMode && !ev.annotation) {
+    return true;
+  }
   if (ev.burstSynthetic && !ev.annotation) {
     // Synthetic burst frames should stay implied; replay cards are the visible artifact.
     return true;
@@ -1687,7 +1773,7 @@ function createClickBurstPlayer(card, burst, options) {
       const ref = cloneScreenshotRef(frame && frame.screenshotRef);
       if (!src && !ref) return null;
       return {
-        src,
+        src: ref ? "" : src,
         ref,
         marker: frame && frame.marker ? frame.marker : null,
         stepId: frame && frame.stepId ? String(frame.stepId) : "",
@@ -1714,6 +1800,7 @@ function createClickBurstPlayer(card, burst, options) {
   let visibilityListenerAttached = false;
   let activeFrameLoads = 0;
   let lastFrameStatusPaintAt = 0;
+  let frameStateDirty = true;
 
   const stopLoop = () => {
     if (timerId) {
@@ -1745,6 +1832,7 @@ function createClickBurstPlayer(card, burst, options) {
         entry.pendingReason = "";
       }
     });
+    frameStateDirty = true;
   };
 
   const evictFarFrames = (center) => {
@@ -1755,6 +1843,7 @@ function createClickBurstPlayer(card, burst, options) {
       if (Math.abs(idx - center) <= evictDistance) return;
       entry.img.src = "";
       entry.img = null;
+      if (entry.ref) entry.src = "";
     });
   };
 
@@ -1777,10 +1866,14 @@ function createClickBurstPlayer(card, burst, options) {
 
   const updateFrameStatus = (force = false) => {
     const now = Date.now();
-    if (!force && (now - lastFrameStatusPaintAt) < 120) return;
+    if (!force) {
+      if (!frameStateDirty) return;
+      if ((now - lastFrameStatusPaintAt) < 250) return;
+    }
     lastFrameStatusPaintAt = now;
     const stats = summarizeFrameState();
     frameStatus.textContent = `Loaded ${stats.loaded}/${stats.total} • Pending ${stats.pending} • Missing ${stats.missing}`;
+    frameStateDirty = false;
   };
 
   const scheduleFrameRetry = (frame, reason, terminal) => {
@@ -1800,6 +1893,7 @@ function createClickBurstPlayer(card, burst, options) {
       );
       frame.nextRetryAtMs = Date.now() + retryDelay;
     }
+    frameStateDirty = true;
     updateFrameStatus(true);
   };
 
@@ -1809,6 +1903,9 @@ function createClickBurstPlayer(card, burst, options) {
     if (!frame) return Promise.resolve(null);
     if (frame.img) return Promise.resolve(frame);
     if (frame.terminalFailure) return Promise.resolve(null);
+    if (!force && (!visibleInViewport || !pageVisible) && index !== frameIndex) {
+      return Promise.resolve(null);
+    }
     if (Number.isFinite(frame.nextRetryAtMs) && frame.nextRetryAtMs > Date.now()) {
       return Promise.resolve(null);
     }
@@ -1829,7 +1926,7 @@ function createClickBurstPlayer(card, burst, options) {
           finish(null);
           return;
         }
-        frame.src = src;
+        if (!frame.ref) frame.src = src;
         const img = new Image();
         img.onload = () => {
           frame.pending = null;
@@ -1843,6 +1940,7 @@ function createClickBurstPlayer(card, burst, options) {
           frame.nextRetryAtMs = 0;
           frame.terminalFailure = false;
           frame.pendingReason = "";
+          frameStateDirty = true;
           updateFrameStatus(true);
           finish(frame);
         };
@@ -1874,6 +1972,7 @@ function createClickBurstPlayer(card, burst, options) {
 
   const prefetchNear = (index) => {
     ensureFrameLoaded(index, true);
+    if (!visibleInViewport || !pageVisible) return;
     ensureFrameLoaded(index - 1, false);
     for (let step = 1; step <= FRAME_REF_PLAYER_PREFETCH_AHEAD; step++) {
       ensureFrameLoaded(index + step, false);
@@ -1901,7 +2000,7 @@ function createClickBurstPlayer(card, burst, options) {
     if (!frame.img) {
       progress.textContent = `Frame ${index + 1}/${frames.length}`;
       drawPlaceholder(frame.terminalFailure ? "Frame unavailable" : "Loading frame…");
-      updateFrameStatus(true);
+      updateFrameStatus(false);
       ensureFrameLoaded(index).then((loaded) => {
         if (destroyed || !loaded || frameIndex !== index) return;
         drawFrame(index);
@@ -1929,7 +2028,7 @@ function createClickBurstPlayer(card, burst, options) {
     }
 
     progress.textContent = `Frame ${index + 1}/${frames.length}`;
-    updateFrameStatus(true);
+    updateFrameStatus(false);
   };
 
   const startLoop = () => {
@@ -2007,7 +2106,27 @@ function createClickBurstPlayer(card, burst, options) {
     playPause.disabled = true;
     jumpFirst.disabled = true;
     jumpLast.disabled = true;
-    return { destroy: () => {} };
+    return {
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        stopLoop();
+        if (visibilityObserver) {
+          try { visibilityObserver.disconnect(); } catch (_) {}
+          visibilityObserver = null;
+        }
+        if (visibilityListenerAttached) {
+          try { document.removeEventListener("visibilitychange", updateVisibilityState); } catch (_) {}
+          visibilityListenerAttached = false;
+        }
+        playPause.removeEventListener("click", onPlayPauseClick);
+        jumpFirst.removeEventListener("click", onJumpFirstClick);
+        jumpLast.removeEventListener("click", onJumpLastClick);
+        speedInput.removeEventListener("input", onSpeedInput);
+        speedInput.removeEventListener("change", onSpeedChange);
+        destroyImages();
+      }
+    };
   }
 
   frameIndex = 0;
@@ -2060,12 +2179,40 @@ function renderClickBursts(target, bursts, options) {
     return [];
   }
 
+  const burstEntries = bursts.map((item, index) => (
+    item && typeof item === "object" && item.burst
+      ? { burst: item.burst, burstIndex: Number.isFinite(Number(item.burstIndex)) ? Number(item.burstIndex) : index }
+      : { burst: item, burstIndex: index }
+  ));
+
+  const onMoveBurst = options && typeof options.onMoveBurst === "function" ? options.onMoveBurst : null;
+  const canMoveBurst = options && typeof options.canMoveBurst === "function" ? options.canMoveBurst : null;
+  const onRenameBurst = options && typeof options.onRenameBurst === "function" ? options.onRenameBurst : null;
+
   const players = [];
-  bursts.forEach((burst, index) => {
+  burstEntries.forEach((entry, index) => {
+    const burst = entry && entry.burst ? entry.burst : null;
+    if (!burst || !Array.isArray(burst.frames) || burst.frames.length < 2) return;
     const card = el("article", "click-burst-card");
     const head = el("div", "click-burst-head");
-    const burstTitle = burst.tabTitle || burst.pageKey || `Burst ${index + 1}`;
-    head.appendChild(el("div", "click-burst-title", burstTitle));
+    const burstTitle = burstDisplayTitle(burst, index);
+    const titleNode = el("div", "click-burst-title", burstTitle);
+    titleNode.contentEditable = "true";
+    titleNode.spellcheck = false;
+    titleNode.setAttribute("role", "textbox");
+    titleNode.setAttribute("aria-label", "Burst title");
+    titleNode.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        titleNode.blur();
+      }
+    });
+    titleNode.addEventListener("blur", () => {
+      const nextTitle = String(titleNode.textContent || "").trim();
+      titleNode.textContent = nextTitle || burstDisplayTitle({ ...burst, customTitle: "" }, index);
+      if (onRenameBurst) onRenameBurst(burst, nextTitle);
+    });
+    head.appendChild(titleNode);
     const startLabel = formatExportTimestamp(new Date(burst.startMs || Date.now()).toISOString());
     const endLabel = formatExportTimestamp(new Date(burst.endMs || Date.now()).toISOString());
     const meta = `${burst.frames.length} interactions • ${startLabel} → ${endLabel}`;
@@ -2087,6 +2234,21 @@ function renderClickBursts(target, bursts, options) {
     }
     card.appendChild(head);
 
+    const actions = el("div", "click-burst-actions noprint");
+    const moveUp = el("button", "btn ghost", "Move up");
+    const moveDown = el("button", "btn ghost", "Move down");
+    moveUp.disabled = !(canMoveBurst && canMoveBurst(burst, -1));
+    moveDown.disabled = !(canMoveBurst && canMoveBurst(burst, 1));
+    moveUp.addEventListener("click", () => {
+      if (onMoveBurst) onMoveBurst(burst, -1);
+    });
+    moveDown.addEventListener("click", () => {
+      if (onMoveBurst) onMoveBurst(burst, 1);
+    });
+    actions.appendChild(moveUp);
+    actions.appendChild(moveDown);
+    card.appendChild(actions);
+
     const player = createClickBurstPlayer(card, burst, {
       showMarkers: !burst.hotkeyMode,
       markerColor: options && options.markerColor,
@@ -2105,9 +2267,13 @@ function renderClickBursts(target, bursts, options) {
 function renderTimeline(target, events, options) {
   const onMove = options && typeof options.onMove === "function" ? options.onMove : null;
   const canMove = options && typeof options.canMove === "function" ? options.canMove : null;
+  const onMoveBurst = options && typeof options.onMoveBurst === "function" ? options.onMoveBurst : null;
+  const canMoveBurst = options && typeof options.canMoveBurst === "function" ? options.canMoveBurst : null;
   const onDraw = options && typeof options.onDraw === "function" ? options.onDraw : null;
   const onDragDrop = options && typeof options.onDragDrop === "function" ? options.onDragDrop : null;
+  const onDragDropBurst = options && typeof options.onDragDropBurst === "function" ? options.onDragDropBurst : null;
   const getColumnContext = options && typeof options.getColumnContext === "function" ? options.getColumnContext : null;
+  const hasAnyDragDrop = !!(onDragDrop || onDragDropBurst);
 
   target.innerHTML = "";
   const byTab = new Map();
@@ -2156,7 +2322,11 @@ function renderTimeline(target, events, options) {
   }
 
   function resolveColumnPlacement(col, clientY) {
-    const blocks = Array.from(col.querySelectorAll(".timeline-event")).filter((block) => block && block !== draggedBlock && block.__timelineEvent);
+    const blocks = Array.from(col.querySelectorAll(".timeline-event")).filter((block) => (
+      block &&
+      block !== draggedBlock &&
+      block.__timelineEvent
+    ));
     if (!blocks.length) {
       return { targetEvent: null, place: "after", markerBlock: null };
     }
@@ -2171,8 +2341,19 @@ function renderTimeline(target, events, options) {
     return { targetEvent: last.__timelineEvent, place: "after", markerBlock: last };
   }
 
+  function dispatchDrop(draggedItem, targetItem, place, context) {
+    if (!draggedItem) return Promise.resolve();
+    const isBurstDrag = !!(draggedItem.__isBurstItem && draggedItem.__burst);
+    if (isBurstDrag) {
+      if (!onDragDropBurst) return Promise.resolve();
+      return Promise.resolve(onDragDropBurst(draggedItem.__burst, targetItem, place, context));
+    }
+    if (!onDragDrop) return Promise.resolve();
+    return Promise.resolve(onDragDrop(draggedItem, targetItem, place, context));
+  }
+
   function enableColumnDrop(col, columnContext) {
-    if (!onDragDrop) return;
+    if (!hasAnyDragDrop) return;
     col.addEventListener("dragenter", (event) => {
       if (!draggedEvent) return;
       event.preventDefault();
@@ -2198,14 +2379,18 @@ function renderTimeline(target, events, options) {
       event.preventDefault();
       event.stopPropagation();
       const targetBlock = closestTimelineBlock(event.target);
-      if (targetBlock && targetBlock.__timelineEvent && targetBlock !== draggedBlock) {
+      if (
+        targetBlock &&
+        targetBlock.__timelineEvent &&
+        targetBlock !== draggedBlock
+      ) {
         const rect = targetBlock.getBoundingClientRect();
         const place = event.clientY < (rect.top + rect.height / 2) ? "before" : "after";
-        Promise.resolve(onDragDrop(draggedEvent, targetBlock.__timelineEvent, place, columnContext)).catch(() => {}).finally(finishDrag);
+        dispatchDrop(draggedEvent, targetBlock.__timelineEvent, place, columnContext).catch(() => {}).finally(finishDrag);
         return;
       }
       const placement = resolveColumnPlacement(col, event.clientY);
-      Promise.resolve(onDragDrop(draggedEvent, placement.targetEvent, placement.place, columnContext)).catch(() => {}).finally(finishDrag);
+      dispatchDrop(draggedEvent, placement.targetEvent, placement.place, columnContext).catch(() => {}).finally(finishDrag);
     });
   }
 
@@ -2213,19 +2398,24 @@ function renderTimeline(target, events, options) {
     const colEvents = byTab.get(key);
     const col = el("div", "timeline-column");
     dropTargets.push(col);
-    const title = colEvents[0] && colEvents[0].tabTitle ? colEvents[0].tabTitle : key;
+    const title = (Array.isArray(colEvents) ? colEvents : [])
+      .map((ev) => String(ev && ev.tabTitle || "").trim())
+      .find(Boolean) || key;
     const columnContext = getColumnContext ? getColumnContext(key, colEvents[0]) : null;
     col.appendChild(el("div", "timeline-header", title));
 
     enableColumnDrop(col, columnContext);
 
     colEvents.forEach(ev => {
+      const isBurstItem = !!(ev && ev.__isBurstItem && ev.__burst);
       const block = el("div", "timeline-event timeline-draggable");
       dropTargets.push(block);
       block.__timelineEvent = ev;
-      block.draggable = !!onDragDrop;
+      block.draggable = isBurstItem ? !!onDragDropBurst : !!onDragDrop;
       const stepId = ev && ev.stepId ? ev.stepId : "";
-      const text = `${ev.type || "event"} — ${titleFor(ev)}`;
+      const text = isBurstItem
+        ? `interaction — ${String(ev && ev.__timelineLabel || burstDisplayTitle(ev.__burst, Number(ev.__burstIndex) || 0))}`
+        : `${ev.type || "event"} — ${titleFor(ev)}`;
       const main = el("div", "timeline-event-main");
       if (stepId) {
         const link = document.createElement("a");
@@ -2237,7 +2427,7 @@ function renderTimeline(target, events, options) {
       }
       block.appendChild(main);
 
-      if (onDragDrop) {
+      if (hasAnyDragDrop) {
         block.addEventListener("dragstart", (event) => {
           draggedEvent = ev;
           draggedBlock = block;
@@ -2265,13 +2455,13 @@ function renderTimeline(target, events, options) {
           event.stopPropagation();
           const rect = block.getBoundingClientRect();
           const place = event.clientY < (rect.top + rect.height / 2) ? "before" : "after";
-          Promise.resolve(onDragDrop(draggedEvent, ev, place, columnContext)).catch(() => {}).finally(finishDrag);
+          dispatchDrop(draggedEvent, ev, place, columnContext).catch(() => {}).finally(finishDrag);
         });
       }
 
-      if (onMove || onDraw) {
+      if (onMove || onMoveBurst || onDraw) {
         const actions = el("div", "timeline-event-actions");
-        if (onDraw) {
+        if (onDraw && !isBurstItem) {
           const drawBtn = el("button", "btn timeline-mini-btn", "Draw");
           drawBtn.disabled = !(
             stepId &&
@@ -2289,24 +2479,27 @@ function renderTimeline(target, events, options) {
           });
           actions.appendChild(drawBtn);
         }
-        if (onMove) {
+        const moveHandler = isBurstItem ? onMoveBurst : onMove;
+        const canMoveHandler = isBurstItem ? canMoveBurst : canMove;
+        const moveTarget = isBurstItem ? ev.__burst : ev;
+        if (moveHandler) {
           const upBtn = el("button", "btn ghost timeline-mini-btn", "Swap up");
-          upBtn.disabled = !!(canMove && !canMove(ev, -1));
+          upBtn.disabled = !!(canMoveHandler && !canMoveHandler(moveTarget, -1));
           upBtn.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
             if (upBtn.disabled) return;
-            Promise.resolve(onMove(ev, -1)).catch(() => {});
+            Promise.resolve(moveHandler(moveTarget, -1)).catch(() => {});
           });
           actions.appendChild(upBtn);
 
           const downBtn = el("button", "btn ghost timeline-mini-btn", "Swap down");
-          downBtn.disabled = !!(canMove && !canMove(ev, 1));
+          downBtn.disabled = !!(canMoveHandler && !canMoveHandler(moveTarget, 1));
           downBtn.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
             if (downBtn.disabled) return;
-            Promise.resolve(onMove(ev, 1)).catch(() => {});
+            Promise.resolve(moveHandler(moveTarget, 1)).catch(() => {});
           });
           actions.appendChild(downBtn);
         }
@@ -2880,14 +3073,7 @@ function buildExportHtml(report, options = {}) {
     return hostFromUrl(ev && ev.url);
   };
 
-  const tocRows = events.map((ev, i) => {
-    const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
-    const stepTitle = escapeHtml(titleFor(ev));
-    const metaText = escapeHtml(tocMetaFor(ev));
-    return `<li><a href="#${stepId}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaText ? `<span>${metaText}</span>` : ""}</li>`;
-  }).join("\n");
-
-  const burstData = derivedBursts.map((burst) => {
+  const burstData = derivedBursts.map((burst, i) => {
     const startIso = new Date(burst.startMs || Date.now()).toISOString();
     const endIso = new Date(burst.endMs || Date.now()).toISOString();
     const contextChips = Array.isArray(burst.contextChips)
@@ -2895,7 +3081,7 @@ function buildExportHtml(report, options = {}) {
       : [];
     return {
       id: burst.id,
-      title: burst.tabTitle || burst.pageKey || "Click burst",
+      title: burstDisplayTitle(burst, i),
       meta: `${burst.frames.length} interactions • ${formatExportTimestamp(startIso)} → ${formatExportTimestamp(endIso)}${contextChips.length ? ` • ${contextChips.join(" • ")}` : ""}`,
       sourceFps: Number.isFinite(Number(burst.sourceFps)) ? Number(burst.sourceFps) : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps,
       targetFps: Number.isFinite(Number(burst.targetFps)) ? Math.round(Number(burst.targetFps)) : null,
@@ -2927,10 +3113,30 @@ function buildExportHtml(report, options = {}) {
     bursts: burstData
   }).replace(/</g, "\\u003c");
   const burstInsertionPlan = buildBurstInsertionPlan(burstSourceEvents, events, derivedBursts);
+  const tocTimelineEvents = buildTimelineDisplayEvents(events, burstInsertionPlan);
+  const tocRows = tocTimelineEvents.map((ev, i) => {
+    const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
+    const stepTitle = escapeHtml(titleFor(ev));
+    const metaText = escapeHtml(tocMetaFor(ev));
+    return `<li><a href="#${stepId}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaText ? `<span>${metaText}</span>` : ""}</li>`;
+  }).join("\n");
 
   const rowParts = [];
+  let sectionNumber = 0;
+  const appendExportBurstSlot = (burstIndexRaw) => {
+    const burstIndex = Number(burstIndexRaw);
+    if (!Number.isFinite(burstIndex) || burstIndex < 0 || burstIndex >= burstData.length) return;
+    const burst = burstData[burstIndex];
+    const burstId = burstDomId(derivedBursts[burstIndex], burstIndex);
+    sectionNumber += 1;
+    const burstTitle = escapeHtml(String((burst && burst.title) || `Interaction ${sectionNumber}`));
+    rowParts.push(
+      `<div id="${burstId}" class="step step-burst-export"><div class="step-title">${sectionNumber}. ${burstTitle}</div><div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div></div>`
+    );
+  };
+
   (burstInsertionPlan.prelude || []).forEach(({ burstIndex }) => {
-    rowParts.push(`<div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div>`);
+    appendExportBurstSlot(burstIndex);
   });
   events.forEach((ev, i) => {
     const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
@@ -2949,11 +3155,12 @@ function buildExportHtml(report, options = {}) {
       ? `<a class="meta-chip meta-url" href="${metaUrlHref}" target="_blank" rel="noopener noreferrer" title="${metaUrlTitle}">${metaUrlLabel}</a>`
       : `<span class="meta-chip meta-url" title="${metaUrlTitle}">${metaUrlLabel}</span>`;
     const meta = `<div class="step-meta"><span class="meta-chip meta-time">${metaTs || "Time n/a"}</span>${urlChip}</div>`;
-    rowParts.push(`<div id="${stepId}" class="step"><div class="step-title">${i + 1}. ${stepTitle}</div>${meta}${wrap}</div>`);
+    sectionNumber += 1;
+    rowParts.push(`<div id="${stepId}" class="step"><div class="step-title">${sectionNumber}. ${stepTitle}</div>${meta}${wrap}</div>`);
 
     const insertions = burstInsertionPlan.byStepId.get(stepId) || [];
     insertions.forEach(({ burstIndex }) => {
-      rowParts.push(`<div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div>`);
+      appendExportBurstSlot(burstIndex);
     });
   });
   const rows = rowParts.join("\n");
@@ -3626,6 +3833,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   const collapseConfigBtn = document.getElementById("collapse-config");
   const collapsiblePanels = Array.from(document.querySelectorAll(".report-panel, .report-config-shell"));
   const configRailGroups = Array.from(document.querySelectorAll(".config-rail-group, #section-controls .settings-group"));
+  configRailGroups.forEach((group) => {
+    if (group && typeof group.open === "boolean") group.open = false;
+  });
 
   const idx = Math.max(0, Math.min(reports.length - 1, Number(idxParam || 0)));
   const report = reports[idx];
@@ -3914,6 +4124,125 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   async function dragDropEventAndRefresh(draggedEv, targetEv, place, context) {
     if (!moveEventRelative(draggedEv, targetEv, place, context)) return;
+    await saveReports(reports);
+    render();
+  }
+
+  function burstStepIdSet(burst) {
+    const frames = Array.isArray(burst && burst.frames) ? burst.frames : [];
+    return new Set(
+      frames
+        .map((frame) => String(frame && frame.stepId || "").trim())
+        .filter(Boolean)
+    );
+  }
+
+  function burstRangeInReport(burst) {
+    if (!hasReport || !Array.isArray(report.events)) return null;
+    const stepIds = burstStepIdSet(burst);
+    if (!stepIds.size) return null;
+    const positions = [];
+    report.events.forEach((ev, idx) => {
+      const stepId = String(ev && ev.stepId || "").trim();
+      if (stepIds.has(stepId)) positions.push(idx);
+    });
+    if (!positions.length) return null;
+    positions.sort((a, b) => a - b);
+    return {
+      start: positions[0],
+      end: positions[positions.length - 1]
+    };
+  }
+
+  function canMoveBurstByOffset(burst, delta) {
+    const range = burstRangeInReport(burst);
+    if (!range) return false;
+    const amount = Number(delta || 0);
+    if (amount < 0) return range.start > 0;
+    if (amount > 0) return range.end < (report.events.length - 1);
+    return false;
+  }
+
+  function moveBurstByOffset(burst, delta) {
+    if (!canMoveBurstByOffset(burst, delta)) return false;
+    const range = burstRangeInReport(burst);
+    if (!range) return false;
+    const amount = Number(delta || 0);
+    const blockLen = (range.end - range.start + 1);
+    if (blockLen <= 0) return false;
+    const block = report.events.splice(range.start, blockLen);
+    const insertAt = amount < 0 ? (range.start - 1) : (range.start + 1);
+    report.events.splice(insertAt, 0, ...block);
+    return true;
+  }
+
+  async function moveBurstAndRefresh(burst, delta) {
+    if (!moveBurstByOffset(burst, delta)) return;
+    await saveReports(reports);
+    render();
+  }
+
+  function moveBurstRelative(draggedBurst, targetItem, place, context) {
+    if (!hasReport || !Array.isArray(report.events)) return false;
+    const draggedRange = burstRangeInReport(draggedBurst);
+    if (!draggedRange) return false;
+    const blockLen = draggedRange.end - draggedRange.start + 1;
+    if (blockLen <= 0) return false;
+
+    let rawInsertAt = report.events.length;
+    if (targetItem) {
+      if (targetItem.__isBurstItem && targetItem.__burst) {
+        if (targetItem.__burst === draggedBurst) return false;
+        const targetRange = burstRangeInReport(targetItem.__burst);
+        if (!targetRange) return false;
+        rawInsertAt = place === "before" ? targetRange.start : (targetRange.end + 1);
+      } else {
+        const targetIndex = report.events.indexOf(targetItem);
+        if (targetIndex < 0) return false;
+        rawInsertAt = place === "before" ? targetIndex : (targetIndex + 1);
+      }
+      // no-op if dropping onto own range boundary/inside own block
+      if (rawInsertAt >= draggedRange.start && rawInsertAt <= (draggedRange.end + 1)) return false;
+    }
+
+    const block = report.events.splice(draggedRange.start, blockLen);
+    let insertAt = rawInsertAt;
+    if (insertAt > draggedRange.start) insertAt -= blockLen;
+    if (insertAt < 0) insertAt = 0;
+    if (insertAt > report.events.length) insertAt = report.events.length;
+    report.events.splice(insertAt, 0, ...block);
+    if (context) {
+      block.forEach((ev) => applyEventColumnContext(ev, context));
+    }
+    return true;
+  }
+
+  async function dragDropBurstAndRefresh(draggedBurst, targetItem, place, context) {
+    if (!moveBurstRelative(draggedBurst, targetItem, place, context)) return;
+    await saveReports(reports);
+    render();
+  }
+
+  async function renameBurstAndRefresh(burst, rawTitle) {
+    if (!hasReport || !Array.isArray(report.events)) return;
+    const stepIds = burstStepIdSet(burst);
+    if (!stepIds.size) return;
+    const nextTitle = String(rawTitle || "").trim();
+    let changed = false;
+    report.events.forEach((ev) => {
+      const stepId = String(ev && ev.stepId || "").trim();
+      if (!stepIds.has(stepId)) return;
+      if (nextTitle) {
+        if (String(ev.burstTitle || "") !== nextTitle) {
+          ev.burstTitle = nextTitle;
+          changed = true;
+        }
+      } else if (Object.prototype.hasOwnProperty.call(ev, "burstTitle")) {
+        delete ev.burstTitle;
+        changed = true;
+      }
+    });
+    if (!changed) return;
     await saveReports(reports);
     render();
   }
@@ -4392,7 +4721,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     const view = buildVisibleViewModel(sourceInput, burstsOverride);
     const visibleEvents = Array.isArray(eventsOverride) ? eventsOverride : view.displayEvents;
     const clickBursts = collectClickBursts(view.sourceEvents, view.bursts);
-    updatePanelMeta(visibleEvents, clickBursts);
+    const burstInsertionPlan = buildBurstInsertionPlan(view.sourceEvents, visibleEvents, view.bursts);
+    const timelineEvents = buildTimelineDisplayEvents(visibleEvents, burstInsertionPlan);
+    updatePanelMeta(timelineEvents, clickBursts);
     renderHints(hints, visibleEvents, {
       currentTypeFilter: typeFilter ? typeFilter.value : "all",
       currentUrlFilter: urlFilter ? urlFilter.value : "",
@@ -4426,14 +4757,17 @@ document.addEventListener("DOMContentLoaded", async () => {
         setTimeout(() => node.classList.remove("step-flash"), 1200);
       }
     });
-    renderTimeline(timeline, visibleEvents, {
+    renderTimeline(timeline, timelineEvents, {
       canMove: canMoveEventByOffset,
       onMove: (ev, delta) => { moveEventAndRefresh(ev, delta); },
+      canMoveBurst: (burst, delta) => canMoveBurstByOffset(burst, delta),
+      onMoveBurst: (burst, delta) => { moveBurstAndRefresh(burst, delta); },
+      onDragDropBurst: (draggedBurst, targetItem, place, context) => { dragDropBurstAndRefresh(draggedBurst, targetItem, place, context); },
       onDraw: (_ev, stepId) => { openAnnotationEditorForStep(stepId); },
       getColumnContext: getEventColumnContext,
       onDragDrop: (draggedEv, targetEv, place, context) => { dragDropEventAndRefresh(draggedEv, targetEv, place, context); }
     });
-    renderTableOfContents(toc, visibleEvents);
+    renderTableOfContents(toc, timelineEvents);
     scheduleInlinePreviewRefresh();
   }
 
@@ -4453,46 +4787,68 @@ document.addEventListener("DOMContentLoaded", async () => {
     const eventPositionMap = new Map();
     report.events.forEach((item, pos) => eventPositionMap.set(item, pos));
     updateAux(events, view.bursts, view.sourceEvents);
+    let renderedStepCounter = 0;
 
     const appendInlineBursts = (entries) => {
       if (!Array.isArray(entries) || !entries.length) return;
-      const burstHost = document.createElement("div");
-      const players = renderClickBursts(
-        burstHost,
-        entries.map((entry) => entry.burst),
-        {
-          markerColor: view.burstSettings.clickBurstMarkerColor,
-          markerStyle: view.burstSettings.clickBurstMarkerStyle,
-          speedMultiplier: view.burstSettings.clickBurstPlaybackSpeed,
-          onSpeedCommit: (value) => { persistBurstPlaybackSpeed(value, { rerender: false }); },
-          onJump: (stepId) => {
-            if (!stepId) return;
-            if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
-            const node = document.getElementById(stepId);
-            if (!node) return;
-            node.scrollIntoView({ behavior: "smooth", block: "center" });
-            node.classList.add("step-flash");
-            setTimeout(() => node.classList.remove("step-flash"), 1200);
+      entries.forEach((entry, localIndex) => {
+        const burst = entry && entry.burst ? entry.burst : null;
+        const burstIndex = Number(entry && entry.burstIndex);
+        if (!burst || !Array.isArray(burst.frames) || burst.frames.length < 2) return;
+
+        const stepWrap = el("div", "step step-burst");
+        stepWrap.id = burstDomId(burst, Number.isFinite(burstIndex) ? burstIndex : localIndex);
+
+        renderedStepCounter += 1;
+        const headingTitle = burstDisplayTitle(burst, Number.isFinite(burstIndex) ? burstIndex : localIndex);
+        const stepTitle = el("div", "step-title");
+        stepTitle.appendChild(el("span", "step-index", `${renderedStepCounter}. `));
+        stepTitle.appendChild(el("span", "step-title-text", headingTitle));
+        stepWrap.appendChild(stepTitle);
+
+        const burstHost = document.createElement("div");
+        const players = renderClickBursts(
+          burstHost,
+          [{ burst, burstIndex: Number.isFinite(burstIndex) ? burstIndex : localIndex }],
+          {
+            markerColor: view.burstSettings.clickBurstMarkerColor,
+            markerStyle: view.burstSettings.clickBurstMarkerStyle,
+            speedMultiplier: view.burstSettings.clickBurstPlaybackSpeed,
+            onSpeedCommit: (value) => { persistBurstPlaybackSpeed(value, { rerender: false }); },
+            canMoveBurst: (targetBurst, delta) => canMoveBurstByOffset(targetBurst, delta),
+            onMoveBurst: (targetBurst, delta) => { moveBurstAndRefresh(targetBurst, delta); },
+            onRenameBurst: (targetBurst, title) => { renameBurstAndRefresh(targetBurst, title); },
+            onJump: (stepId) => {
+              if (!stepId) return;
+              if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
+              const node = document.getElementById(stepId);
+              if (!node) return;
+              node.scrollIntoView({ behavior: "smooth", block: "center" });
+              node.classList.add("step-flash");
+              setTimeout(() => node.classList.remove("step-flash"), 1200);
+            }
           }
+        );
+        if (Array.isArray(players) && players.length) {
+          activeBurstPlayers.push(...players);
         }
-      );
-      if (Array.isArray(players) && players.length) {
-        activeBurstPlayers.push(...players);
-      }
-      Array.from(burstHost.children).forEach((child) => {
-        child.classList.add("inline-burst-card");
-        root.appendChild(child);
+        Array.from(burstHost.children).forEach((child) => {
+          child.classList.add("inline-burst-card");
+          stepWrap.appendChild(child);
+        });
+        root.appendChild(stepWrap);
       });
     };
 
     appendInlineBursts(burstInsertionPlan.prelude || []);
 
-    events.forEach((ev, index) => {
+    events.forEach((ev) => {
       const burstFrame = burstFrameMap.get(ev.stepId);
       const wrap = el("div", "step");
       wrap.id = ev.stepId;
       const title = el("div", "step-title");
-      const idxSpan = el("span", "step-index", `${index + 1}. `);
+      renderedStepCounter += 1;
+      const idxSpan = el("span", "step-index", `${renderedStepCounter}. `);
       const titleSpan = el("span", "step-title-text", titleFor(ev));
       titleSpan.contentEditable = "true";
       titleSpan.addEventListener("blur", async () => {

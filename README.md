@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.13.2
+# UI Workflow Recorder Pro (Firefox) v1.13.3
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.13.2`
+- Version: `1.13.3`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -24,8 +24,12 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Popup includes GIF loop diagnostics (`burstLoopActive`, last frame time, pause reason) to prove whether capture is actively running.
   - Burst frame bytes are now spooled to IndexedDB (`uir-frame-spool-v1`) with a triple-collector queue, so local storage only keeps lightweight `screenshotRef` metadata.
   - Burst-mode backpressure pauses capture scheduling when spool write queues are saturated, then resumes automatically after drain.
+  - Burst spool queues now release transient `dataUrl`/blob payloads immediately after conversion/write to cut peak memory.
+  - Burst spool queue depths and resume thresholds are tuned for lower idle heap churn on long captures.
   - Report playback now retries pending frame refs and can recover frames that are still being flushed to disk.
   - On stop, recorder briefly drains pending spool writes before snapshot so burst refs are resolvable immediately after recording.
+  - Burst player prefetch/decode limits are intentionally conservative to keep idle report-builder memory stable on large sessions.
+  - Ref-backed burst frames no longer retain long-lived in-card data URLs after load/eviction.
 - Hotkey stop grace:
   - Stopping via `Ctrl+Shift+Y` keeps recording alive for 2000ms so final burst frames can land.
   - Pressing `Ctrl+Shift+Y` again during this grace window performs an immediate stop.
@@ -55,6 +59,8 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
 - Reordering and merge workflows:
   - Move up/down controls per step
   - Cross-tab timeline drag/drop with flow-in placement
+  - Interaction burst rows now support drag/drop as whole burst blocks (in addition to swap up/down).
+  - Timeline column headers now always use true tab/site labels; burst titles remain row labels only.
   - Timeline Draw + Swap controls
 - Annotation improvements:
   - Live preview overlays and sizing traces
