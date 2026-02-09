@@ -535,10 +535,40 @@ body.report {
   overflow: hidden;
 }
 
+.report-nav-card-builder {
+  display: grid;
+  gap: 10px;
+}
+
+.report-nav-card-builder:hover {
+  transform: none;
+  border-color: var(--edge);
+  box-shadow: var(--shadow);
+}
+
 .report-config-shell.report-config-card {
   display: block;
   gap: 0;
   padding: 0;
+}
+
+.report-nav-card-builder #section-controls.report-config-shell.report-config-card {
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  margin-top: 2px;
+}
+
+.report-nav-card-builder .report-nav-links-primary {
+  gap: 6px;
+}
+
+.report-nav-card-builder .report-nav-links-secondary {
+  margin-top: 2px;
+}
+
+.report-nav-card-builder .nav-link-controls {
+  margin-bottom: 2px;
 }
 
 .report-config-shell > summary::-webkit-details-marker {

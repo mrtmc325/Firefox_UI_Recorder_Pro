@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.13.2 - 2026-02-09
+
+### Changed
+- Builder navigation now owns the controls shell:
+  - `Controls` in the nav rail now expands/collapses the full settings payload directly underneath the nav item.
+  - Quick Preview / Table of Contents / Replay Hints / Cross-tab Timeline / Workflow Steps nav items now toggle their workflow-center panels open/closed on click.
+- Active nav highlighting now ignores controls-shell viewport drift and tracks workflow sections more reliably while scrolling.
+- Left-rail structure and spacing were tightened for nested controls parity with the popup settings flow.
+
+### Fixed
+- Removed duplicate top-card controls presentation by nesting `#section-controls` under the Builder Navigation card.
+- Stopped popup `Capture` from auto-opening by default; all popup settings groups now open only on explicit user action.
+- Preserved hash deep-link behavior (`#section-controls` and section anchors) while avoiding forced auto-open for unrelated sections.
+
 ## v1.13.1 - 2026-02-09
 
 ### Changed

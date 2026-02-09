@@ -4882,6 +4882,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       return { link, id, target: id ? document.getElementById(id) : null };
     })
     .filter((entry) => !!entry.target);
+  const viewportNavTargets = navTargets.filter((entry) => entry.id !== "section-controls");
 
   function setActiveNavLink(sectionId) {
     navTargets.forEach((entry) => {
@@ -4890,10 +4891,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function refreshActiveNavByViewport() {
-    if (!navTargets.length) return;
-    let best = navTargets[0];
+    if (!viewportNavTargets.length) return;
+    let best = viewportNavTargets[0];
     let bestDistance = Number.POSITIVE_INFINITY;
-    navTargets.forEach((entry) => {
+    viewportNavTargets.forEach((entry) => {
       const rect = entry.target.getBoundingClientRect();
       const distance = Math.abs(rect.top - 128);
       if (distance < bestDistance) {
@@ -4915,23 +4916,40 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   navTargets.forEach((entry) => {
-    entry.link.addEventListener("click", () => {
-      if (
-        entry.id !== "section-controls" &&
-        entry.target &&
-        entry.target.tagName === "DETAILS" &&
-        typeof entry.target.open === "boolean"
-      ) {
-        entry.target.open = true;
+    entry.link.addEventListener("click", (event) => {
+      event.preventDefault();
+      const target = entry.target;
+      if (target && target.tagName === "DETAILS" && typeof target.open === "boolean") {
+        const shouldOpen = !target.open;
+        target.open = shouldOpen;
+        if (shouldOpen) {
+          target.scrollIntoView({
+            behavior: "smooth",
+            block: entry.id === "section-controls" ? "nearest" : "start"
+          });
+        }
+      } else if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
       }
+      if (history && typeof history.replaceState === "function") history.replaceState(null, "", `#${entry.id}`);
+      else location.hash = `#${entry.id}`;
       setActiveNavLink(entry.id);
+      if (entry.id !== "section-controls") scheduleNavRefresh();
     });
   });
 
   if (navTargets.length) {
     const hashId = location.hash && location.hash.startsWith("#") ? location.hash.slice(1) : "";
-    if (hashId && navTargets.some((entry) => entry.id === hashId)) setActiveNavLink(hashId);
-    else setActiveNavLink(navTargets[0].id);
+    const hashEntry = hashId ? navTargets.find((entry) => entry.id === hashId) : null;
+    if (hashEntry) {
+      if (hashEntry.target && hashEntry.target.tagName === "DETAILS" && typeof hashEntry.target.open === "boolean") {
+        hashEntry.target.open = true;
+      }
+      setActiveNavLink(hashEntry.id);
+    } else {
+      const defaultEntry = viewportNavTargets[0] || navTargets[0];
+      if (defaultEntry) setActiveNavLink(defaultEntry.id);
+    }
     window.addEventListener("scroll", scheduleNavRefresh, { passive: true });
     window.addEventListener("resize", scheduleNavRefresh);
     setTimeout(() => scheduleNavRefresh(), 40);

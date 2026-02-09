@@ -8,7 +8,20 @@
 <body class="report">
   <div class="report-shell">
     <aside class="report-nav noprint" aria-label="Builder navigation">
-      <details id="section-controls" class="report-nav-card report-config-card report-config-shell settings-card">
+      <div class="report-nav-card report-nav-card-builder">
+        <div class="report-nav-head">
+          <h2>Builder Navigation</h2>
+          <p>Jump between sections and reduce visual noise while editing.</p>
+        </div>
+        <div class="report-nav-actions">
+          <button id="expand-sections" class="btn ghost btn-small" type="button">Expand all</button>
+          <button id="collapse-sections" class="btn ghost btn-small" type="button">Collapse all</button>
+        </div>
+        <nav class="report-nav-links report-nav-links-primary">
+          <a class="nav-link nav-link-controls" href="#section-controls">Controls</a>
+        </nav>
+
+        <details id="section-controls" class="report-config-card report-config-shell settings-card">
         <summary class="config-shell-summary">
           <span class="config-shell-title">Settings</span>
           <span class="config-shell-meta">Controls</span>
@@ -348,19 +361,8 @@
         </div>
         <div id="import-status" class="hint"></div>
         </div>
-      </details>
-
-      <div class="report-nav-card">
-        <div class="report-nav-head">
-          <h2>Builder Navigation</h2>
-          <p>Jump between sections and reduce visual noise while editing.</p>
-        </div>
-        <div class="report-nav-actions">
-          <button id="expand-sections" class="btn ghost btn-small" type="button">Expand all</button>
-          <button id="collapse-sections" class="btn ghost btn-small" type="button">Collapse all</button>
-        </div>
-        <nav class="report-nav-links">
-          <a class="nav-link" href="#section-controls">Controls</a>
+        </details>
+        <nav class="report-nav-links report-nav-links-secondary">
           <a class="nav-link" href="#section-export-preview">Quick Preview</a>
           <a class="nav-link" href="#section-toc">Table of Contents</a>
           <a class="nav-link" href="#section-hints">Replay Hints</a>

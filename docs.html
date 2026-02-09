@@ -8,10 +8,14 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.13.1. This patch finalizes controls-rail default states and placement polish for the report builder settings shell.</p>
+    <p>Version 1.13.2. This patch nests settings under Builder Navigation controls and aligns open/close behavior across report and popup surfaces.</p>
 
-    <h2>Version Notes (v1.13.1)</h2>
+    <h2>Version Notes (v1.13.2)</h2>
     <ul>
+      <li>Builder navigation now owns the controls shell, so the full settings payload expands/collapses directly under <strong>Controls</strong> in the left rail.</li>
+      <li>Workflow center nav links now toggle their matching sections open/closed on click instead of forcing open only.</li>
+      <li>Popup <strong>Capture</strong> group no longer auto-opens by default.</li>
+      <li>Controls hash routing keeps deep-link support (<code>#section-controls</code>) while avoiding unrelated auto-expansion.</li>
       <li>Burst frame storage now uses a disk-backed triple-collector spool pipeline (IndexedDB) so long sessions avoid local-storage screenshot bloat.</li>
       <li>Hotkey burst capture now writes lightweight <code>screenshotRef</code> metadata into events; frame bytes are lazy-loaded on demand in builder/export.</li>
       <li>Hotkey stop now uses a 2000ms grace window so final GIF burst frames can be captured before recording fully ends.</li>
