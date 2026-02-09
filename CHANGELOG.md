@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-## v1.12.1 - 2026-02-09
+## v1.12.2 - 2026-02-09
 
 ### Fixed
 - Suppressed loop-owned GIF placeholder rows (`screenshotSkipReason: "gif-loop-owned"`) from report-builder Workflow Steps, TOC, Replay Hints, timeline counts, and exported HTML output.

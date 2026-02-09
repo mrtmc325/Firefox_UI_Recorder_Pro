@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.12.1
+# UI Workflow Recorder Pro (Firefox) v1.12.2
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.12.1`
+- Version: `1.12.2`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
