@@ -3589,12 +3589,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   const brandLogo = document.getElementById("brand-logo");
   const brandTitle = document.getElementById("brand-title");
   const brandSubtitle = document.getElementById("brand-subtitle");
+  const brandUploadBtn = document.getElementById("brand-upload-btn");
   const builderAppIcon = document.getElementById("builder-app-icon");
   const builderAppTitle = document.getElementById("builder-app-title");
   const builderAppDescription = document.getElementById("builder-app-description");
   const builderContentDescription = document.getElementById("builder-content-description");
   const builderContextPill = document.getElementById("builder-context-pill");
   const brandUpload = document.getElementById("brand-upload");
+  const brandUploadName = document.getElementById("brand-upload-name");
   const brandRemove = document.getElementById("brand-remove");
   const exportThemePreset = document.getElementById("export-theme-preset");
   const exportThemeFont = document.getElementById("export-theme-font");
@@ -3620,7 +3622,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const stepsPanel = document.getElementById("section-steps");
   const expandSectionsBtn = document.getElementById("expand-sections");
   const collapseSectionsBtn = document.getElementById("collapse-sections");
-  const collapsiblePanels = Array.from(document.querySelectorAll(".report-panel"));
+  const expandConfigBtn = document.getElementById("expand-config");
+  const collapseConfigBtn = document.getElementById("collapse-config");
+  const collapsiblePanels = Array.from(document.querySelectorAll(".report-panel, .report-config-shell"));
+  const configRailGroups = Array.from(document.querySelectorAll(".config-rail-group, #section-controls .settings-group"));
 
   const idx = Math.max(0, Math.min(reports.length - 1, Number(idxParam || 0)));
   const report = reports[idx];
@@ -3664,6 +3669,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   syncBuilderIdentity();
+
+  function syncBrandUploadLabel(fileName) {
+    if (!brandUploadName) return;
+    if (fileName) {
+      brandUploadName.textContent = fileName;
+      return;
+    }
+    const hasLogo = !!(hasReport && report && report.brand && report.brand.logo);
+    brandUploadName.textContent = hasLogo ? "Logo selected" : "No logo selected";
+  }
 
   function ensureSizeOption(selectNode, value) {
     if (!selectNode) return;
@@ -4130,10 +4145,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       brandLogo.style.display = "none";
     }
   }
+  syncBrandUploadLabel("");
+  if (hasReport && brandUploadBtn && brandUpload) {
+    brandUploadBtn.addEventListener("click", () => {
+      brandUpload.click();
+    });
+  }
   if (hasReport && brandUpload) {
     brandUpload.addEventListener("change", async (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
+      syncBrandUploadLabel(file.name || "Logo selected");
       const reader = new FileReader();
       reader.onload = async () => {
         report.brand.logo = String(reader.result || "");
@@ -4150,6 +4172,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     brandRemove.addEventListener("click", async () => {
       report.brand.logo = "";
       if (brandLogo) brandLogo.style.display = "none";
+      if (brandUpload) brandUpload.value = "";
+      syncBrandUploadLabel("");
       await saveReports(reports);
     });
   }
@@ -4838,6 +4862,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (collapseSectionsBtn) {
     collapseSectionsBtn.addEventListener("click", () => {
       collapsiblePanels.forEach((panel) => { panel.open = false; });
+    });
+  }
+  if (expandConfigBtn) {
+    expandConfigBtn.addEventListener("click", () => {
+      configRailGroups.forEach((group) => { group.open = true; });
+    });
+  }
+  if (collapseConfigBtn) {
+    collapseConfigBtn.addEventListener("click", () => {
+      configRailGroups.forEach((group) => { group.open = false; });
     });
   }
   const navAnchorLinks = Array.from(document.querySelectorAll(".report-nav-links .nav-link[href^=\"#\"]"));

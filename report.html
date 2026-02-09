@@ -8,6 +8,351 @@
 <body class="report">
   <div class="report-shell">
     <aside class="report-nav noprint" aria-label="Builder navigation">
+      <details id="section-controls" class="report-nav-card report-config-card report-config-shell settings-card">
+        <summary class="config-shell-summary">
+          <span class="config-shell-title">Settings</span>
+          <span class="config-shell-meta">Controls</span>
+        </summary>
+        <div class="config-shell-body">
+        <div class="card-title controls-card-title">Settings</div>
+        <div class="settings-app-stripe">
+          <div class="section-heading section-heading-product">
+            <div class="section-product">
+              <div class="section-product-copy">
+                <h2 id="builder-app-title">UI Workflow Recorder Pro</h2>
+                <p id="builder-app-description" class="section-product-description">
+                  Record UI workflows with clean step titles, text-only redaction, and advanced reporting tools.
+                </p>
+                <p id="builder-content-description" class="section-product-description section-product-description-secondary">
+                  UI workflow capture
+                </p>
+              </div>
+            </div>
+            <div class="section-context">
+              <span class="section-context-badge">
+                <img
+                  id="builder-app-icon"
+                  class="section-product-icon"
+                  src="icons/icon.svg"
+                  alt="UI Workflow Recorder Pro icon"
+                  width="16"
+                  height="16"
+                />
+                <span id="builder-context-pill" class="section-pill">Editor</span>
+              </span>
+            </div>
+          </div>
+        </div>
+        <div class="config-rail-actions">
+          <button id="expand-config" class="btn ghost btn-small" type="button">Expand config</button>
+          <button id="collapse-config" class="btn ghost btn-small" type="button">Collapse config</button>
+        </div>
+
+        <div class="config-rail-groups">
+          <details class="config-rail-group settings-group" open>
+            <summary class="config-rail-summary settings-summary">
+              <span class="config-rail-summary-title settings-summary-title">Report identity</span>
+              <span class="config-rail-summary-meta settings-summary-meta">Core</span>
+            </summary>
+            <div class="config-rail-body settings-group-body">
+              <div class="brand-header">
+                <div class="brand-left">
+                  <img id="brand-logo" class="brand-logo" alt="Logo" />
+                  <div class="brand-text">
+                    <div id="brand-title" class="brand-title" contenteditable="true">Report title</div>
+                    <div id="brand-subtitle" class="brand-subtitle" contenteditable="true">Report short description</div>
+                  </div>
+                </div>
+                <div class="brand-actions">
+                  <input id="brand-upload" class="file-input" type="file" accept="image/*" />
+                  <div class="brand-action-buttons">
+                    <button id="brand-upload-btn" class="btn ghost" type="button">Browse logo</button>
+                    <button id="brand-remove" class="btn ghost" type="button">Remove logo</button>
+                  </div>
+                  <div id="brand-upload-name" class="brand-upload-name">No logo selected</div>
+                </div>
+              </div>
+
+              <div class="report-meta-quick">
+                <button
+                  id="meta"
+                  type="button"
+                  class="meta-info-btn"
+                  aria-label="Capture summary quick reference"
+                  title="Capture summary quick reference"
+                >i</button>
+              </div>
+              <div class="hint">
+                Step titles are auto-cleaned for readability. Screenshots remain original; only report text is redacted.
+              </div>
+            </div>
+          </details>
+
+          <details class="config-rail-group settings-group">
+            <summary class="config-rail-summary settings-summary">
+              <span class="config-rail-summary-title settings-summary-title">Workflow filters</span>
+              <span class="config-rail-summary-meta settings-summary-meta">Filters</span>
+            </summary>
+            <div class="config-rail-body settings-group-body toolbar toolbar-rail">
+              <label class="row">
+                Report history
+                <select id="report-select"></select>
+              </label>
+              <label class="row">
+                Search
+                <input id="search" type="text" placeholder="URL, label, text..." />
+              </label>
+              <label class="row">
+                Type filter
+                <select id="type-filter">
+                  <option value="all">All</option>
+                  <option value="click">Click</option>
+                  <option value="input">Input</option>
+                  <option value="change">Change</option>
+                  <option value="submit">Submit</option>
+                  <option value="nav">Nav</option>
+                  <option value="note">Note</option>
+                </select>
+              </label>
+              <label class="row">
+                URL filter
+                <input id="url-filter" type="text" placeholder="contains..." />
+              </label>
+              <div class="row row-theme-toggle">
+                Theme
+                <button
+                  id="theme-toggle"
+                  class="theme-toggle"
+                  type="button"
+                  aria-label="Switch to dark"
+                  title="Switch to dark"
+                  aria-pressed="false"
+                  data-theme="light"
+                >
+                  <span class="theme-toggle-face theme-toggle-face-light" aria-hidden="true">
+                    <span class="theme-icon theme-sun"></span>
+                    <span class="theme-cloud theme-cloud-a"></span>
+                    <span class="theme-cloud theme-cloud-b"></span>
+                  </span>
+                  <span class="theme-toggle-face theme-toggle-face-dark" aria-hidden="true">
+                    <span class="theme-icon theme-moon"></span>
+                    <span class="theme-cloud theme-cloud-a"></span>
+                    <span class="theme-cloud theme-cloud-b"></span>
+                  </span>
+                </button>
+              </div>
+            </div>
+          </details>
+
+          <details class="config-rail-group settings-group">
+            <summary class="config-rail-summary settings-summary">
+              <span class="config-rail-summary-title settings-summary-title">Export and import</span>
+              <span class="config-rail-summary-meta settings-summary-meta">Bundle</span>
+            </summary>
+            <div class="config-rail-body settings-group-body toolbar toolbar-rail">
+              <button id="bundle" class="btn">Export HTML bundle</button>
+              <button id="bundle-preview" class="btn ghost">Quick HTML preview</button>
+              <button id="bundle-raw" class="btn">Export raw ZIP</button>
+              <a id="docs-link" class="btn ghost docs-link-inline" href="docs.html" target="_blank" rel="noopener">Docs</a>
+              <label class="row">
+                Import mode
+                <select id="import-mode">
+                  <option value="replace">Import as new report</option>
+                  <option value="merge">Merge into current report</option>
+                </select>
+              </label>
+              <button id="bundle-import" class="btn">Import raw ZIP</button>
+              <input id="bundle-import-file" class="file-input" type="file" accept=".zip,application/zip" />
+            </div>
+          </details>
+
+          <details class="config-rail-group settings-group">
+            <summary class="config-rail-summary settings-summary">
+              <span class="config-rail-summary-title settings-summary-title">Export theme</span>
+              <span class="config-rail-summary-meta settings-summary-meta">Theme</span>
+            </summary>
+            <div class="config-rail-body settings-group-body">
+              <div class="export-theme-controls">
+                <div class="export-theme-head">
+                  <div class="export-theme-title">Export theme</div>
+                  <button id="export-theme-reset" class="btn ghost export-theme-reset" type="button">Reset export theme</button>
+                </div>
+                <div class="export-theme-groups">
+                  <details class="export-theme-group" open>
+                    <summary class="export-theme-summary">
+                      <span class="export-theme-summary-title">Visual foundation</span>
+                      <span class="export-theme-summary-meta">Core</span>
+                    </summary>
+                    <div class="export-theme-group-body export-theme-grid">
+                      <label class="row">
+                        Palette
+                        <select id="export-theme-preset">
+                          <option value="extension">Extension light</option>
+                          <option value="mist">Cool mist</option>
+                          <option value="slate">Slate calm</option>
+                          <option value="aurora">Aurora aqua</option>
+                          <option value="seabreeze">Sea breeze</option>
+                          <option value="sunset">Warm sunset</option>
+                          <option value="sandstone">Sandstone</option>
+                          <option value="forest">Forest clean</option>
+                          <option value="pine">Pine modern</option>
+                          <option value="charcoal">Charcoal dark</option>
+                          <option value="midnight">Midnight blue</option>
+                          <option value="copper">Copper glow</option>
+                          <option value="lavender">Lavender glass</option>
+                          <option value="rose">Rose calm</option>
+                          <option value="mint">Mint fresh</option>
+                        </select>
+                      </label>
+                      <label class="row">
+                        Font
+                        <select id="export-theme-font">
+                          <option value="trebuchet">Trebuchet sans</option>
+                          <option value="system">System sans</option>
+                          <option value="serif">Readable serif</option>
+                          <option value="mono">Mono technical</option>
+                          <option value="georgia">Georgia classic</option>
+                          <option value="palatino">Palatino book</option>
+                          <option value="times">Times formal</option>
+                          <option value="arial">Arial clean</option>
+                          <option value="verdana">Verdana ui</option>
+                          <option value="tahoma">Tahoma compact</option>
+                          <option value="calibri">Calibri modern</option>
+                          <option value="gill">Gill sans</option>
+                          <option value="optima">Optima elegant</option>
+                          <option value="cambria">Cambria readable</option>
+                          <option value="courier">Courier mono</option>
+                        </select>
+                      </label>
+                      <label class="row">
+                        Accent
+                        <input id="export-theme-accent" type="color" value="#0ea5e9" />
+                      </label>
+                    </div>
+                  </details>
+
+                  <details class="export-theme-group">
+                    <summary class="export-theme-summary">
+                      <span class="export-theme-summary-title">Typography</span>
+                      <span class="export-theme-summary-meta">Text</span>
+                    </summary>
+                    <div class="export-theme-group-body export-theme-grid">
+                      <label class="row">
+                        Report title size
+                        <select id="export-theme-title-size"></select>
+                      </label>
+                      <label class="row">
+                        Report title theme
+                        <select id="export-theme-title-style">
+                          <option value="modern">Modern</option>
+                          <option value="classic">Classic</option>
+                          <option value="editorial">Editorial</option>
+                          <option value="technical">Technical</option>
+                          <option value="elegant">Elegant</option>
+                          <option value="compact">Compact</option>
+                        </select>
+                      </label>
+                      <label class="row">
+                        Report description size
+                        <select id="export-theme-subtitle-size"></select>
+                      </label>
+                      <label class="row">
+                        Report description theme
+                        <select id="export-theme-h3-style">
+                          <option value="modern">Modern</option>
+                          <option value="classic">Classic</option>
+                          <option value="editorial">Editorial</option>
+                          <option value="technical">Technical</option>
+                          <option value="elegant">Elegant</option>
+                          <option value="compact">Compact</option>
+                        </select>
+                      </label>
+                      <label class="row">
+                        Table of Contents text size
+                        <select id="export-theme-toc-size"></select>
+                      </label>
+                      <label class="row">
+                        Table of Contents text theme
+                        <select id="export-theme-h2-style">
+                          <option value="modern">Modern</option>
+                          <option value="classic">Classic</option>
+                          <option value="editorial">Editorial</option>
+                          <option value="technical">Technical</option>
+                          <option value="elegant">Elegant</option>
+                          <option value="compact">Compact</option>
+                        </select>
+                      </label>
+                      <label class="row">
+                        Section text size
+                        <select id="export-theme-section-size"></select>
+                      </label>
+                      <label class="row">
+                        Section text theme
+                        <select id="export-theme-h1-style">
+                          <option value="modern">Modern</option>
+                          <option value="classic">Classic</option>
+                          <option value="editorial">Editorial</option>
+                          <option value="technical">Technical</option>
+                          <option value="elegant">Elegant</option>
+                          <option value="compact">Compact</option>
+                        </select>
+                      </label>
+                    </div>
+                  </details>
+
+                  <details class="export-theme-group">
+                    <summary class="export-theme-summary">
+                      <span class="export-theme-summary-title">Table of Contents</span>
+                      <span class="export-theme-summary-meta">TOC</span>
+                    </summary>
+                    <div class="export-theme-group-body export-theme-grid">
+                      <label class="row">
+                        TOC layout
+                        <select id="export-theme-layout">
+                          <option value="grid">Compact cards</option>
+                          <option value="list">Single list</option>
+                          <option value="minimal">Minimal numbers</option>
+                          <option value="columns">Two-column detail</option>
+                          <option value="bands">Banded rows</option>
+                          <option value="outline">Outline blocks</option>
+                        </select>
+                      </label>
+                      <label class="row">
+                        TOC details
+                        <select id="export-theme-meta">
+                          <option value="host">Host only</option>
+                          <option value="url">Compact URL</option>
+                          <option value="none">Title only</option>
+                        </select>
+                      </label>
+                    </div>
+                  </details>
+
+                  <details class="export-theme-group">
+                    <summary class="export-theme-summary">
+                      <span class="export-theme-summary-title">Burst replay</span>
+                      <span class="export-theme-summary-meta">Playback</span>
+                    </summary>
+                    <div class="export-theme-group-body export-theme-grid">
+                      <label class="row export-theme-speed-row">
+                        Burst speed
+                        <div class="export-theme-speed-control">
+                          <input id="burst-playback-speed" type="range" min="0.25" max="3" step="0.05" value="1" />
+                          <span id="burst-playback-speed-value" class="export-theme-speed-value">1.00x</span>
+                        </div>
+                      </label>
+                    </div>
+                  </details>
+                </div>
+                <div class="hint">These settings apply to quick preview and exported HTML bundles, including burst replay speed.</div>
+              </div>
+            </div>
+          </details>
+        </div>
+        <div id="import-status" class="hint"></div>
+        </div>
+      </details>
+
       <div class="report-nav-card">
         <div class="report-nav-head">
           <h2>Builder Navigation</h2>
@@ -29,262 +374,10 @@
       </div>
     </aside>
 
-    <main class="report-main">
-      <section id="section-controls" class="report-section report-header noprint">
-        <div class="section-heading section-heading-product">
-          <div class="section-product">
-            <div class="section-product-copy">
-              <h2 id="builder-app-title">UI Workflow Recorder Pro</h2>
-              <p id="builder-app-description" class="section-product-description">
-                Record UI workflows with clean step titles, text-only redaction, and advanced reporting tools.
-              </p>
-              <p id="builder-content-description" class="section-product-description section-product-description-secondary">
-                UI workflow capture
-              </p>
-            </div>
-          </div>
-          <div class="section-context">
-            <span class="section-context-badge">
-              <img
-                id="builder-app-icon"
-                class="section-product-icon"
-                src="icons/icon.svg"
-                alt="UI Workflow Recorder Pro icon"
-                width="16"
-                height="16"
-              />
-              <span id="builder-context-pill" class="section-pill">Editor</span>
-            </span>
-          </div>
-        </div>
-
-        <div class="brand-header">
-          <div class="brand-left">
-            <img id="brand-logo" class="brand-logo" alt="Logo" />
-            <div class="brand-text">
-              <div id="brand-title" class="brand-title" contenteditable="true">Report title</div>
-              <div id="brand-subtitle" class="brand-subtitle" contenteditable="true">Report short description</div>
-            </div>
-          </div>
-          <div class="brand-actions">
-            <input id="brand-upload" type="file" accept="image/*" />
-            <button id="brand-remove" class="btn ghost">Remove logo</button>
-          </div>
-        </div>
-
-        <div class="report-meta-quick">
-          <button
-            id="meta"
-            type="button"
-            class="meta-info-btn"
-            aria-label="Capture summary quick reference"
-            title="Capture summary quick reference"
-          >i</button>
-        </div>
-        <div class="hint">
-          Step titles are auto-cleaned for readability. Screenshots remain original; only report text is redacted.
-        </div>
-
-        <div class="toolbar">
-          <label class="row">
-            Report history
-            <select id="report-select"></select>
-          </label>
-          <label class="row">
-            Search
-            <input id="search" type="text" placeholder="URL, label, text..." />
-          </label>
-          <label class="row">
-            Type filter
-            <select id="type-filter">
-              <option value="all">All</option>
-              <option value="click">Click</option>
-              <option value="input">Input</option>
-              <option value="change">Change</option>
-              <option value="submit">Submit</option>
-              <option value="nav">Nav</option>
-              <option value="note">Note</option>
-            </select>
-          </label>
-          <label class="row">
-            URL filter
-            <input id="url-filter" type="text" placeholder="contains..." />
-          </label>
-
-          <button
-            id="theme-toggle"
-            class="theme-toggle"
-            type="button"
-            aria-label="Switch to dark"
-            title="Switch to dark"
-            aria-pressed="false"
-            data-theme="light"
-          >
-            <span class="theme-toggle-face theme-toggle-face-light" aria-hidden="true">
-              <span class="theme-icon theme-sun"></span>
-              <span class="theme-cloud theme-cloud-a"></span>
-              <span class="theme-cloud theme-cloud-b"></span>
-            </span>
-            <span class="theme-toggle-face theme-toggle-face-dark" aria-hidden="true">
-              <span class="theme-icon theme-moon"></span>
-              <span class="theme-cloud theme-cloud-a"></span>
-              <span class="theme-cloud theme-cloud-b"></span>
-            </span>
-          </button>
-
-          <button id="bundle" class="btn">Export HTML bundle</button>
-          <button id="bundle-preview" class="btn ghost">Quick HTML preview</button>
-          <button id="bundle-raw" class="btn">Export raw ZIP</button>
-          <a id="docs-link" class="btn ghost docs-link-inline" href="docs.html" target="_blank" rel="noopener">Docs</a>
-
-          <label class="row">
-            Import mode
-            <select id="import-mode">
-              <option value="replace">Import as new report</option>
-              <option value="merge">Merge into current report</option>
-            </select>
-          </label>
-          <button id="bundle-import" class="btn">Import raw ZIP</button>
-          <input id="bundle-import-file" class="file-input" type="file" accept=".zip,application/zip" />
-        </div>
-        <div class="export-theme-controls">
-          <div class="export-theme-title">Export theme</div>
-          <div class="export-theme-grid">
-            <label class="row">
-              Palette
-              <select id="export-theme-preset">
-                <option value="extension">Extension light</option>
-                <option value="mist">Cool mist</option>
-                <option value="slate">Slate calm</option>
-                <option value="aurora">Aurora aqua</option>
-                <option value="seabreeze">Sea breeze</option>
-                <option value="sunset">Warm sunset</option>
-                <option value="sandstone">Sandstone</option>
-                <option value="forest">Forest clean</option>
-                <option value="pine">Pine modern</option>
-                <option value="charcoal">Charcoal dark</option>
-                <option value="midnight">Midnight blue</option>
-                <option value="copper">Copper glow</option>
-                <option value="lavender">Lavender glass</option>
-                <option value="rose">Rose calm</option>
-                <option value="mint">Mint fresh</option>
-              </select>
-            </label>
-            <label class="row">
-              Font
-              <select id="export-theme-font">
-                <option value="trebuchet">Trebuchet sans</option>
-                <option value="system">System sans</option>
-                <option value="serif">Readable serif</option>
-                <option value="mono">Mono technical</option>
-                <option value="georgia">Georgia classic</option>
-                <option value="palatino">Palatino book</option>
-                <option value="times">Times formal</option>
-                <option value="arial">Arial clean</option>
-                <option value="verdana">Verdana ui</option>
-                <option value="tahoma">Tahoma compact</option>
-                <option value="calibri">Calibri modern</option>
-                <option value="gill">Gill sans</option>
-                <option value="optima">Optima elegant</option>
-                <option value="cambria">Cambria readable</option>
-                <option value="courier">Courier mono</option>
-              </select>
-            </label>
-            <label class="row">
-              Report title size
-              <select id="export-theme-title-size"></select>
-            </label>
-            <label class="row">
-              Report description size
-              <select id="export-theme-subtitle-size"></select>
-            </label>
-            <label class="row">
-              Table of Contents text size
-              <select id="export-theme-toc-size"></select>
-            </label>
-            <label class="row">
-              Section text size
-              <select id="export-theme-section-size"></select>
-            </label>
-            <label class="row">
-              Title theme
-              <select id="export-theme-title-style">
-                <option value="modern">Modern</option>
-                <option value="classic">Classic</option>
-                <option value="editorial">Editorial</option>
-                <option value="technical">Technical</option>
-                <option value="elegant">Elegant</option>
-                <option value="compact">Compact</option>
-              </select>
-            </label>
-            <label class="row">
-              Heading 1 theme
-              <select id="export-theme-h1-style">
-                <option value="modern">Modern</option>
-                <option value="classic">Classic</option>
-                <option value="editorial">Editorial</option>
-                <option value="technical">Technical</option>
-                <option value="elegant">Elegant</option>
-                <option value="compact">Compact</option>
-              </select>
-            </label>
-            <label class="row">
-              Heading 2 theme
-              <select id="export-theme-h2-style">
-                <option value="modern">Modern</option>
-                <option value="classic">Classic</option>
-                <option value="editorial">Editorial</option>
-                <option value="technical">Technical</option>
-                <option value="elegant">Elegant</option>
-                <option value="compact">Compact</option>
-              </select>
-            </label>
-            <label class="row">
-              Heading 3 theme
-              <select id="export-theme-h3-style">
-                <option value="modern">Modern</option>
-                <option value="classic">Classic</option>
-                <option value="editorial">Editorial</option>
-                <option value="technical">Technical</option>
-                <option value="elegant">Elegant</option>
-                <option value="compact">Compact</option>
-              </select>
-            </label>
-            <label class="row">
-              Table of Contents layout
-              <select id="export-theme-layout">
-                <option value="grid">Compact cards</option>
-                <option value="list">Single list</option>
-                <option value="minimal">Minimal numbers</option>
-                <option value="columns">Two-column detail</option>
-                <option value="bands">Banded rows</option>
-                <option value="outline">Outline blocks</option>
-              </select>
-            </label>
-            <label class="row">
-              Table of Contents details
-              <select id="export-theme-meta">
-                <option value="host">Host only</option>
-                <option value="url">Compact URL</option>
-                <option value="none">Title only</option>
-              </select>
-            </label>
-            <label class="row">
-              Accent
-              <input id="export-theme-accent" type="color" value="#0ea5e9" />
-            </label>
-            <label class="row export-theme-speed-row">
-              Burst replay speed
-              <div class="export-theme-speed-control">
-                <input id="burst-playback-speed" type="range" min="0.25" max="3" step="0.05" value="1" />
-                <span id="burst-playback-speed-value" class="export-theme-speed-value">1.00x</span>
-              </div>
-            </label>
-            <button id="export-theme-reset" class="btn ghost export-theme-reset" type="button">Reset export theme</button>
-          </div>
-          <div class="hint">These settings apply to quick preview and exported HTML bundles, including burst replay speed.</div>
-        </div>
-        <div id="import-status" class="hint"></div>
+    <main class="report-main report-workflow-main">
+      <section class="report-section workflow-hero noprint">
+        <div class="workflow-hero-title">Workflow center</div>
+        <div class="workflow-hero-subtitle">Review interactions, burst playback, and final report composition on the right while tuning configuration in the left rail.</div>
       </section>
 
       <h1 class="print-title">Report title</h1>
@@ -306,7 +399,7 @@
         </div>
       </details>
 
-      <details id="section-toc" class="report-section report-panel toc-section" open>
+      <details id="section-toc" class="report-section report-panel toc-section">
         <summary class="panel-summary">
           <span class="panel-title">Table of Contents</span>
           <span id="toc-count" class="panel-meta-count"></span>
@@ -316,7 +409,7 @@
         </div>
       </details>
 
-      <details id="section-hints" class="report-section report-panel noprint" open>
+      <details id="section-hints" class="report-section report-panel noprint">
         <summary class="panel-summary">
           <span class="panel-title">Replay Hints</span>
           <span id="hints-count" class="panel-meta-count"></span>
@@ -326,7 +419,7 @@
         </div>
       </details>
 
-      <details id="section-timeline" class="report-section report-panel noprint" open>
+      <details id="section-timeline" class="report-section report-panel noprint">
         <summary class="panel-summary">
           <span class="panel-title">Cross-tab Timeline</span>
           <span id="timeline-count" class="panel-meta-count"></span>
@@ -336,7 +429,7 @@
         </div>
       </details>
 
-      <details id="section-steps" class="report-section report-panel" open>
+      <details id="section-steps" class="report-section report-panel">
         <summary class="panel-summary">
           <span class="panel-title">Workflow Steps</span>
           <span id="steps-count" class="panel-meta-count"></span>

@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.13.0 - 2026-02-09
+
+### Changed
+- Report-builder left controls rail now follows popup settings-card visual language:
+  - compact grouped cards
+  - summary title/meta chips
+  - tighter spacing rhythm and collapsed-by-section flow
+- Export theme editor rows now reflow cleanly in narrow left rails, with shortened subgroup badges and compact labels to avoid clipping/misalignment.
+- Dense report layout now keeps a wider left rail to preserve control readability while sections are collapsed.
+
+### Fixed
+- Corrected export-theme alignment regressions where labels, badges, and inputs could overlap or clip in the controls rail.
+- Prevented oversized pasted formatting from leaking into report title/description controls by enforcing normalized builder typography inheritance.
+- Improved dark-mode parity for controls-shell badges/chevrons to match the updated light-mode settings treatment.
+
 ## v1.12.3 - 2026-02-09
 
 ### Added
@@ -11,6 +26,7 @@ All notable changes to this project are documented in this file.
   - adjustable text size selectors for report title, short description, TOC text, and section text.
   - heading style selectors for Title, Heading 1, Heading 2, and Heading 3.
 - Typography settings now persist in `report.exportTheme` and apply consistently in the report editor, quick export preview, and exported HTML bundle.
+- Export theme editor is now organized into compact collapsible groups (Visual foundation, Typography, Table of Contents, Burst replay).
 
 ## v1.12.2 - 2026-02-09
 
