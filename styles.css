@@ -879,6 +879,26 @@ body.report #section-controls.settings-card .settings-group-body {
   margin-top: 1px;
 }
 
+.report-config-shell .section-context {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: flex-start;
+  align-self: stretch;
+  min-height: 72px;
+  gap: 8px;
+  margin-top: 0;
+}
+
+.report-config-shell .theme-toggle-rail {
+  width: 48px;
+  height: 40px;
+  min-width: 48px;
+  min-height: 40px;
+  margin-top: 4px;
+  border-radius: 10px;
+}
+
 .section-context-badge {
   display: inline-flex;
   align-items: center;
@@ -1671,6 +1691,12 @@ body.report #section-controls .export-theme-speed-row {
 
   .section-heading-product {
     flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .report-config-shell .section-context {
+    align-self: auto;
+    min-height: 0;
     align-items: flex-start;
   }
 

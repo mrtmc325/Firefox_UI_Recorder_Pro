@@ -40,6 +40,26 @@
                 />
                 <span id="builder-context-pill" class="section-pill">Editor</span>
               </span>
+              <button
+                id="theme-toggle"
+                class="theme-toggle theme-toggle-rail"
+                type="button"
+                aria-label="Switch to dark"
+                title="Switch to dark"
+                aria-pressed="false"
+                data-theme="light"
+              >
+                <span class="theme-toggle-face theme-toggle-face-light" aria-hidden="true">
+                  <span class="theme-icon theme-sun"></span>
+                  <span class="theme-cloud theme-cloud-a"></span>
+                  <span class="theme-cloud theme-cloud-b"></span>
+                </span>
+                <span class="theme-toggle-face theme-toggle-face-dark" aria-hidden="true">
+                  <span class="theme-icon theme-moon"></span>
+                  <span class="theme-cloud theme-cloud-a"></span>
+                  <span class="theme-cloud theme-cloud-b"></span>
+                </span>
+              </button>
             </div>
           </div>
         </div>
@@ -49,7 +69,7 @@
         </div>
 
         <div class="config-rail-groups">
-          <details class="config-rail-group settings-group" open>
+          <details class="config-rail-group settings-group">
             <summary class="config-rail-summary settings-summary">
               <span class="config-rail-summary-title settings-summary-title">Report identity</span>
               <span class="config-rail-summary-meta settings-summary-meta">Core</span>
@@ -118,29 +138,6 @@
                 URL filter
                 <input id="url-filter" type="text" placeholder="contains..." />
               </label>
-              <div class="row row-theme-toggle">
-                Theme
-                <button
-                  id="theme-toggle"
-                  class="theme-toggle"
-                  type="button"
-                  aria-label="Switch to dark"
-                  title="Switch to dark"
-                  aria-pressed="false"
-                  data-theme="light"
-                >
-                  <span class="theme-toggle-face theme-toggle-face-light" aria-hidden="true">
-                    <span class="theme-icon theme-sun"></span>
-                    <span class="theme-cloud theme-cloud-a"></span>
-                    <span class="theme-cloud theme-cloud-b"></span>
-                  </span>
-                  <span class="theme-toggle-face theme-toggle-face-dark" aria-hidden="true">
-                    <span class="theme-icon theme-moon"></span>
-                    <span class="theme-cloud theme-cloud-a"></span>
-                    <span class="theme-cloud theme-cloud-b"></span>
-                  </span>
-                </button>
-              </div>
             </div>
           </details>
 
@@ -178,7 +175,7 @@
                   <button id="export-theme-reset" class="btn ghost export-theme-reset" type="button">Reset export theme</button>
                 </div>
                 <div class="export-theme-groups">
-                  <details class="export-theme-group" open>
+                  <details class="export-theme-group">
                     <summary class="export-theme-summary">
                       <span class="export-theme-summary-title">Visual foundation</span>
                       <span class="export-theme-summary-meta">Core</span>

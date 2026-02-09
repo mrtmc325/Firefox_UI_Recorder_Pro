@@ -4916,7 +4916,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   navTargets.forEach((entry) => {
     entry.link.addEventListener("click", () => {
-      if (entry.target && entry.target.tagName === "DETAILS" && typeof entry.target.open === "boolean") {
+      if (
+        entry.id !== "section-controls" &&
+        entry.target &&
+        entry.target.tagName === "DETAILS" &&
+        typeof entry.target.open === "boolean"
+      ) {
         entry.target.open = true;
       }
       setActiveNavLink(entry.id);
