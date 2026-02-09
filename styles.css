@@ -8,6 +8,22 @@
   --accent-2: #0ea5e9;
   --shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
   --radius: 14px;
+  --report-title-size: 18px;
+  --report-subtitle-size: 12px;
+  --report-toc-text-size: 13px;
+  --report-section-text-size: 12px;
+  --report-title-weight: 700;
+  --report-title-letter-spacing: 0em;
+  --report-title-transform: none;
+  --report-h1-weight: 700;
+  --report-h1-letter-spacing: 0.01em;
+  --report-h1-transform: none;
+  --report-h2-weight: 700;
+  --report-h2-letter-spacing: 0em;
+  --report-h2-transform: none;
+  --report-h3-weight: 700;
+  --report-h3-letter-spacing: 0em;
+  --report-h3-transform: none;
 }
 
 * { box-sizing: border-box; }
@@ -448,7 +464,7 @@ body.popup .settings-group-help .settings-summary-meta {
 }
 
 .hint {
-  font-size: 12px;
+  font-size: var(--report-section-text-size);
   color: var(--muted);
   margin-top: 6px;
   line-height: 1.35;
@@ -590,7 +606,10 @@ body.report {
 }
 
 .section-heading h2 {
-  font-size: 17px;
+  font-size: calc(var(--report-section-text-size) + 5px);
+  font-weight: var(--report-h1-weight);
+  letter-spacing: var(--report-h1-letter-spacing);
+  text-transform: var(--report-h1-transform);
 }
 
 .section-heading-product {
@@ -623,13 +642,13 @@ body.report {
 
 .section-product-description {
   margin: 0;
-  font-size: 11px;
+  font-size: calc(var(--report-section-text-size) - 1px);
   line-height: 1.3;
   color: #334155;
 }
 
 .section-product-description-secondary {
-  font-size: 10px;
+  font-size: calc(var(--report-section-text-size) - 2px);
   color: var(--muted);
 }
 
@@ -697,12 +716,17 @@ body.report {
 }
 
 .brand-title {
-  font-size: 18px;
-  font-weight: 700;
+  font-size: var(--report-title-size);
+  font-weight: var(--report-title-weight);
+  letter-spacing: var(--report-title-letter-spacing);
+  text-transform: var(--report-title-transform);
 }
 
 .brand-subtitle {
-  font-size: 12px;
+  font-size: var(--report-subtitle-size);
+  font-weight: var(--report-h3-weight);
+  letter-spacing: var(--report-h3-letter-spacing);
+  text-transform: var(--report-h3-transform);
   color: var(--muted);
 }
 
@@ -976,8 +1000,10 @@ body.report .toolbar .theme-toggle {
 }
 
 .panel-title {
-  font-size: 18px;
-  font-weight: 700;
+  font-size: calc(var(--report-section-text-size) + 6px);
+  font-weight: var(--report-h1-weight);
+  letter-spacing: var(--report-h1-letter-spacing);
+  text-transform: var(--report-h1-transform);
 }
 
 .panel-meta-count {
@@ -1093,8 +1119,10 @@ body.report .toolbar .theme-toggle {
 .toc-list a {
   color: #0f172a;
   text-decoration: none;
-  font-weight: 600;
-  font-size: 13px;
+  font-weight: var(--report-h2-weight);
+  letter-spacing: var(--report-h2-letter-spacing);
+  text-transform: var(--report-h2-transform);
+  font-size: var(--report-toc-text-size);
   line-height: 1.25;
 }
 
@@ -1106,7 +1134,7 @@ body.report .toolbar .theme-toggle {
   display: block;
   margin-top: 2px;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: max(9px, calc(var(--report-toc-text-size) - 2.5px));
   font-weight: 400;
   white-space: normal;
   word-break: break-word;
@@ -1133,7 +1161,7 @@ body.report.report-dense .panel-summary {
 }
 
 body.report.report-dense .panel-title {
-  font-size: 16px;
+  font-size: calc(var(--report-section-text-size) + 4px);
 }
 
 body.report.report-dense .panel-meta-count {
@@ -1156,11 +1184,11 @@ body.report.report-dense .toc-list li {
 }
 
 body.report.report-dense .toc-list a {
-  font-size: 12px;
+  font-size: calc(var(--report-toc-text-size) - 1px);
 }
 
 body.report.report-dense .toc-meta {
-  font-size: 10px;
+  font-size: max(9px, calc(var(--report-toc-text-size) - 3px));
 }
 
 body.report.report-dense .hint-list {
@@ -1200,12 +1228,12 @@ body.report.report-dense .click-burst-card {
 }
 
 body.report.report-dense .click-burst-title {
-  font-size: 12px;
+  font-size: calc(var(--report-section-text-size) + 1px);
 }
 
 body.report.report-dense .click-burst-meta,
 body.report.report-dense .click-burst-progress {
-  font-size: 10px;
+  font-size: max(9px, calc(var(--report-section-text-size) - 2px));
 }
 
 body.report.report-dense .step {
@@ -1218,7 +1246,7 @@ body.report.report-dense .step-title {
 }
 
 body.report.report-dense .step-meta {
-  font-size: 11px;
+  font-size: max(10px, calc(var(--report-section-text-size) - 1px));
   margin-bottom: 6px;
 }
 
@@ -1374,19 +1402,21 @@ body.report.report-dense .annot-tools {
 }
 
 .click-burst-title {
-  font-size: 13px;
-  font-weight: 700;
+  font-size: calc(var(--report-section-text-size) + 1px);
+  font-weight: var(--report-h3-weight);
+  letter-spacing: var(--report-h3-letter-spacing);
+  text-transform: var(--report-h3-transform);
   color: var(--ink);
   word-break: break-word;
 }
 
 .click-burst-meta {
-  font-size: 11px;
+  font-size: max(10px, calc(var(--report-section-text-size) - 1px));
   color: var(--muted);
 }
 
 .click-burst-fps-note {
-  font-size: 10px;
+  font-size: max(9px, calc(var(--report-section-text-size) - 2px));
   color: var(--muted);
 }
 
@@ -1435,13 +1465,13 @@ body.report.report-dense .annot-tools {
 }
 
 .click-burst-frame-status {
-  font-size: 11px;
+  font-size: max(10px, calc(var(--report-section-text-size) - 1px));
   color: var(--muted);
 }
 
 .click-burst-progress {
   margin-left: auto;
-  font-size: 11px;
+  font-size: max(10px, calc(var(--report-section-text-size) - 1px));
   color: var(--muted);
 }
 
@@ -1479,7 +1509,13 @@ body.report.report-dense .annot-tools {
   100% { box-shadow: var(--shadow); }
 }
 
-.step-title { font-weight: 700; margin-bottom: 6px; }
+.step-title {
+  font-size: calc(var(--report-section-text-size) + 1px);
+  font-weight: var(--report-h2-weight);
+  letter-spacing: var(--report-h2-letter-spacing);
+  text-transform: var(--report-h2-transform);
+  margin-bottom: 6px;
+}
 .step-title[contenteditable="true"] {
   outline: 2px dashed transparent;
   padding: 2px 4px;
@@ -1489,9 +1525,9 @@ body.report.report-dense .annot-tools {
   outline-color: var(--accent-2);
   background: #f1f5f9;
 }
-.step-meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; word-break: break-word; }
+.step-meta { font-size: var(--report-section-text-size); color: var(--muted); margin-bottom: 8px; word-break: break-word; }
 .step-img { max-width: 100%; border: 1px solid #e2e8f0; border-radius: 12px; }
-.step-note { font-size: 12px; color: var(--muted); font-style: italic; }
+.step-note { font-size: var(--report-section-text-size); color: var(--muted); font-style: italic; }
 
 .badge {
   display: inline-flex;

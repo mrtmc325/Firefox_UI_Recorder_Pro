@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.12.3 - 2026-02-09
+
+### Added
+- Report builder/export typography controls:
+  - adjustable text size selectors for report title, short description, TOC text, and section text.
+  - heading style selectors for Title, Heading 1, Heading 2, and Heading 3.
+- Typography settings now persist in `report.exportTheme` and apply consistently in the report editor, quick export preview, and exported HTML bundle.
+
 ## v1.12.2 - 2026-02-09
 
 ### Fixed

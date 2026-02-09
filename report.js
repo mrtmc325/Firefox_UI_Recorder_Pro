@@ -35,7 +35,15 @@ const EXPORT_THEME_DEFAULTS = Object.freeze({
   font: "trebuchet",
   tocLayout: "grid",
   tocMeta: "host",
-  accentColor: "#0ea5e9"
+  accentColor: "#0ea5e9",
+  titleSize: 18,
+  subtitleSize: 12,
+  tocTextSize: 13,
+  sectionTextSize: 12,
+  titleStyle: "modern",
+  h1Style: "classic",
+  h2Style: "modern",
+  h3Style: "modern"
 });
 const CLICK_BURST_DEFAULTS = Object.freeze({
   clickBurstEnabled: true,
@@ -230,6 +238,46 @@ const EXPORT_THEME_FONT_STACKS = Object.freeze({
   courier: "\"Courier New\",Courier,\"Liberation Mono\",monospace"
 });
 
+const EXPORT_THEME_TYPOGRAPHY_STYLES = Object.freeze({
+  modern: Object.freeze({
+    weight: 700,
+    letterSpacing: "0em",
+    transform: "none"
+  }),
+  classic: Object.freeze({
+    weight: 700,
+    letterSpacing: "0.01em",
+    transform: "none"
+  }),
+  editorial: Object.freeze({
+    weight: 600,
+    letterSpacing: "0.015em",
+    transform: "none"
+  }),
+  technical: Object.freeze({
+    weight: 700,
+    letterSpacing: "0.03em",
+    transform: "uppercase"
+  }),
+  elegant: Object.freeze({
+    weight: 600,
+    letterSpacing: "0.02em",
+    transform: "none"
+  }),
+  compact: Object.freeze({
+    weight: 800,
+    letterSpacing: "0.025em",
+    transform: "uppercase"
+  })
+});
+
+const EXPORT_THEME_TEXT_SIZE_BOUNDS = Object.freeze({
+  titleSize: Object.freeze({ min: 14, max: 56 }),
+  subtitleSize: Object.freeze({ min: 10, max: 30 }),
+  tocTextSize: Object.freeze({ min: 10, max: 28 }),
+  sectionTextSize: Object.freeze({ min: 10, max: 26 })
+});
+
 function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -242,6 +290,19 @@ function normalizeHexColor(value, fallback) {
   const s = String(value || "").trim();
   if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
   return String(fallback || "#0ea5e9");
+}
+
+function normalizeTypographyStyle(value, fallback) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(EXPORT_THEME_TYPOGRAPHY_STYLES, raw)) return raw;
+  return String(fallback || EXPORT_THEME_DEFAULTS.titleStyle);
+}
+
+function normalizeThemeTextSize(value, bounds, fallback) {
+  const min = Number(bounds && bounds.min);
+  const max = Number(bounds && bounds.max);
+  const next = clampNumber(value, min, max, fallback);
+  return Math.round(next);
 }
 
 function normalizeExportTheme(raw) {
@@ -260,7 +321,76 @@ function normalizeExportTheme(raw) {
     ? incoming.tocMeta
     : EXPORT_THEME_DEFAULTS.tocMeta;
   const accentColor = normalizeHexColor(incoming.accentColor, EXPORT_THEME_DEFAULTS.accentColor);
-  return { preset, font, tocLayout, tocMeta, accentColor };
+  const titleSize = normalizeThemeTextSize(
+    incoming.titleSize,
+    EXPORT_THEME_TEXT_SIZE_BOUNDS.titleSize,
+    EXPORT_THEME_DEFAULTS.titleSize
+  );
+  const subtitleSize = normalizeThemeTextSize(
+    incoming.subtitleSize,
+    EXPORT_THEME_TEXT_SIZE_BOUNDS.subtitleSize,
+    EXPORT_THEME_DEFAULTS.subtitleSize
+  );
+  const tocTextSize = normalizeThemeTextSize(
+    incoming.tocTextSize,
+    EXPORT_THEME_TEXT_SIZE_BOUNDS.tocTextSize,
+    EXPORT_THEME_DEFAULTS.tocTextSize
+  );
+  const sectionTextSize = normalizeThemeTextSize(
+    incoming.sectionTextSize,
+    EXPORT_THEME_TEXT_SIZE_BOUNDS.sectionTextSize,
+    EXPORT_THEME_DEFAULTS.sectionTextSize
+  );
+  const titleStyle = normalizeTypographyStyle(incoming.titleStyle, EXPORT_THEME_DEFAULTS.titleStyle);
+  const h1Style = normalizeTypographyStyle(incoming.h1Style, EXPORT_THEME_DEFAULTS.h1Style);
+  const h2Style = normalizeTypographyStyle(incoming.h2Style, EXPORT_THEME_DEFAULTS.h2Style);
+  const h3Style = normalizeTypographyStyle(incoming.h3Style, EXPORT_THEME_DEFAULTS.h3Style);
+  return {
+    preset,
+    font,
+    tocLayout,
+    tocMeta,
+    accentColor,
+    titleSize,
+    subtitleSize,
+    tocTextSize,
+    sectionTextSize,
+    titleStyle,
+    h1Style,
+    h2Style,
+    h3Style
+  };
+}
+
+function getTypographyStyleProfile(token, fallbackToken) {
+  const key = normalizeTypographyStyle(token, fallbackToken || EXPORT_THEME_DEFAULTS.titleStyle);
+  return EXPORT_THEME_TYPOGRAPHY_STYLES[key] || EXPORT_THEME_TYPOGRAPHY_STYLES.modern;
+}
+
+function buildTypographyThemeVars(themeRaw) {
+  const theme = normalizeExportTheme(themeRaw);
+  const titleProfile = getTypographyStyleProfile(theme.titleStyle, EXPORT_THEME_DEFAULTS.titleStyle);
+  const h1Profile = getTypographyStyleProfile(theme.h1Style, EXPORT_THEME_DEFAULTS.h1Style);
+  const h2Profile = getTypographyStyleProfile(theme.h2Style, EXPORT_THEME_DEFAULTS.h2Style);
+  const h3Profile = getTypographyStyleProfile(theme.h3Style, EXPORT_THEME_DEFAULTS.h3Style);
+  return {
+    titleSize: `${theme.titleSize}px`,
+    subtitleSize: `${theme.subtitleSize}px`,
+    tocTextSize: `${theme.tocTextSize}px`,
+    sectionTextSize: `${theme.sectionTextSize}px`,
+    titleWeight: String(titleProfile.weight),
+    titleLetterSpacing: titleProfile.letterSpacing,
+    titleTransform: titleProfile.transform,
+    h1Weight: String(h1Profile.weight),
+    h1LetterSpacing: h1Profile.letterSpacing,
+    h1Transform: h1Profile.transform,
+    h2Weight: String(h2Profile.weight),
+    h2LetterSpacing: h2Profile.letterSpacing,
+    h2Transform: h2Profile.transform,
+    h3Weight: String(h3Profile.weight),
+    h3LetterSpacing: h3Profile.letterSpacing,
+    h3Transform: h3Profile.transform
+  };
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -2727,6 +2857,7 @@ function buildExportHtml(report, options = {}) {
   const preset = EXPORT_THEME_PRESETS[exportTheme.preset] || EXPORT_THEME_PRESETS.extension;
   const fontStack = EXPORT_THEME_FONT_STACKS[exportTheme.font] || EXPORT_THEME_FONT_STACKS.trebuchet;
   const themeAccent = normalizeHexColor(exportTheme.accentColor, EXPORT_THEME_DEFAULTS.accentColor);
+  const typographyVars = buildTypographyThemeVars(exportTheme);
   const tocLayoutClassByValue = Object.freeze({
     grid: "toc-layout-grid",
     list: "toc-layout-list",
@@ -2840,6 +2971,22 @@ function buildExportHtml(report, options = {}) {
   --accent-2:${preset.accent2};
   --shadow:0 8px 18px rgba(15,23,42,0.12);
   --radius:12px;
+  --title-size:${typographyVars.titleSize};
+  --subtitle-size:${typographyVars.subtitleSize};
+  --toc-text-size:${typographyVars.tocTextSize};
+  --section-text-size:${typographyVars.sectionTextSize};
+  --title-weight:${typographyVars.titleWeight};
+  --title-letter-spacing:${typographyVars.titleLetterSpacing};
+  --title-transform:${typographyVars.titleTransform};
+  --h1-weight:${typographyVars.h1Weight};
+  --h1-letter-spacing:${typographyVars.h1LetterSpacing};
+  --h1-transform:${typographyVars.h1Transform};
+  --h2-weight:${typographyVars.h2Weight};
+  --h2-letter-spacing:${typographyVars.h2LetterSpacing};
+  --h2-transform:${typographyVars.h2Transform};
+  --h3-weight:${typographyVars.h3Weight};
+  --h3-letter-spacing:${typographyVars.h3LetterSpacing};
+  --h3-transform:${typographyVars.h3Transform};
 }
 *{box-sizing:border-box}
 body{
@@ -2859,9 +3006,10 @@ body{
 }
 .toc h2{
   margin:0 0 4px;
-  font-size:11px;
-  letter-spacing:.35px;
-  text-transform:uppercase;
+  font-size:calc(var(--section-text-size) + 1px);
+  letter-spacing:var(--h1-letter-spacing);
+  text-transform:var(--h1-transform);
+  font-weight:var(--h1-weight);
   color:var(--muted);
 }
 .toc ol{
@@ -2922,10 +3070,12 @@ body{
 }
 .toc a{
   display:block;
-  font-weight:600;
+  font-weight:var(--h2-weight);
+  letter-spacing:var(--h2-letter-spacing);
+  text-transform:var(--h2-transform);
   color:var(--ink);
   text-decoration:none;
-  font-size:10.5px;
+  font-size:var(--toc-text-size);
   line-height:1.2;
   white-space:normal;
   word-break:break-word;
@@ -2935,7 +3085,7 @@ body{
 .toc span{
   display:block;
   color:var(--muted);
-  font-size:9.5px;
+  font-size:calc(var(--toc-text-size) - 1.5px);
   font-weight:400;
   margin-top:0;
   white-space:normal;
@@ -2945,8 +3095,8 @@ body{
 .toc.toc-dense{padding:5px 6px}
 .toc.toc-dense ol{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:2px 4px}
 .toc.toc-dense li{padding:2px 4px}
-.toc.toc-dense a{font-size:10px}
-.toc.toc-dense span{font-size:9px}
+.toc.toc-dense a{font-size:calc(var(--toc-text-size) - 0.75px)}
+.toc.toc-dense span{font-size:calc(var(--toc-text-size) - 1.75px)}
 .step{
   border:1px solid var(--edge);
   border-radius:var(--radius);
@@ -2954,8 +3104,15 @@ body{
   margin:8px 0;
   background:var(--panel);
   box-shadow:var(--shadow);
+  font-size:var(--section-text-size);
 }
-.step-title{font-weight:700;margin-bottom:4px}
+.step-title{
+  font-size:calc(var(--section-text-size) + 1px);
+  font-weight:var(--h2-weight);
+  letter-spacing:var(--h2-letter-spacing);
+  text-transform:var(--h2-transform);
+  margin-bottom:4px
+}
 .step-meta{
   display:flex;
   flex-wrap:wrap;
@@ -2972,7 +3129,7 @@ body{
   border-radius:999px;
   background:linear-gradient(180deg,var(--paper),var(--panel));
   color:var(--muted);
-  font-size:10px;
+  font-size:calc(var(--section-text-size) - 1.5px);
   line-height:1.25;
 }
 .meta-time{font-variant-numeric:tabular-nums}
@@ -3000,8 +3157,21 @@ body{
   box-shadow:var(--shadow);
 }
 .brand img{width:44px;height:44px;object-fit:contain;border:1px solid var(--edge);border-radius:10px;background:var(--paper)}
-.brand h1{margin:0;font-size:18px}
-.brand p{margin:0;font-size:11px;color:var(--muted)}
+.brand h1{
+  margin:0;
+  font-size:var(--title-size);
+  font-weight:var(--title-weight);
+  letter-spacing:var(--title-letter-spacing);
+  text-transform:var(--title-transform);
+}
+.brand p{
+  margin:0;
+  font-size:var(--subtitle-size);
+  color:var(--muted);
+  font-weight:var(--h3-weight);
+  letter-spacing:var(--h3-letter-spacing);
+  text-transform:var(--h3-transform);
+}
 .preview-banner{
   margin:0 0 8px;
   padding:6px 8px;
@@ -3036,8 +3206,14 @@ body{
   padding:8px;
   background:linear-gradient(180deg,var(--panel),var(--paper));
 }
-.click-burst-export-title{font-size:12px;font-weight:700;margin-bottom:2px}
-.click-burst-export-meta{font-size:10px;color:var(--muted);margin-bottom:6px}
+.click-burst-export-title{
+  font-size:calc(var(--section-text-size) + 1px);
+  font-weight:var(--h3-weight);
+  letter-spacing:var(--h3-letter-spacing);
+  text-transform:var(--h3-transform);
+  margin-bottom:2px;
+}
+.click-burst-export-meta{font-size:calc(var(--section-text-size) - 1.5px);color:var(--muted);margin-bottom:6px}
 .click-burst-export-fps-note{
   font-size:10px;
   color:var(--muted);
@@ -3422,6 +3598,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   const brandRemove = document.getElementById("brand-remove");
   const exportThemePreset = document.getElementById("export-theme-preset");
   const exportThemeFont = document.getElementById("export-theme-font");
+  const exportThemeTitleSize = document.getElementById("export-theme-title-size");
+  const exportThemeSubtitleSize = document.getElementById("export-theme-subtitle-size");
+  const exportThemeTocSize = document.getElementById("export-theme-toc-size");
+  const exportThemeSectionSize = document.getElementById("export-theme-section-size");
+  const exportThemeTitleStyle = document.getElementById("export-theme-title-style");
+  const exportThemeH1Style = document.getElementById("export-theme-h1-style");
+  const exportThemeH2Style = document.getElementById("export-theme-h2-style");
+  const exportThemeH3Style = document.getElementById("export-theme-h3-style");
   const exportThemeLayout = document.getElementById("export-theme-layout");
   const exportThemeMeta = document.getElementById("export-theme-meta");
   const exportThemeAccent = document.getElementById("export-theme-accent");
@@ -3481,6 +3665,52 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   syncBuilderIdentity();
 
+  function ensureSizeOption(selectNode, value) {
+    if (!selectNode) return;
+    const target = String(Math.round(Number(value)));
+    const has = Array.from(selectNode.options || []).some((opt) => opt && opt.value === target);
+    if (has) return;
+    const opt = document.createElement("option");
+    opt.value = target;
+    opt.textContent = `${target}px`;
+    selectNode.appendChild(opt);
+  }
+
+  function populateTextSizeSelect(selectNode, bounds, fallback) {
+    if (!selectNode) return;
+    selectNode.innerHTML = "";
+    const min = Number(bounds && bounds.min);
+    const max = Number(bounds && bounds.max);
+    for (let size = min; size <= max; size += 1) {
+      const opt = document.createElement("option");
+      opt.value = String(size);
+      opt.textContent = `${size}px`;
+      selectNode.appendChild(opt);
+    }
+    ensureSizeOption(selectNode, fallback);
+  }
+
+  populateTextSizeSelect(
+    exportThemeTitleSize,
+    EXPORT_THEME_TEXT_SIZE_BOUNDS.titleSize,
+    EXPORT_THEME_DEFAULTS.titleSize
+  );
+  populateTextSizeSelect(
+    exportThemeSubtitleSize,
+    EXPORT_THEME_TEXT_SIZE_BOUNDS.subtitleSize,
+    EXPORT_THEME_DEFAULTS.subtitleSize
+  );
+  populateTextSizeSelect(
+    exportThemeTocSize,
+    EXPORT_THEME_TEXT_SIZE_BOUNDS.tocTextSize,
+    EXPORT_THEME_DEFAULTS.tocTextSize
+  );
+  populateTextSizeSelect(
+    exportThemeSectionSize,
+    EXPORT_THEME_TEXT_SIZE_BOUNDS.sectionTextSize,
+    EXPORT_THEME_DEFAULTS.sectionTextSize
+  );
+
   const metaNode = document.getElementById("meta");
   function refreshMeta() {
     const activeReport = reports[idx];
@@ -3530,6 +3760,28 @@ document.addEventListener("DOMContentLoaded", async () => {
       themeToggle.setAttribute("aria-pressed", normalized === "dark" ? "true" : "false");
     }
     return normalized;
+  }
+
+  function applyBuilderTypographyTheme(themeRaw) {
+    const vars = buildTypographyThemeVars(themeRaw);
+    const style = document.body && document.body.style;
+    if (!style) return;
+    style.setProperty("--report-title-size", vars.titleSize);
+    style.setProperty("--report-subtitle-size", vars.subtitleSize);
+    style.setProperty("--report-toc-text-size", vars.tocTextSize);
+    style.setProperty("--report-section-text-size", vars.sectionTextSize);
+    style.setProperty("--report-title-weight", vars.titleWeight);
+    style.setProperty("--report-title-letter-spacing", vars.titleLetterSpacing);
+    style.setProperty("--report-title-transform", vars.titleTransform);
+    style.setProperty("--report-h1-weight", vars.h1Weight);
+    style.setProperty("--report-h1-letter-spacing", vars.h1LetterSpacing);
+    style.setProperty("--report-h1-transform", vars.h1Transform);
+    style.setProperty("--report-h2-weight", vars.h2Weight);
+    style.setProperty("--report-h2-letter-spacing", vars.h2LetterSpacing);
+    style.setProperty("--report-h2-transform", vars.h2Transform);
+    style.setProperty("--report-h3-weight", vars.h3Weight);
+    style.setProperty("--report-h3-letter-spacing", vars.h3LetterSpacing);
+    style.setProperty("--report-h3-transform", vars.h3Transform);
   }
 
   async function loadEditorTheme() {
@@ -3790,6 +4042,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   const exportThemeControls = [
     exportThemePreset,
     exportThemeFont,
+    exportThemeTitleSize,
+    exportThemeSubtitleSize,
+    exportThemeTocSize,
+    exportThemeSectionSize,
+    exportThemeTitleStyle,
+    exportThemeH1Style,
+    exportThemeH2Style,
+    exportThemeH3Style,
     exportThemeLayout,
     exportThemeMeta,
     exportThemeAccent,
@@ -3810,9 +4070,30 @@ document.addEventListener("DOMContentLoaded", async () => {
     report.exportTheme = active;
     if (exportThemePreset) exportThemePreset.value = active.preset;
     if (exportThemeFont) exportThemeFont.value = active.font;
+    if (exportThemeTitleSize) {
+      ensureSizeOption(exportThemeTitleSize, active.titleSize);
+      exportThemeTitleSize.value = String(active.titleSize);
+    }
+    if (exportThemeSubtitleSize) {
+      ensureSizeOption(exportThemeSubtitleSize, active.subtitleSize);
+      exportThemeSubtitleSize.value = String(active.subtitleSize);
+    }
+    if (exportThemeTocSize) {
+      ensureSizeOption(exportThemeTocSize, active.tocTextSize);
+      exportThemeTocSize.value = String(active.tocTextSize);
+    }
+    if (exportThemeSectionSize) {
+      ensureSizeOption(exportThemeSectionSize, active.sectionTextSize);
+      exportThemeSectionSize.value = String(active.sectionTextSize);
+    }
+    if (exportThemeTitleStyle) exportThemeTitleStyle.value = active.titleStyle;
+    if (exportThemeH1Style) exportThemeH1Style.value = active.h1Style;
+    if (exportThemeH2Style) exportThemeH2Style.value = active.h2Style;
+    if (exportThemeH3Style) exportThemeH3Style.value = active.h3Style;
     if (exportThemeLayout) exportThemeLayout.value = active.tocLayout;
     if (exportThemeMeta) exportThemeMeta.value = active.tocMeta;
     if (exportThemeAccent) exportThemeAccent.value = active.accentColor;
+    applyBuilderTypographyTheme(active);
     const burstSettings = normalizeClickBurstSettings(report.settings);
     if (!isPlainObject(report.settings)) report.settings = {};
     report.settings.clickBurstPlaybackSpeed = burstSettings.clickBurstPlaybackSpeed;
@@ -3880,6 +4161,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       : normalizeExportTheme({
           preset: exportThemePreset ? exportThemePreset.value : undefined,
           font: exportThemeFont ? exportThemeFont.value : undefined,
+          titleSize: exportThemeTitleSize ? exportThemeTitleSize.value : undefined,
+          subtitleSize: exportThemeSubtitleSize ? exportThemeSubtitleSize.value : undefined,
+          tocTextSize: exportThemeTocSize ? exportThemeTocSize.value : undefined,
+          sectionTextSize: exportThemeSectionSize ? exportThemeSectionSize.value : undefined,
+          titleStyle: exportThemeTitleStyle ? exportThemeTitleStyle.value : undefined,
+          h1Style: exportThemeH1Style ? exportThemeH1Style.value : undefined,
+          h2Style: exportThemeH2Style ? exportThemeH2Style.value : undefined,
+          h3Style: exportThemeH3Style ? exportThemeH3Style.value : undefined,
           tocLayout: exportThemeLayout ? exportThemeLayout.value : undefined,
           tocMeta: exportThemeMeta ? exportThemeMeta.value : undefined,
           accentColor: exportThemeAccent ? exportThemeAccent.value : undefined
@@ -3917,6 +4206,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   if (hasReport && exportThemeFont) {
     exportThemeFont.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeTitleSize) {
+    exportThemeTitleSize.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeSubtitleSize) {
+    exportThemeSubtitleSize.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeTocSize) {
+    exportThemeTocSize.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeSectionSize) {
+    exportThemeSectionSize.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeTitleStyle) {
+    exportThemeTitleStyle.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeH1Style) {
+    exportThemeH1Style.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeH2Style) {
+    exportThemeH2Style.addEventListener("change", () => { persistExportThemeFromControls(false); });
+  }
+  if (hasReport && exportThemeH3Style) {
+    exportThemeH3Style.addEventListener("change", () => { persistExportThemeFromControls(false); });
   }
   if (hasReport && exportThemeLayout) {
     exportThemeLayout.addEventListener("change", () => { persistExportThemeFromControls(false); });

@@ -59,6 +59,8 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Idle teardown and flattened save-on-close for memory stability
 - Export style system:
   - 15 palette presets, 15 font choices, Table of Contents layout modes, and accent color
+  - Adjustable typography sizes for report title, short description, TOC text, and section text
+  - Heading theme profiles for Title, Heading 1, Heading 2, and Heading 3 (Word-style controls)
   - Compact TOC controls with full title/URL detail options and dense behavior for large reports
   - Professional metadata chips (friendly timestamp + compact URL label)
   - Right-side path token removed from exported rows
@@ -135,6 +137,11 @@ Use when generating professional deliverables from the same capture data.
 - In report builder, set:
   - `Export theme > Palette`
   - `Export theme > Font`
+  - `Export theme > Report title size`
+  - `Export theme > Report description size`
+  - `Export theme > Table of Contents text size`
+  - `Export theme > Section text size`
+  - `Export theme > Title theme / Heading 1 / Heading 2 / Heading 3`
   - `Export theme > Table of Contents layout`
   - `Export theme > Table of Contents details`
   - `Export theme > Accent`
