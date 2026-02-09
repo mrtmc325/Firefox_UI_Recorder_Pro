@@ -8,17 +8,20 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.12.0. This release adds spool-backed burst frame storage, continuous hotkey GIF runs across UI navigation, measured-FPS playback, and loop diagnostics.</p>
+    <p>Version 1.12.1. This release hardens burst playback reliability with retry-aware frame loading, stop-time spool draining, and lower-stall interactions playback.</p>
 
-    <h2>Version Notes (v1.12.0)</h2>
+    <h2>Version Notes (v1.12.1)</h2>
     <ul>
       <li>Burst frame storage now uses a disk-backed triple-collector spool pipeline (IndexedDB) so long sessions avoid local-storage screenshot bloat.</li>
       <li>Hotkey burst capture now writes lightweight <code>screenshotRef</code> metadata into events; frame bytes are lazy-loaded on demand in builder/export.</li>
       <li>Hotkey stop now uses a 2000ms grace window so final GIF burst frames can be captured before recording fully ends.</li>
       <li>Pressing the record hotkey again during the stop grace window performs an immediate stop.</li>
       <li>Synthetic pre-burst source rows are now condensed from visible step lists; replay cards remain inline in chronological flow.</li>
+      <li>Loop-owned placeholder rows (<code>gif-loop-owned</code>) are now hidden from visible workflow sections and exported HTML.</li>
       <li>Hotkey GIF burst continuity now stays in one run across route/page navigation and only splits on GIF toggle boundaries or recording end.</li>
       <li>Popup now exposes live GIF loop diagnostics: active/inactive state, last frame timestamp, and pause reason.</li>
+      <li>Burst playback now retries pending frame references and recovers frames that are still flushing to disk.</li>
+      <li>On stop, recorder waits briefly for spool queues to drain before snapshot to reduce immediate post-stop frame misses.</li>
       <li>Documentation wording now matches live behavior for hotkey burst split boundaries (epoch/toggle-based), with selectable capture cadence (5/10/15 FPS) and tunable replay speed.</li>
       <li>Raw ZIP export/import now supports bundle v2 with <code>frame-manifest.json</code> + <code>frames/*</code> for full burst replay fidelity across re-import.</li>
       <li>Report builder step actions now use a precomputed event-position map to reduce per-render lookup overhead on larger reports.</li>

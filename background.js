@@ -1233,6 +1233,20 @@ async function stopRecordingInternal(source) {
   await appendLifecycleScreenshotEvent("stop", source);
   isRecording = false;
   isPaused = false;
+  if (await ensureFrameSpoolReady()) {
+    try {
+      let drained = true;
+      if (frameSpool && typeof frameSpool.waitUntilIdle === "function") {
+        drained = await frameSpool.waitUntilIdle({ timeoutMs: 2000, pollMs: 50 });
+      }
+      const queueState = frameSpool && typeof frameSpool.getQueueState === "function"
+        ? frameSpool.getQueueState()
+        : null;
+      bgLog("frame-spool:stop-drain", { drained, queueState });
+    } catch (err) {
+      bgWarn("frame-spool:stop-drain-failed", { error: formatError(err) });
+    }
+  }
   const saved = await saveReportSnapshot(snapshotSettings);
   // Report snapshots already include the completed session.
   // Clear active buffer to avoid doubling storage footprint on stop.

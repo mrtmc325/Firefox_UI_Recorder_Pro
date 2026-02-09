@@ -16,6 +16,12 @@
     return Date.now();
   }
 
+  function waitMs(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, Math.max(0, Number(ms) || 0));
+    });
+  }
+
   function toArray(value) {
     if (Array.isArray(value)) return value;
     if (value instanceof Set) return Array.from(value);
@@ -247,6 +253,29 @@
     };
   };
 
+  FrameSpoolService.prototype._isIdle = function () {
+    return (
+      this.captureQueue.length === 0 &&
+      this.processQueue.length === 0 &&
+      this.writeQueue.length === 0 &&
+      !this._collector2Running &&
+      !this._collector3Running &&
+      !this._pumpScheduled
+    );
+  };
+
+  FrameSpoolService.prototype.waitUntilIdle = async function (options) {
+    var opts = options || {};
+    var timeoutMs = Math.max(50, Number(opts.timeoutMs) || 2500);
+    var pollMs = Math.max(10, Number(opts.pollMs) || 50);
+    var start = nowMs();
+    while (true) {
+      if (this._isIdle()) return true;
+      if ((nowMs() - start) >= timeoutMs) return false;
+      await waitMs(pollMs);
+    }
+  };
+
   FrameSpoolService.prototype.shouldPauseCapture = function () {
     return this.writeQueue.length >= this.writeQueueMax || this.processQueue.length >= this.processQueueMax;
   };
@@ -451,6 +480,37 @@
     var blob = await this.getFrameBlob(frameId);
     if (!blob) return "";
     return blobToDataUrl(blob);
+  };
+
+  FrameSpoolService.prototype.hasFrame = async function (frameId) {
+    var key = String(frameId || "").trim();
+    if (!key) return false;
+    var db = await this._openDb();
+    var tx = db.transaction([STORES.FRAME_META], "readonly");
+    var store = tx.objectStore(STORES.FRAME_META);
+    var record = await requestToPromise(store.get(key));
+    await txDone(tx);
+    return !!record;
+  };
+
+  FrameSpoolService.prototype.waitForFrame = async function (frameId, options) {
+    var key = String(frameId || "").trim();
+    if (!key) return false;
+    var opts = options || {};
+    var timeoutMs = Math.max(50, Number(opts.timeoutMs) || 2000);
+    var pollMs = Math.max(10, Number(opts.pollMs) || 80);
+    var start = nowMs();
+    while (true) {
+      var exists = false;
+      try {
+        exists = await this.hasFrame(key);
+      } catch (_) {
+        exists = false;
+      }
+      if (exists) return true;
+      if ((nowMs() - start) >= timeoutMs) return false;
+      await waitMs(pollMs);
+    }
   };
 
   FrameSpoolService.prototype.getFrameBytes = async function (frameId) {

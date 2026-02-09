@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.12.1 - 2026-02-09
+
+### Fixed
+- Suppressed loop-owned GIF placeholder rows (`screenshotSkipReason: "gif-loop-owned"`) from report-builder Workflow Steps, TOC, Replay Hints, timeline counts, and exported HTML output.
+- Hardened burst replay derivation/placement to use full source-event chronology while still hiding loop-owned placeholders in rendered output, preventing replay regressions after placeholder suppression.
+- Fixed burst playback regressions caused by frame-ref race conditions:
+  - report player now retries unresolved spool-backed frames instead of treating first miss as permanent failure.
+  - stop path now drains pending spool writes before final snapshot to improve immediate report-open burst reliability.
+  - interactions cards now show `Loaded/Pending/Missing` diagnostics so unresolved-frame state is visible.
+
 ## v1.12.0 - 2026-02-08
 
 ### Changed

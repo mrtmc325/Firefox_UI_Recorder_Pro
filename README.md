@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.12.0
+# UI Workflow Recorder Pro (Firefox) v1.12.1
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.12.0`
+- Version: `1.12.1`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -19,10 +19,13 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Hotkey burst mode bypasses click UI probe delays, diff dedupe, and normal screenshot debounce/min-interval gates.
   - Hotkey burst mode keeps one continuous burst for the active run across UI route/page updates, splitting only on GIF toggle OFF/ON or recording end.
   - Synthetic pre-burst source frames are condensed from the visible step list while replay cards stay inline in chronology.
+  - Loop-owned placeholder rows (`gif-loop-owned`) are suppressed from Workflow Steps, TOC, Replay Hints, Timeline, and exported HTML.
   - GIF mode remains hotkey-only; popup allows lightweight pre-record tuning for capture FPS (5/10/15).
   - Popup includes GIF loop diagnostics (`burstLoopActive`, last frame time, pause reason) to prove whether capture is actively running.
   - Burst frame bytes are now spooled to IndexedDB (`uir-frame-spool-v1`) with a triple-collector queue, so local storage only keeps lightweight `screenshotRef` metadata.
   - Burst-mode backpressure pauses capture scheduling when spool write queues are saturated, then resumes automatically after drain.
+  - Report playback now retries pending frame refs and can recover frames that are still being flushed to disk.
+  - On stop, recorder briefly drains pending spool writes before snapshot so burst refs are resolvable immediately after recording.
 - Hotkey stop grace:
   - Stopping via `Ctrl+Shift+Y` keeps recording alive for 2000ms so final burst frames can land.
   - Pressing `Ctrl+Shift+Y` again during this grace window performs an immediate stop.

@@ -1434,6 +1434,11 @@ body.report.report-dense .annot-tools {
   color: var(--muted);
 }
 
+.click-burst-frame-status {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .click-burst-progress {
   margin-left: auto;
   font-size: 11px;

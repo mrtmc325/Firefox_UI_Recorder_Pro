@@ -52,6 +52,12 @@ const CLICK_BURST_MARKER_SCALE = 3;
 const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FRAME_DATA_URL_CACHE_MAX = 40;
+const FRAME_REF_RESOLVE_RETRIES_DEFAULT = 16;
+const FRAME_REF_RESOLVE_RETRY_MS_DEFAULT = 120;
+const FRAME_REF_RESOLVE_RETRY_MAX_MS = 1000;
+const FRAME_REF_PLAYER_MAX_RETRIES = 20;
+const FRAME_REF_PLAYER_MAX_CONCURRENT_LOADS = 6;
+const FRAME_REF_PLAYER_PREFETCH_AHEAD = 6;
 
 const frameSpoolClient = (
   typeof self !== "undefined" &&
@@ -350,19 +356,73 @@ function writeFrameDataUrlCache(frameId, dataUrl) {
   }
 }
 
-async function resolveFrameDataUrlFromRef(ref) {
+function waitForMs(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Number(ms) || 0));
+  });
+}
+
+async function resolveFrameDataUrlFromRef(ref, options = {}) {
   const normalized = cloneScreenshotRef(ref);
   if (!normalized) return "";
   const cached = readFrameDataUrlCache(normalized.frameId);
   if (cached) return cached;
   if (!(await ensureFrameSpoolClientReady())) return "";
-  try {
-    const dataUrl = String(await frameSpoolClient.getFrameDataUrl(normalized.frameId) || "");
-    if (dataUrl) writeFrameDataUrlCache(normalized.frameId, dataUrl);
-    return dataUrl;
-  } catch (_) {
-    return "";
+  const opts = isPlainObject(options) ? options : {};
+  const retries = Math.max(0, Math.round(clampNumber(
+    opts.retries,
+    0,
+    60,
+    FRAME_REF_RESOLVE_RETRIES_DEFAULT
+  )));
+  const retryMs = Math.max(20, Math.round(clampNumber(
+    opts.retryMs,
+    20,
+    2000,
+    FRAME_REF_RESOLVE_RETRY_MS_DEFAULT
+  )));
+  const requireExistence = !!opts.requireExistence;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (requireExistence && typeof frameSpoolClient.hasFrame === "function") {
+        let exists = await frameSpoolClient.hasFrame(normalized.frameId);
+        if (!exists && typeof frameSpoolClient.waitForFrame === "function") {
+          await frameSpoolClient.waitForFrame(normalized.frameId, {
+            timeoutMs: Math.max(retryMs, 120),
+            pollMs: Math.max(20, Math.min(retryMs, 200))
+          });
+          exists = await frameSpoolClient.hasFrame(normalized.frameId);
+        }
+        if (!exists) {
+          if (attempt < retries) {
+            const backoff = Math.min(
+              FRAME_REF_RESOLVE_RETRY_MAX_MS,
+              Math.round(retryMs * Math.pow(1.35, attempt))
+            );
+            await waitForMs(backoff);
+            continue;
+          }
+          return "";
+        }
+      }
+
+      const dataUrl = String(await frameSpoolClient.getFrameDataUrl(normalized.frameId) || "");
+      if (dataUrl) {
+        writeFrameDataUrlCache(normalized.frameId, dataUrl);
+        return dataUrl;
+      }
+    } catch (_) {}
+
+    if (attempt < retries) {
+      const backoff = Math.min(
+        FRAME_REF_RESOLVE_RETRY_MAX_MS,
+        Math.round(retryMs * Math.pow(1.35, attempt))
+      );
+      await waitForMs(backoff);
+    }
   }
+  return "";
 }
 
 async function syncFrameSpoolReportRefs(reports) {
@@ -1343,6 +1403,29 @@ function buildBurstInsertionPlan(sourceEvents, displayEvents, bursts) {
   return { byStepId, prelude };
 }
 
+function eventHasScreenshotAsset(ev) {
+  if (!ev || typeof ev !== "object") return false;
+  const hasInline = typeof ev.screenshot === "string" && !!ev.screenshot.trim();
+  const ref = ev.screenshotRef;
+  const hasRef = !!(
+    ref &&
+    typeof ref === "object" &&
+    typeof ref.frameId === "string" &&
+    !!ref.frameId.trim()
+  );
+  return hasInline || hasRef;
+}
+
+function isLoopOwnedPlaceholderEvent(ev) {
+  if (!ev || typeof ev !== "object") return false;
+  if (String(ev.screenshotSkipReason || "") !== "gif-loop-owned") return false;
+  if (eventHasScreenshotAsset(ev)) return false;
+  const type = String(ev.type || "").toLowerCase();
+  if (type === "note" || type === "outcome") return false;
+  if (ev.annotation) return false;
+  return true;
+}
+
 function isImpliedBurstStep(ev, burstFrameMap, burstSettings) {
   if (!ev || !burstFrameMap || !burstSettings) return false;
   const stepId = ev && ev.stepId ? String(ev.stepId) : "";
@@ -1354,6 +1437,11 @@ function isImpliedBurstStep(ev, burstFrameMap, burstSettings) {
     return true;
   }
   return !!(burstSettings.clickBurstCondenseStepScreenshots && burstFrame.frameIndex > 0 && !ev.annotation);
+}
+
+function shouldHideRenderedStepEvent(ev, burstFrameMap, burstSettings) {
+  if (isLoopOwnedPlaceholderEvent(ev)) return true;
+  return isImpliedBurstStep(ev, burstFrameMap, burstSettings);
 }
 
 function drawBurstMarker(ctx, x, y, markerIndex, markerColor, markerStyle) {
@@ -1439,6 +1527,7 @@ function createClickBurstPlayer(card, burst, options) {
   const speedValue = el("span", "click-burst-speed-value", `${speedMultiplier.toFixed(2)}x`);
   speedWrap.appendChild(speedInput);
   speedWrap.appendChild(speedValue);
+  const frameStatus = el("span", "click-burst-frame-status", "Loaded 0/0 • Pending 0 • Missing 0");
   const progress = el("span", "click-burst-progress", "Frame 0/0");
   const jumpFirst = el("button", "btn subtle btn-small", "Jump first");
   jumpFirst.type = "button";
@@ -1446,6 +1535,7 @@ function createClickBurstPlayer(card, burst, options) {
   jumpLast.type = "button";
   controls.appendChild(playPause);
   controls.appendChild(speedWrap);
+  controls.appendChild(frameStatus);
   controls.appendChild(progress);
   controls.appendChild(jumpFirst);
   controls.appendChild(jumpLast);
@@ -1454,6 +1544,7 @@ function createClickBurstPlayer(card, burst, options) {
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     progress.textContent = "Canvas unavailable";
+    frameStatus.textContent = "Loaded 0/0 • Pending 0 • Missing 0";
     playPause.disabled = true;
     jumpFirst.disabled = true;
     jumpLast.disabled = true;
@@ -1471,14 +1562,17 @@ function createClickBurstPlayer(card, burst, options) {
         marker: frame && frame.marker ? frame.marker : null,
         stepId: frame && frame.stepId ? String(frame.stepId) : "",
         img: null,
-        failed: false,
-        pending: null
+        pending: null,
+        attempts: 0,
+        nextRetryAtMs: 0,
+        terminalFailure: false,
+        pendingReason: ""
       };
     })
     .filter(Boolean);
 
-  const shouldEvictFrames = frames.length > 180;
-  const evictDistance = shouldEvictFrames ? 48 : Number.POSITIVE_INFINITY;
+  const shouldEvictFrames = frames.length > 420;
+  const evictDistance = shouldEvictFrames ? 96 : Number.POSITIVE_INFINITY;
 
   let frameIndex = 0;
   let isPlaying = autoPlay;
@@ -1488,6 +1582,8 @@ function createClickBurstPlayer(card, burst, options) {
   let pageVisible = typeof document !== "undefined" ? !document.hidden : true;
   let visibilityObserver = null;
   let visibilityListenerAttached = false;
+  let activeFrameLoads = 0;
+  let lastFrameStatusPaintAt = 0;
 
   const stopLoop = () => {
     if (timerId) {
@@ -1505,6 +1601,7 @@ function createClickBurstPlayer(card, burst, options) {
   );
 
   const destroyImages = () => {
+    activeFrameLoads = 0;
     frames.forEach((entry) => {
       if (entry && entry.img) {
         entry.img.src = "";
@@ -1512,7 +1609,10 @@ function createClickBurstPlayer(card, burst, options) {
       }
       if (entry) {
         entry.pending = null;
-        entry.failed = false;
+        entry.attempts = 0;
+        entry.nextRetryAtMs = 0;
+        entry.terminalFailure = false;
+        entry.pendingReason = "";
       }
     });
   };
@@ -1528,19 +1628,75 @@ function createClickBurstPlayer(card, burst, options) {
     });
   };
 
-  const ensureFrameLoaded = (index) => {
+  const summarizeFrameState = () => {
+    let loaded = 0;
+    let pending = 0;
+    let missing = 0;
+    frames.forEach((frame) => {
+      if (!frame) return;
+      if (frame.img) {
+        loaded += 1;
+      } else if (frame.terminalFailure) {
+        missing += 1;
+      } else {
+        pending += 1;
+      }
+    });
+    return { loaded, pending, missing, total: frames.length };
+  };
+
+  const updateFrameStatus = (force = false) => {
+    const now = Date.now();
+    if (!force && (now - lastFrameStatusPaintAt) < 120) return;
+    lastFrameStatusPaintAt = now;
+    const stats = summarizeFrameState();
+    frameStatus.textContent = `Loaded ${stats.loaded}/${stats.total} • Pending ${stats.pending} • Missing ${stats.missing}`;
+  };
+
+  const scheduleFrameRetry = (frame, reason, terminal) => {
+    if (!frame) return;
+    frame.pending = null;
+    frame.pendingReason = String(reason || "pending");
+    frame.attempts = (Number(frame.attempts) || 0) + 1;
+    if (terminal || !frame.ref || frame.attempts >= FRAME_REF_PLAYER_MAX_RETRIES) {
+      frame.terminalFailure = true;
+      frame.nextRetryAtMs = Number.POSITIVE_INFINITY;
+      frame.pendingReason = frame.pendingReason || "missing";
+    } else {
+      frame.terminalFailure = false;
+      const retryDelay = Math.min(
+        FRAME_REF_RESOLVE_RETRY_MAX_MS,
+        Math.round(FRAME_REF_RESOLVE_RETRY_MS_DEFAULT * Math.pow(1.35, Math.max(0, frame.attempts - 1)))
+      );
+      frame.nextRetryAtMs = Date.now() + retryDelay;
+    }
+    updateFrameStatus(true);
+  };
+
+  const ensureFrameLoaded = (index, force = false) => {
     if (index < 0 || index >= frames.length) return Promise.resolve(null);
     const frame = frames[index];
-    if (!frame || frame.failed) return Promise.resolve(null);
+    if (!frame) return Promise.resolve(null);
     if (frame.img) return Promise.resolve(frame);
+    if (frame.terminalFailure) return Promise.resolve(null);
+    if (Number.isFinite(frame.nextRetryAtMs) && frame.nextRetryAtMs > Date.now()) {
+      return Promise.resolve(null);
+    }
     if (frame.pending) return frame.pending;
+    if (!force && activeFrameLoads >= FRAME_REF_PLAYER_MAX_CONCURRENT_LOADS) {
+      return Promise.resolve(null);
+    }
 
+    activeFrameLoads += 1;
     frame.pending = new Promise((resolve) => {
+      const finish = (result) => {
+        activeFrameLoads = Math.max(0, activeFrameLoads - 1);
+        resolve(result);
+      };
       const loadFromSrc = (src) => {
         if (!src) {
-          frame.pending = null;
-          frame.failed = true;
-          resolve(null);
+          scheduleFrameRetry(frame, "missing-src", !frame.ref);
+          finish(null);
           return;
         }
         frame.src = src;
@@ -1549,22 +1705,30 @@ function createClickBurstPlayer(card, burst, options) {
           frame.pending = null;
           if (destroyed) {
             img.src = "";
-            resolve(null);
+            finish(null);
             return;
           }
           frame.img = img;
-          resolve(frame);
+          frame.attempts = 0;
+          frame.nextRetryAtMs = 0;
+          frame.terminalFailure = false;
+          frame.pendingReason = "";
+          updateFrameStatus(true);
+          finish(frame);
         };
         img.onerror = () => {
-          frame.pending = null;
-          frame.failed = true;
-          resolve(null);
+          scheduleFrameRetry(frame, "decode-error", false);
+          finish(null);
         };
         img.src = src;
       };
 
       if (!frame.src && frame.ref) {
-        resolveFrameDataUrlFromRef(frame.ref).then((resolved) => {
+        resolveFrameDataUrlFromRef(frame.ref, {
+          retries: 0,
+          retryMs: FRAME_REF_RESOLVE_RETRY_MS_DEFAULT,
+          requireExistence: false
+        }).then((resolved) => {
           loadFromSrc(resolved);
         }).catch(() => {
           loadFromSrc("");
@@ -1574,13 +1738,16 @@ function createClickBurstPlayer(card, burst, options) {
 
       loadFromSrc(frame.src);
     });
+    updateFrameStatus(true);
     return frame.pending;
   };
 
   const prefetchNear = (index) => {
-    ensureFrameLoaded(index - 1);
-    ensureFrameLoaded(index);
-    ensureFrameLoaded(index + 1);
+    ensureFrameLoaded(index, true);
+    ensureFrameLoaded(index - 1, false);
+    for (let step = 1; step <= FRAME_REF_PLAYER_PREFETCH_AHEAD; step++) {
+      ensureFrameLoaded(index + step, false);
+    }
   };
 
   const drawPlaceholder = (text) => {
@@ -1603,7 +1770,8 @@ function createClickBurstPlayer(card, burst, options) {
 
     if (!frame.img) {
       progress.textContent = `Frame ${index + 1}/${frames.length}`;
-      drawPlaceholder("Loading frame…");
+      drawPlaceholder(frame.terminalFailure ? "Frame unavailable" : "Loading frame…");
+      updateFrameStatus(true);
       ensureFrameLoaded(index).then((loaded) => {
         if (destroyed || !loaded || frameIndex !== index) return;
         drawFrame(index);
@@ -1631,6 +1799,7 @@ function createClickBurstPlayer(card, burst, options) {
     }
 
     progress.textContent = `Frame ${index + 1}/${frames.length}`;
+    updateFrameStatus(true);
   };
 
   const startLoop = () => {
@@ -1639,9 +1808,7 @@ function createClickBurstPlayer(card, burst, options) {
     const frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / speedMultiplier));
     timerId = setInterval(() => {
       frameIndex += 1;
-      if (frameIndex >= frames.length) {
-        frameIndex = 0;
-      }
+      if (frameIndex >= frames.length) frameIndex = 0;
       drawFrame(frameIndex);
     }, frameDurationMs);
   };
@@ -1706,6 +1873,7 @@ function createClickBurstPlayer(card, burst, options) {
 
   if (frames.length < 2) {
     progress.textContent = "Not enough valid frames";
+    updateFrameStatus(true);
     playPause.disabled = true;
     jumpFirst.disabled = true;
     jumpLast.disabled = true;
@@ -1715,6 +1883,7 @@ function createClickBurstPlayer(card, burst, options) {
   frameIndex = 0;
   ensureFrameLoaded(0);
   ensureFrameLoaded(1);
+  updateFrameStatus(true);
   drawFrame(frameIndex);
   setPlaying(autoPlay);
 
@@ -1742,6 +1911,8 @@ function createClickBurstPlayer(card, burst, options) {
         entry.src = "";
         entry.marker = null;
         entry.stepId = "";
+        entry.pendingReason = "";
+        entry.terminalFailure = true;
       });
       canvas.width = 1;
       canvas.height = 1;
@@ -2569,7 +2740,7 @@ function buildExportHtml(report, options = {}) {
   const burstSourceEvents = sourceEvents.map((ev, i) => ({ ...(ev || {}), stepId: `step-${i + 1}` }));
   const derivedBursts = deriveClickBursts(burstSourceEvents, burstSettings);
   const burstFrameMap = buildBurstFrameMap(derivedBursts);
-  const events = burstSourceEvents.filter((ev) => !isImpliedBurstStep(ev, burstFrameMap, burstSettings));
+  const events = burstSourceEvents.filter((ev) => !shouldHideRenderedStepEvent(ev, burstFrameMap, burstSettings));
 
   const tocClass = `toc ${tocLayoutClass}${events.length >= 100 ? " toc-dense" : ""}`;
   const tocMetaFor = (ev) => {
@@ -3199,7 +3370,11 @@ async function buildExportHtmlAsync(report, options = {}) {
   if (refs.size) {
     for (const [frameId, ref] of refs.entries()) {
       if (frameDataUrls[frameId]) continue;
-      const dataUrl = await resolveFrameDataUrlFromRef(ref);
+      const dataUrl = await resolveFrameDataUrlFromRef(ref, {
+        retries: FRAME_REF_RESOLVE_RETRIES_DEFAULT,
+        retryMs: FRAME_REF_RESOLVE_RETRY_MS_DEFAULT,
+        requireExistence: true
+      });
       if (!dataUrl) continue;
       frameDataUrls[frameId] = dataUrl;
     }
@@ -3787,7 +3962,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       ? precomputedBursts
       : deriveClickBursts(source, burstSettings);
     const burstFrameMap = buildBurstFrameMap(bursts);
-    const displayEvents = source.filter((ev) => !isImpliedBurstStep(ev, burstFrameMap, burstSettings));
+    const displayEvents = source.filter((ev) => !shouldHideRenderedStepEvent(ev, burstFrameMap, burstSettings));
     return {
       sourceEvents: source,
       displayEvents,
@@ -4071,7 +4246,11 @@ document.addEventListener("DOMContentLoaded", async () => {
           img.src = inlineScreenshot;
         } else if (screenshotRef) {
           img.alt = "Loading screenshot…";
-          resolveFrameDataUrlFromRef(screenshotRef).then((resolvedSrc) => {
+          resolveFrameDataUrlFromRef(screenshotRef, {
+            retries: 0,
+            retryMs: 80,
+            requireExistence: false
+          }).then((resolvedSrc) => {
             if (!resolvedSrc) {
               wrap.appendChild(el("div", "step-note", "Screenshot frame unavailable in local spool."));
               return;
@@ -4319,7 +4498,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         wrap.appendChild(tools);
         wrap.appendChild(shotWrap);
-      } else if (ev.screenshotSkipped) {
+      } else if (ev.screenshotSkipped && !isLoopOwnedPlaceholderEvent(ev)) {
         wrap.appendChild(el("div", "step-note", `Screenshot skipped (${ev.screenshotSkipReason || "n/a"}).`));
       }
       root.appendChild(wrap);
@@ -4567,7 +4746,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (inline && inline.screenshot) {
           dataUrl = String(inline.screenshot);
         } else {
-          dataUrl = await resolveFrameDataUrlFromRef(ref);
+          dataUrl = await resolveFrameDataUrlFromRef(ref, {
+            retries: FRAME_REF_RESOLVE_RETRIES_DEFAULT,
+            retryMs: FRAME_REF_RESOLVE_RETRY_MS_DEFAULT,
+            requireExistence: true
+          });
         }
         if (!dataUrl) continue;
         const bytes = dataUrlToBytes(dataUrl);
