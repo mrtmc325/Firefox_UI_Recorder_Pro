@@ -25,7 +25,7 @@ function safeDataImageUrl(value) {
 }
 
 const RAW_BUNDLE_FORMAT = "uir-report-bundle";
-const RAW_BUNDLE_VERSION = 2;
+const RAW_BUNDLE_VERSION = 3;
 const REPORT_THEME_STORAGE_KEY = "__uiRecorderReportTheme";
 const DEFAULT_REPORT_TITLE = "Report title";
 const DEFAULT_REPORT_SUBTITLE = "Report short description";
@@ -59,6 +59,16 @@ const CLICK_BURST_RENDER_MARKER_CAP = 10;
 const CLICK_BURST_MARKER_SCALE = 3;
 const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const TEXT_SPOOL_BYTE_CAP = 256 * 1024 * 1024;
+const SECTION_TEXT_MAX_BYTES = 2 * 1024 * 1024;
+const SECTION_TEXT_ALLOWED_EXTENSIONS = Object.freeze(["txt", "md", "json"]);
+const SECTION_TEXT_ALLOWED_MIME = Object.freeze({
+  txt: "text/plain",
+  md: "text/markdown",
+  json: "application/json"
+});
+const SECTION_TEXT_CACHE_MAX = 12;
+const SECTION_TEXT_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const FRAME_DATA_URL_CACHE_MAX = 24;
 const FRAME_DATA_URL_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const FRAME_REF_RESOLVE_RETRIES_DEFAULT = 16;
@@ -80,6 +90,8 @@ const frameSpoolClient = (
 let frameSpoolReadyPromise = null;
 const frameDataUrlCache = new Map();
 let frameDataUrlCacheBytes = 0;
+const sectionTextCache = new Map();
+let sectionTextCacheBytes = 0;
 let frameSpoolGcTimer = null;
 let frameSpoolSyncTimer = null;
 let frameSpoolPendingReports = null;
@@ -445,6 +457,27 @@ function cloneScreenshotRef(raw) {
   };
 }
 
+function cloneSectionTextRef(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const docId = String(raw.docId || "").trim();
+  if (!docId) return null;
+  return {
+    docId,
+    mime: String(raw.mime || "text/plain"),
+    byteLength: Number(raw.byteLength) || 0,
+    createdAtMs: Number(raw.createdAtMs) || Date.now()
+  };
+}
+
+function cloneSectionTextMeta(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const fileName = String(raw.fileName || "").trim();
+  const fileType = String(raw.fileType || "").trim().toLowerCase();
+  const preview = String(raw.preview || "").slice(0, 240);
+  if (!fileName && !fileType && !preview) return null;
+  return { fileName, fileType, preview };
+}
+
 function collectScreenshotRefsFromEvents(events) {
   const refs = new Map();
   const source = Array.isArray(events) ? events : [];
@@ -455,6 +488,38 @@ function collectScreenshotRefsFromEvents(events) {
     refs.set(ref.frameId, ref);
   });
   return refs;
+}
+
+function collectSectionTextRefsFromEvents(events) {
+  const refs = new Map();
+  const source = Array.isArray(events) ? events : [];
+  source.forEach((ev) => {
+    if (!ev || typeof ev !== "object") return;
+    const stepRef = cloneSectionTextRef(ev.sectionTextRef);
+    if (stepRef && !refs.has(stepRef.docId)) refs.set(stepRef.docId, stepRef);
+    const burstRef = cloneSectionTextRef(ev.burstTextRef);
+    if (burstRef && !refs.has(burstRef.docId)) refs.set(burstRef.docId, burstRef);
+  });
+  return refs;
+}
+
+function collectSectionTextMetaFromEvents(events) {
+  const metaByDocId = new Map();
+  const source = Array.isArray(events) ? events : [];
+  source.forEach((ev) => {
+    if (!ev || typeof ev !== "object") return;
+    const stepRef = cloneSectionTextRef(ev.sectionTextRef);
+    const stepMeta = cloneSectionTextMeta(ev.sectionTextMeta);
+    if (stepRef && stepMeta && !metaByDocId.has(stepRef.docId)) {
+      metaByDocId.set(stepRef.docId, stepMeta);
+    }
+    const burstRef = cloneSectionTextRef(ev.burstTextRef);
+    const burstMeta = cloneSectionTextMeta(ev.burstTextMeta);
+    if (burstRef && burstMeta && !metaByDocId.has(burstRef.docId)) {
+      metaByDocId.set(burstRef.docId, burstMeta);
+    }
+  });
+  return metaByDocId;
 }
 
 async function ensureFrameSpoolClientReady() {
@@ -500,10 +565,116 @@ function writeFrameDataUrlCache(frameId, dataUrl) {
   }
 }
 
+function readSectionTextCache(docId) {
+  const key = String(docId || "").trim();
+  if (!key || !sectionTextCache.has(key)) return "";
+  const entry = sectionTextCache.get(key);
+  sectionTextCache.delete(key);
+  sectionTextCache.set(key, entry);
+  return entry && typeof entry.text === "string" ? entry.text : "";
+}
+
+function writeSectionTextCache(docId, text) {
+  const key = String(docId || "").trim();
+  if (!key) return;
+  const value = String(text ?? "");
+  const byteLength = encodeText(value).length;
+  if (sectionTextCache.has(key)) {
+    const existing = sectionTextCache.get(key);
+    sectionTextCacheBytes = Math.max(0, sectionTextCacheBytes - Number(existing && existing.byteLength || 0));
+    sectionTextCache.delete(key);
+  }
+  sectionTextCache.set(key, { text: value, byteLength });
+  sectionTextCacheBytes += byteLength;
+  while (sectionTextCache.size > SECTION_TEXT_CACHE_MAX || sectionTextCacheBytes > SECTION_TEXT_CACHE_MAX_BYTES) {
+    const oldestKey = sectionTextCache.keys().next().value;
+    if (!oldestKey) break;
+    const oldest = sectionTextCache.get(oldestKey);
+    sectionTextCacheBytes = Math.max(0, sectionTextCacheBytes - Number(oldest && oldest.byteLength || 0));
+    sectionTextCache.delete(oldestKey);
+  }
+}
+
+function clearSectionTextCache(docId) {
+  const key = String(docId || "").trim();
+  if (!key || !sectionTextCache.has(key)) return;
+  const existing = sectionTextCache.get(key);
+  sectionTextCacheBytes = Math.max(0, sectionTextCacheBytes - Number(existing && existing.byteLength || 0));
+  sectionTextCache.delete(key);
+}
+
 function waitForMs(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, Number(ms) || 0));
   });
+}
+
+async function persistSectionTextDocument(rawText, options = {}) {
+  if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.putTextFromBytes !== "function") {
+    throw new Error("Text embedding requires local IndexedDB support.");
+  }
+  const opts = isPlainObject(options) ? options : {};
+  const existingRef = cloneSectionTextRef(opts.existingRef);
+  const existingMeta = cloneSectionTextMeta(opts.existingMeta) || {};
+  const payload = normalizeTextInputPayload(rawText, {
+    fileName: opts.fileName || existingMeta.fileName,
+    fallbackType: opts.fileType || existingMeta.fileType || "txt",
+    fallbackMime: existingRef && existingRef.mime
+  });
+  const ref = await frameSpoolClient.putTextFromBytes({
+    docId: existingRef && existingRef.docId ? existingRef.docId : undefined,
+    mime: payload.mime,
+    createdAtMs: existingRef && existingRef.createdAtMs ? existingRef.createdAtMs : Date.now()
+  }, payload.bytes, {
+    fileName: payload.fileName,
+    fileType: payload.fileType,
+    preview: buildTextPreview(payload.text)
+  });
+  writeSectionTextCache(ref.docId, payload.text);
+  return {
+    ref: cloneSectionTextRef(ref),
+    meta: {
+      fileName: payload.fileName,
+      fileType: payload.fileType,
+      preview: buildTextPreview(payload.text)
+    },
+    text: payload.text
+  };
+}
+
+async function resolveTextFromRef(ref, options = {}) {
+  const normalized = cloneSectionTextRef(ref);
+  if (!normalized) return "";
+  const cached = readSectionTextCache(normalized.docId);
+  if (cached) return cached;
+  if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.getTextBytes !== "function") {
+    return "";
+  }
+  const opts = isPlainObject(options) ? options : {};
+  const retries = Math.max(0, Math.round(clampNumber(opts.retries, 0, 40, 8)));
+  const retryMs = Math.max(20, Math.round(clampNumber(opts.retryMs, 20, 2000, 120)));
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (typeof frameSpoolClient.hasTextDoc === "function") {
+        let exists = await frameSpoolClient.hasTextDoc(normalized.docId);
+        if (!exists && attempt < retries) {
+          await waitForMs(retryMs);
+          continue;
+        }
+        if (!exists) return "";
+      }
+      const bytes = await frameSpoolClient.getTextBytes(normalized.docId);
+      if (bytes && bytes.length) {
+        const text = decodeText(bytes);
+        writeSectionTextCache(normalized.docId, text);
+        return text;
+      }
+    } catch (_) {}
+    if (attempt < retries) {
+      await waitForMs(Math.min(1000, retryMs * (attempt + 1)));
+    }
+  }
+  return "";
 }
 
 async function resolveFrameDataUrlFromRef(ref, options = {}) {
@@ -573,14 +744,22 @@ async function syncFrameSpoolReportRefs(reports) {
   if (!(await ensureFrameSpoolClientReady())) return null;
   const list = Array.isArray(reports) ? reports : [];
   const reportFrameMap = new Map();
+  const reportTextMap = new Map();
   list.forEach((report) => {
     if (!report || typeof report !== "object") return;
     const reportId = String(report.id || "").trim();
     if (!reportId) return;
     const frameIds = Array.from(collectScreenshotRefsFromEvents(report.events).keys());
+    const textIds = Array.from(collectSectionTextRefsFromEvents(report.events).keys());
     reportFrameMap.set(reportId, frameIds);
+    reportTextMap.set(reportId, textIds);
   });
-  return await frameSpoolClient.syncReportRefs(reportFrameMap);
+  const frameResult = await frameSpoolClient.syncReportRefs(reportFrameMap);
+  let textResult = null;
+  if (typeof frameSpoolClient.syncReportTextRefs === "function") {
+    textResult = await frameSpoolClient.syncReportTextRefs(reportTextMap);
+  }
+  return { frameResult, textResult };
 }
 
 function scheduleFrameSpoolGc(delayMs = 1200) {
@@ -594,6 +773,12 @@ function scheduleFrameSpoolGc(delayMs = 1200) {
         maxBytes: FRAME_SPOOL_BYTE_CAP,
         orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS
       });
+      if (typeof frameSpoolClient.gcText === "function") {
+        await frameSpoolClient.gcText({
+          maxBytes: TEXT_SPOOL_BYTE_CAP,
+          orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS
+        });
+      }
     } catch (_) {}
   }, Math.max(150, Number(delayMs) || 1200));
 }
@@ -642,6 +827,84 @@ function encodeText(value) {
 
 function decodeText(bytes) {
   return new TextDecoder().decode(bytes);
+}
+
+function detectTextExtension(fileName, fallbackExt = "txt") {
+  const fallback = SECTION_TEXT_ALLOWED_EXTENSIONS.includes(String(fallbackExt || "").toLowerCase())
+    ? String(fallbackExt || "").toLowerCase()
+    : "txt";
+  const name = String(fileName || "").trim();
+  if (!name) return fallback;
+  const parts = name.split(".");
+  if (parts.length < 2) return fallback;
+  const ext = String(parts.pop() || "").trim().toLowerCase();
+  if (!SECTION_TEXT_ALLOWED_EXTENSIONS.includes(ext)) return "";
+  return ext;
+}
+
+function resolveTextMime(ext, fallbackMime) {
+  const key = String(ext || "").trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(SECTION_TEXT_ALLOWED_MIME, key)) {
+    return SECTION_TEXT_ALLOWED_MIME[key];
+  }
+  return String(fallbackMime || "text/plain");
+}
+
+function buildTextPreview(text) {
+  return String(text || "").replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+function normalizeTextInputPayload(rawText, options = {}) {
+  const opts = isPlainObject(options) ? options : {};
+  const text = String(rawText ?? "");
+  const bytes = encodeText(text);
+  if (bytes.length > SECTION_TEXT_MAX_BYTES) {
+    throw new Error("Section text exceeds 2MB limit.");
+  }
+  const fallbackType = String(opts.fallbackType || "txt").trim().toLowerCase() || "txt";
+  const fileType = detectTextExtension(opts.fileName || "", fallbackType);
+  if (!fileType) throw new Error("Only .txt, .md, and .json files are supported.");
+  const fileName = String(opts.fileName || "").trim() || `section.${fileType}`;
+  const mime = resolveTextMime(fileType, opts.fallbackMime);
+  return { text, bytes, fileType, fileName, mime };
+}
+
+async function readTextFileBytes(file) {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
+    reader.onload = () => resolve(new Uint8Array(reader.result || []));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function sectionTextTypeLabel(fileType) {
+  const raw = String(fileType || "").trim().toLowerCase();
+  if (raw === "md") return "MD";
+  if (raw === "json") return "JSON";
+  return "TXT";
+}
+
+function formatByteCount(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value >= (1024 * 1024)) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} B`;
+}
+
+function pickSectionTextFileName(meta, fallbackName = "section.txt") {
+  const fallback = String(fallbackName || "section.txt").trim() || "section.txt";
+  const normalizedMeta = cloneSectionTextMeta(meta);
+  const existingName = normalizedMeta && normalizedMeta.fileName
+    ? String(normalizedMeta.fileName).trim()
+    : "";
+  if (existingName) return existingName;
+  const fileType = normalizedMeta && normalizedMeta.fileType
+    ? detectTextExtension(`x.${normalizedMeta.fileType}`, "txt")
+    : "txt";
+  const safeExt = fileType || "txt";
+  const base = fallback.includes(".") ? fallback.slice(0, fallback.lastIndexOf(".")) : fallback;
+  return `${base}.${safeExt}`;
 }
 
 const CRC32_TABLE = (() => {
@@ -835,6 +1098,18 @@ function normalizeImportedReport(rawReport) {
     const ref = cloneScreenshotRef(ev.screenshotRef);
     if (ref) ev.screenshotRef = ref;
     else delete ev.screenshotRef;
+    const sectionTextRef = cloneSectionTextRef(ev.sectionTextRef);
+    if (sectionTextRef) ev.sectionTextRef = sectionTextRef;
+    else delete ev.sectionTextRef;
+    const sectionTextMeta = cloneSectionTextMeta(ev.sectionTextMeta);
+    if (sectionTextMeta) ev.sectionTextMeta = sectionTextMeta;
+    else delete ev.sectionTextMeta;
+    const burstTextRef = cloneSectionTextRef(ev.burstTextRef);
+    if (burstTextRef) ev.burstTextRef = burstTextRef;
+    else delete ev.burstTextRef;
+    const burstTextMeta = cloneSectionTextMeta(ev.burstTextMeta);
+    if (burstTextMeta) ev.burstTextMeta = burstTextMeta;
+    else delete ev.burstTextMeta;
   });
   return imported;
 }
@@ -867,6 +1142,25 @@ function normalizeFrameManifestEntries(rawEntries) {
       createdAtMs: Number(entry.createdAtMs) || Date.now(),
       width: Number(entry.width) || null,
       height: Number(entry.height) || null
+    };
+  }).filter(Boolean);
+}
+
+function normalizeTextManifestEntries(rawEntries) {
+  if (!Array.isArray(rawEntries)) return [];
+  return rawEntries.map((entry) => {
+    if (!entry || typeof entry !== "object") return null;
+    const docId = String(entry.docId || "").trim();
+    if (!docId) return null;
+    return {
+      docId,
+      file: String(entry.file || "").trim(),
+      mime: String(entry.mime || "text/plain"),
+      createdAtMs: Number(entry.createdAtMs) || Date.now(),
+      byteLength: Number(entry.byteLength) || 0,
+      fileName: String(entry.fileName || "").trim(),
+      fileType: String(entry.fileType || "").trim().toLowerCase(),
+      preview: String(entry.preview || "").slice(0, 240)
     };
   }).filter(Boolean);
 }
@@ -914,6 +1208,35 @@ async function restoreFramesFromBundle(archive, frameEntries, importedReport) {
     restoredCount: restored.size,
     fallbackCount: fallbackDataUrls.size
   };
+}
+
+async function restoreTextsFromBundle(archive, textEntries, importedReport) {
+  const entries = normalizeTextManifestEntries(textEntries);
+  if (!entries.length) return { restoredCount: 0 };
+  if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.putTextFromBytes !== "function") {
+    throw new Error("Text bundle detected, but local text spool is unavailable.");
+  }
+  let restoredCount = 0;
+  for (const entry of entries) {
+    const filePath = entry.file || `texts/${entry.docId}.txt`;
+    const bytes = archive.get(filePath);
+    if (!bytes || !bytes.length) continue;
+    try {
+      const text = decodeText(bytes);
+      const ref = await frameSpoolClient.putTextFromBytes({
+        docId: entry.docId,
+        mime: entry.mime,
+        createdAtMs: entry.createdAtMs
+      }, bytes, {
+        fileName: entry.fileName || `${entry.docId}.${entry.fileType || "txt"}`,
+        fileType: entry.fileType || detectTextExtension(entry.fileName || filePath, "txt") || "txt",
+        preview: entry.preview || buildTextPreview(text)
+      });
+      writeSectionTextCache(ref.docId, text);
+      restoredCount += 1;
+    } catch (_) {}
+  }
+  return { restoredCount };
 }
 
 function looksAutoGenerated(s) {
@@ -1358,6 +1681,8 @@ function deriveClickBursts(events, rawSettings) {
         tabId: activeBurst.context.tabId,
         tabTitle: activeBurst.context.tabTitle,
         customTitle: activeBurst.customTitle || "",
+        burstTextRef: cloneSectionTextRef(activeBurst.burstTextRef),
+        burstTextMeta: cloneSectionTextMeta(activeBurst.burstTextMeta),
         pageKey: activeBurst.context.pageKey,
         url: activeBurst.url || (first && first.event ? first.event.url : ""),
         startMs,
@@ -1403,6 +1728,9 @@ function deriveClickBursts(events, rawSettings) {
     return text || "";
   };
 
+  const candidateBurstTextRef = (ev) => cloneSectionTextRef(ev && ev.burstTextRef);
+  const candidateBurstTextMeta = (ev) => cloneSectionTextMeta(ev && ev.burstTextMeta);
+
   const startHotkeyBurst = (candidate) => {
     activeBurst = {
       context: candidate.context,
@@ -1417,6 +1745,8 @@ function deriveClickBursts(events, rawSettings) {
       runKey: candidate.runKey,
       targetFps: Number.isFinite(candidate.targetFps) ? candidate.targetFps : targetFps,
       customTitle: candidate.customTitle || "",
+      burstTextRef: cloneSectionTextRef(candidate.burstTextRef),
+      burstTextMeta: cloneSectionTextMeta(candidate.burstTextMeta),
       pageShiftCount: 0,
       tabShiftCount: 0
     };
@@ -1450,6 +1780,9 @@ function deriveClickBursts(events, rawSettings) {
       runKey: candidateRunKey(ev),
       targetFps: candidateTargetFps(ev),
       customTitle: candidateCustomTitle(ev)
+      ,
+      burstTextRef: candidateBurstTextRef(ev),
+      burstTextMeta: candidateBurstTextMeta(ev)
     };
 
     if (activeBurst) {
@@ -1476,6 +1809,12 @@ function deriveClickBursts(events, rawSettings) {
         }
         if (!activeBurst.customTitle && candidate.customTitle) {
           activeBurst.customTitle = candidate.customTitle;
+        }
+        if (candidate.burstTextRef) {
+          activeBurst.burstTextRef = cloneSectionTextRef(candidate.burstTextRef);
+          activeBurst.burstTextMeta = cloneSectionTextMeta(candidate.burstTextMeta);
+        } else if (!activeBurst.burstTextMeta && candidate.burstTextMeta) {
+          activeBurst.burstTextMeta = cloneSectionTextMeta(candidate.burstTextMeta);
         }
         activeBurst.lastMs = candidate.tsMs;
         activeBurst.lastContext = candidate.context;
@@ -2188,6 +2527,7 @@ function renderClickBursts(target, bursts, options) {
   const onMoveBurst = options && typeof options.onMoveBurst === "function" ? options.onMoveBurst : null;
   const canMoveBurst = options && typeof options.canMoveBurst === "function" ? options.canMoveBurst : null;
   const onRenameBurst = options && typeof options.onRenameBurst === "function" ? options.onRenameBurst : null;
+  const onRenderCard = options && typeof options.onRenderCard === "function" ? options.onRenderCard : null;
 
   const players = [];
   burstEntries.forEach((entry, index) => {
@@ -2259,6 +2599,11 @@ function renderClickBursts(target, bursts, options) {
     });
     players.push(player);
     target.appendChild(card);
+    if (onRenderCard) {
+      try {
+        onRenderCard(card, burst, Number.isFinite(Number(entry && entry.burstIndex)) ? Number(entry.burstIndex) : index);
+      } catch (_) {}
+    }
   });
 
   return players;
@@ -3026,12 +3371,27 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
 function buildExportHtml(report, options = {}) {
   const opts = isPlainObject(options) ? options : {};
   const frameDataUrls = isPlainObject(opts.frameDataUrls) ? opts.frameDataUrls : {};
+  const sectionTextByDocId = isPlainObject(opts.sectionTextByDocId) ? opts.sectionTextByDocId : {};
   const resolveScreenshotForEvent = (ev) => {
     const inline = safeDataImageUrl(ev && ev.screenshot || "");
     if (inline) return inline;
     const ref = cloneScreenshotRef(ev && ev.screenshotRef);
     if (!ref) return "";
     return safeDataImageUrl(frameDataUrls[ref.frameId] || "");
+  };
+  const resolveSectionTextForRef = (rawRef) => {
+    const ref = cloneSectionTextRef(rawRef);
+    if (!ref) return { ref: null, loaded: false, text: "" };
+    const docId = String(ref.docId || "").trim();
+    if (!docId) return { ref: null, loaded: false, text: "" };
+    if (!Object.prototype.hasOwnProperty.call(sectionTextByDocId, docId)) {
+      return { ref, loaded: false, text: "" };
+    }
+    return {
+      ref,
+      loaded: true,
+      text: String(sectionTextByDocId[docId] || "")
+    };
   };
   const isQuickPreview = !!opts.quickPreview;
   const brand = report.brand || {};
@@ -3071,6 +3431,27 @@ function buildExportHtml(report, options = {}) {
     if (exportTheme.tocMeta === "none") return "";
     if (exportTheme.tocMeta === "url") return String((ev && ev.url) || "");
     return hostFromUrl(ev && ev.url);
+  };
+
+  const buildExportSectionTextPanel = (panelId, label, state, metaRaw) => {
+    const safeState = state && typeof state === "object" ? state : { ref: null, loaded: false, text: "" };
+    const ref = cloneSectionTextRef(safeState.ref);
+    const meta = cloneSectionTextMeta(metaRaw);
+    const hasPayload = !!(safeState.text && String(safeState.text).length);
+    if (!ref && !hasPayload) return "";
+    const safeId = escapeHtml(String(panelId || ""));
+    const byteLength = Number(ref && ref.byteLength) || encodeText(String(safeState.text || "")).length;
+    const fileType = (meta && meta.fileType)
+      ? meta.fileType
+      : detectTextExtension(meta && meta.fileName, "txt") || "txt";
+    const summaryMeta = `${sectionTextTypeLabel(fileType)} • ${formatByteCount(byteLength)}`;
+    const captionBody = hasPayload
+      ? `<pre>${escapeHtml(String(safeState.text || ""))}</pre>`
+      : `<div class="section-text-caption-empty">Embedded text reference is unavailable in this export context.</div>`;
+    return `<details class="section-text-caption" id="${safeId}">
+  <summary>${escapeHtml(String(label || "Section text"))} <span class="section-text-caption-meta">${escapeHtml(summaryMeta)}</span></summary>
+  <div class="section-text-caption-body">${captionBody}</div>
+</details>`;
   };
 
   const burstData = derivedBursts.map((burst, i) => {
@@ -3128,10 +3509,17 @@ function buildExportHtml(report, options = {}) {
     if (!Number.isFinite(burstIndex) || burstIndex < 0 || burstIndex >= burstData.length) return;
     const burst = burstData[burstIndex];
     const burstId = burstDomId(derivedBursts[burstIndex], burstIndex);
+    const burstRefState = resolveSectionTextForRef(derivedBursts[burstIndex] && derivedBursts[burstIndex].burstTextRef);
+    const burstTextPanel = buildExportSectionTextPanel(
+      `${burstId}-text`,
+      "Interaction text",
+      burstRefState,
+      derivedBursts[burstIndex] && derivedBursts[burstIndex].burstTextMeta
+    );
     sectionNumber += 1;
     const burstTitle = escapeHtml(String((burst && burst.title) || `Interaction ${sectionNumber}`));
     rowParts.push(
-      `<div id="${burstId}" class="step step-burst-export"><div class="step-title">${sectionNumber}. ${burstTitle}</div><div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div></div>`
+      `<div id="${burstId}" class="step step-burst-export"><div class="step-title">${sectionNumber}. ${burstTitle}</div>${burstTextPanel}<div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div></div>`
     );
   };
 
@@ -3155,8 +3543,15 @@ function buildExportHtml(report, options = {}) {
       ? `<a class="meta-chip meta-url" href="${metaUrlHref}" target="_blank" rel="noopener noreferrer" title="${metaUrlTitle}">${metaUrlLabel}</a>`
       : `<span class="meta-chip meta-url" title="${metaUrlTitle}">${metaUrlLabel}</span>`;
     const meta = `<div class="step-meta"><span class="meta-chip meta-time">${metaTs || "Time n/a"}</span>${urlChip}</div>`;
+    const stepTextState = resolveSectionTextForRef(ev && ev.sectionTextRef);
+    const stepTextPanel = buildExportSectionTextPanel(
+      `${stepId}-text`,
+      "Section text",
+      stepTextState,
+      ev && ev.sectionTextMeta
+    );
     sectionNumber += 1;
-    rowParts.push(`<div id="${stepId}" class="step"><div class="step-title">${sectionNumber}. ${stepTitle}</div>${meta}${wrap}</div>`);
+    rowParts.push(`<div id="${stepId}" class="step"><div class="step-title">${sectionNumber}. ${stepTitle}</div>${meta}${wrap}${stepTextPanel}</div>`);
 
     const insertions = burstInsertionPlan.byStepId.get(stepId) || [];
     insertions.forEach(({ burstIndex }) => {
@@ -3405,6 +3800,51 @@ body{
 .shot-wrap{position:relative;display:inline-block}
 .shot img{max-width:100%;border:1px solid var(--edge);border-radius:10px}
 .annot{position:absolute;left:0;top:0;width:100%;height:100%}
+.section-text-caption{
+  margin-top:8px;
+  border:1px solid var(--edge);
+  border-left:3px solid var(--accent);
+  border-radius:10px;
+  background:linear-gradient(180deg,var(--paper),var(--panel));
+}
+.section-text-caption > summary{
+  cursor:pointer;
+  list-style:none;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:8px;
+  padding:6px 8px;
+  font-size:calc(var(--section-text-size) - 1px);
+  font-weight:600;
+}
+.section-text-caption > summary::-webkit-details-marker{display:none}
+.section-text-caption-meta{
+  display:inline-flex;
+  border:1px solid var(--edge);
+  border-radius:999px;
+  padding:1px 7px;
+  font-size:calc(var(--section-text-size) - 2px);
+  color:var(--muted);
+}
+.section-text-caption-body{
+  border-top:1px solid var(--edge);
+  padding:8px;
+  font-size:calc(var(--section-text-size) - 1px);
+}
+.section-text-caption-body pre{
+  margin:0;
+  max-height:240px;
+  overflow:auto;
+  white-space:pre-wrap;
+  word-break:break-word;
+  font-family:inherit;
+  line-height:1.4;
+}
+.section-text-caption-empty{
+  color:var(--muted);
+  font-style:italic;
+}
 .click-burst-export-slot{margin:8px 0}
 .click-burst-export-card{
   border:1px solid var(--edge);
@@ -3749,6 +4189,7 @@ ${rows}
 async function buildExportHtmlAsync(report, options = {}) {
   const opts = isPlainObject(options) ? { ...options } : {};
   const frameDataUrls = isPlainObject(opts.frameDataUrls) ? { ...opts.frameDataUrls } : {};
+  const sectionTextByDocId = isPlainObject(opts.sectionTextByDocId) ? { ...opts.sectionTextByDocId } : {};
   const refs = collectScreenshotRefsFromEvents(report && report.events);
   if (refs.size) {
     for (const [frameId, ref] of refs.entries()) {
@@ -3762,7 +4203,16 @@ async function buildExportHtmlAsync(report, options = {}) {
       frameDataUrls[frameId] = dataUrl;
     }
   }
-  return buildExportHtml(report, { ...opts, frameDataUrls });
+  const textRefs = collectSectionTextRefsFromEvents(report && report.events);
+  if (textRefs.size) {
+    for (const [docId, ref] of textRefs.entries()) {
+      if (Object.prototype.hasOwnProperty.call(sectionTextByDocId, docId)) continue;
+      const text = await resolveTextFromRef(ref, { retries: 8, retryMs: 120 });
+      if (!text) continue;
+      sectionTextByDocId[docId] = text;
+    }
+  }
+  return buildExportHtml(report, { ...opts, frameDataUrls, sectionTextByDocId });
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -4245,6 +4695,302 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!changed) return;
     await saveReports(reports);
     render();
+  }
+
+  function getBurstTextState(burst) {
+    if (!hasReport || !Array.isArray(report.events)) return { ref: null, meta: null };
+    const stepIds = burstStepIdSet(burst);
+    if (!stepIds.size) {
+      return {
+        ref: cloneSectionTextRef(burst && burst.burstTextRef),
+        meta: cloneSectionTextMeta(burst && burst.burstTextMeta)
+      };
+    }
+    for (const ev of report.events) {
+      const stepId = String(ev && ev.stepId || "").trim();
+      if (!stepIds.has(stepId)) continue;
+      const ref = cloneSectionTextRef(ev && ev.burstTextRef);
+      const meta = cloneSectionTextMeta(ev && ev.burstTextMeta);
+      if (ref || meta) return { ref, meta };
+    }
+    return {
+      ref: cloneSectionTextRef(burst && burst.burstTextRef),
+      meta: cloneSectionTextMeta(burst && burst.burstTextMeta)
+    };
+  }
+
+  function applyBurstTextState(burst, ref, meta) {
+    if (!hasReport || !Array.isArray(report.events)) return 0;
+    const stepIds = burstStepIdSet(burst);
+    if (!stepIds.size) return 0;
+    const normalizedRef = cloneSectionTextRef(ref);
+    const normalizedMeta = cloneSectionTextMeta(meta);
+    let touched = 0;
+    report.events.forEach((ev) => {
+      const stepId = String(ev && ev.stepId || "").trim();
+      if (!stepIds.has(stepId)) return;
+      if (normalizedRef) ev.burstTextRef = cloneSectionTextRef(normalizedRef);
+      else delete ev.burstTextRef;
+      if (normalizedMeta) ev.burstTextMeta = cloneSectionTextMeta(normalizedMeta);
+      else delete ev.burstTextMeta;
+      touched += 1;
+    });
+    if (burst && typeof burst === "object") {
+      if (normalizedRef) burst.burstTextRef = cloneSectionTextRef(normalizedRef);
+      else delete burst.burstTextRef;
+      if (normalizedMeta) burst.burstTextMeta = cloneSectionTextMeta(normalizedMeta);
+      else delete burst.burstTextMeta;
+    }
+    return touched;
+  }
+
+  function createSectionTextEditorPanel(config = {}) {
+    const label = String(config.label || "Section text").trim() || "Section text";
+    const defaultBaseName = String(config.defaultBaseName || "section-text").trim() || "section-text";
+    const getState = typeof config.getState === "function" ? config.getState : (() => ({ ref: null, meta: null }));
+    const onPersist = typeof config.onPersist === "function" ? config.onPersist : (async () => {});
+    const onClear = typeof config.onClear === "function" ? config.onClear : (async () => {});
+
+    const panel = el("details", "section-text-panel");
+    const summary = el("summary", "section-text-panel-summary");
+    const summaryTitle = el("span", "section-text-panel-title", label);
+    const summaryMeta = el("span", "section-text-panel-meta", "No text");
+    summary.appendChild(summaryTitle);
+    summary.appendChild(summaryMeta);
+    panel.appendChild(summary);
+
+    const body = el("div", "section-text-panel-body");
+    const toolbar = el("div", "section-text-toolbar noprint");
+    const importBtn = el("button", "btn ghost", "Import text file");
+    const saveBtn = el("button", "btn", "Save text");
+    const clearBtn = el("button", "btn danger", "Clear text");
+    const counter = el("span", "section-text-counter", `0 / ${formatByteCount(SECTION_TEXT_MAX_BYTES)}`);
+    toolbar.appendChild(importBtn);
+    toolbar.appendChild(saveBtn);
+    toolbar.appendChild(clearBtn);
+    toolbar.appendChild(counter);
+    body.appendChild(toolbar);
+
+    const editor = document.createElement("textarea");
+    editor.className = "section-text-editor";
+    editor.placeholder = "Paste or type section text (up to 2MB).";
+    body.appendChild(editor);
+
+    const status = el("div", "section-text-status");
+    body.appendChild(status);
+
+    const caption = el("details", "section-text-caption");
+    const captionSummary = el("summary", "section-text-caption-summary", "Caption preview");
+    const captionBody = el("div", "section-text-caption-body");
+    const preview = document.createElement("pre");
+    preview.className = "section-text-caption-pre";
+    captionBody.appendChild(preview);
+    caption.appendChild(captionSummary);
+    caption.appendChild(captionBody);
+    body.appendChild(caption);
+
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".txt,.md,.json,text/plain,text/markdown,application/json";
+    fileInput.style.display = "none";
+    body.appendChild(fileInput);
+
+    panel.appendChild(body);
+
+    let currentRef = null;
+    let currentMeta = null;
+    let currentText = "";
+    let loaded = false;
+    let loadingPromise = null;
+    let pendingFileName = "";
+    let pendingFileType = "";
+
+    const setStatus = (message, isError = false) => {
+      status.textContent = String(message || "");
+      status.classList.toggle("error", !!isError);
+    };
+
+    const refreshCounter = () => {
+      const bytes = encodeText(editor.value || "").length;
+      counter.textContent = `${formatByteCount(bytes)} / ${formatByteCount(SECTION_TEXT_MAX_BYTES)}`;
+      counter.classList.toggle("error", bytes > SECTION_TEXT_MAX_BYTES);
+    };
+
+    const refreshPreview = () => {
+      currentText = String(editor.value || "");
+      if (currentText) {
+        preview.textContent = currentText;
+      } else {
+        preview.textContent = "No embedded text saved for this section.";
+      }
+    };
+
+    const refreshSummary = () => {
+      const ref = cloneSectionTextRef(currentRef);
+      const meta = cloneSectionTextMeta(currentMeta);
+      if (!ref) {
+        summaryMeta.textContent = "No text";
+        return;
+      }
+      const fileType = (meta && meta.fileType)
+        ? meta.fileType
+        : detectTextExtension(meta && meta.fileName, "txt") || "txt";
+      const byteLength = Number(ref.byteLength) || encodeText(currentText || "").length;
+      summaryMeta.textContent = `${sectionTextTypeLabel(fileType)} • ${formatByteCount(byteLength)}`;
+    };
+
+    const applyState = (state, textValue) => {
+      const normalized = isPlainObject(state) ? state : {};
+      currentRef = cloneSectionTextRef(normalized.ref);
+      currentMeta = cloneSectionTextMeta(normalized.meta);
+      editor.value = String(textValue || "");
+      refreshCounter();
+      refreshPreview();
+      refreshSummary();
+    };
+
+    const loadText = async (force = false) => {
+      if (loadingPromise) return loadingPromise;
+      if (loaded && !force) return currentText;
+      loadingPromise = (async () => {
+        const state = await Promise.resolve(getState());
+        const ref = cloneSectionTextRef(state && state.ref);
+        const meta = cloneSectionTextMeta(state && state.meta);
+        let text = "";
+        if (ref) {
+          text = await resolveTextFromRef(ref, { retries: 8, retryMs: 120 });
+        }
+        currentRef = ref;
+        currentMeta = meta;
+        editor.value = text || "";
+        currentText = editor.value;
+        loaded = true;
+        refreshCounter();
+        refreshPreview();
+        refreshSummary();
+        if (ref && !text) {
+          setStatus("Embedded text is not currently available in local spool.", true);
+        } else {
+          setStatus("");
+        }
+        return currentText;
+      })().finally(() => {
+        loadingPromise = null;
+      });
+      return loadingPromise;
+    };
+
+    panel.addEventListener("toggle", () => {
+      if (panel.open) {
+        loadText(false).catch((err) => {
+          setStatus((err && err.message) || "Unable to load embedded text.", true);
+        });
+      }
+    });
+
+    editor.addEventListener("input", () => {
+      refreshCounter();
+      refreshPreview();
+    });
+
+    importBtn.addEventListener("click", () => {
+      fileInput.click();
+    });
+
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = "";
+      if (!file) return;
+      try {
+        const ext = detectTextExtension(file.name, "txt");
+        if (!ext) throw new Error("Only .txt, .md, and .json files are supported.");
+        const bytes = await readTextFileBytes(file);
+        if (bytes.length > SECTION_TEXT_MAX_BYTES) {
+          throw new Error("Section text exceeds 2MB limit.");
+        }
+        const text = decodeText(bytes);
+        pendingFileName = file.name || `${defaultBaseName}.${ext}`;
+        pendingFileType = ext;
+        editor.value = text;
+        refreshCounter();
+        refreshPreview();
+        setStatus(`Loaded ${pendingFileName}. Click “Save text” to persist.`);
+      } catch (err) {
+        setStatus((err && err.message) || "Failed to import text file.", true);
+      }
+    });
+
+    saveBtn.addEventListener("click", async () => {
+      try {
+        const rawText = String(editor.value || "");
+        if (!rawText.trim()) {
+          throw new Error("Text is empty. Use “Clear text” to remove existing embed.");
+        }
+        const bytes = encodeText(rawText);
+        if (bytes.length > SECTION_TEXT_MAX_BYTES) {
+          throw new Error("Section text exceeds 2MB limit.");
+        }
+        const fallbackExt = pendingFileType
+          || (currentMeta && currentMeta.fileType)
+          || detectTextExtension(currentMeta && currentMeta.fileName, "txt")
+          || "txt";
+        const fallbackName = `${defaultBaseName}.${fallbackExt}`;
+        const fileName = pendingFileName || pickSectionTextFileName(currentMeta, fallbackName);
+        const persisted = await persistSectionTextDocument(rawText, {
+          existingRef: currentRef,
+          existingMeta: currentMeta,
+          fileName,
+          fileType: fallbackExt
+        });
+        await onPersist({
+          ref: cloneSectionTextRef(persisted.ref),
+          meta: cloneSectionTextMeta(persisted.meta),
+          text: String(persisted.text || "")
+        });
+        currentRef = cloneSectionTextRef(persisted.ref);
+        currentMeta = cloneSectionTextMeta(persisted.meta);
+        editor.value = String(persisted.text || "");
+        pendingFileName = "";
+        pendingFileType = "";
+        loaded = true;
+        refreshCounter();
+        refreshPreview();
+        refreshSummary();
+        setStatus("Section text saved.");
+      } catch (err) {
+        setStatus((err && err.message) || "Failed to save section text.", true);
+      }
+    });
+
+    clearBtn.addEventListener("click", async () => {
+      try {
+        const previous = cloneSectionTextRef(currentRef);
+        await onClear(previous);
+        if (previous) clearSectionTextCache(previous.docId);
+        currentRef = null;
+        currentMeta = null;
+        currentText = "";
+        editor.value = "";
+        pendingFileName = "";
+        pendingFileType = "";
+        loaded = true;
+        refreshCounter();
+        refreshPreview();
+        refreshSummary();
+        setStatus("Embedded text cleared.");
+      } catch (err) {
+        setStatus((err && err.message) || "Failed to clear embedded text.", true);
+      }
+    });
+
+    Promise.resolve(getState()).then((state) => {
+      const normalized = isPlainObject(state) ? state : {};
+      applyState(normalized, "");
+    }).catch(() => {
+      applyState({ ref: null, meta: null }, "");
+    });
+
+    return panel;
   }
 
   function openAnnotationEditorForStep(stepId) {
@@ -4826,6 +5572,26 @@ document.addEventListener("DOMContentLoaded", async () => {
               node.scrollIntoView({ behavior: "smooth", block: "center" });
               node.classList.add("step-flash");
               setTimeout(() => node.classList.remove("step-flash"), 1200);
+            },
+            onRenderCard: (card, targetBurst, targetBurstIndex) => {
+              const panel = createSectionTextEditorPanel({
+                label: "Interaction text",
+                defaultBaseName: `interaction-${Number.isFinite(targetBurstIndex) ? targetBurstIndex + 1 : 1}`,
+                getState: () => getBurstTextState(targetBurst),
+                onPersist: async ({ ref, meta }) => {
+                  const touched = applyBurstTextState(targetBurst, ref, meta);
+                  if (!touched) throw new Error("Unable to attach text to this interaction block.");
+                  await saveReports(reports);
+                  updateAux();
+                },
+                onClear: async () => {
+                  const touched = applyBurstTextState(targetBurst, null, null);
+                  if (!touched) throw new Error("Unable to clear interaction text.");
+                  await saveReports(reports);
+                  updateAux();
+                }
+              });
+              card.appendChild(panel);
             }
           }
         );
@@ -4928,6 +5694,34 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
         wrap.appendChild(note);
       }
+
+      const sectionTextPanel = createSectionTextEditorPanel({
+        label: "Section text",
+        defaultBaseName: String(ev.stepId || "section"),
+        getState: () => ({
+          ref: cloneSectionTextRef(ev.sectionTextRef),
+          meta: cloneSectionTextMeta(ev.sectionTextMeta)
+        }),
+        onPersist: async ({ ref, meta }) => {
+          const nextRef = cloneSectionTextRef(ref);
+          const nextMeta = cloneSectionTextMeta(meta);
+          if (nextRef) ev.sectionTextRef = nextRef;
+          else delete ev.sectionTextRef;
+          if (nextMeta) ev.sectionTextMeta = nextMeta;
+          else delete ev.sectionTextMeta;
+          await saveReports(reports);
+          updateAux();
+        },
+        onClear: async () => {
+          const previous = cloneSectionTextRef(ev.sectionTextRef);
+          if (previous) clearSectionTextCache(previous.docId);
+          delete ev.sectionTextRef;
+          delete ev.sectionTextMeta;
+          await saveReports(reports);
+          updateAux();
+        }
+      });
+      wrap.appendChild(sectionTextPanel);
 
       if (hasScreenshotAsset) {
         const shotWrap = el("div", "shot-wrap");
@@ -5320,6 +6114,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const manifestBytes = archive.get("manifest.json");
     const reportBytes = archive.get("report.json");
     const frameManifestBytes = archive.get("frame-manifest.json");
+    const textManifestBytes = archive.get("text-manifest.json");
     if (!manifestBytes || !reportBytes) {
       throw new Error("ZIP must include manifest.json and report.json.");
     }
@@ -5356,6 +6151,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         await restoreFramesFromBundle(archive, frameEntries, importedReport);
       } catch (_) {
         throw new Error("frame-manifest.json is invalid.");
+      }
+    }
+    if (textManifestBytes) {
+      try {
+        const parsedTextManifest = JSON.parse(decodeText(textManifestBytes));
+        const textEntries = Array.isArray(parsedTextManifest && parsedTextManifest.texts)
+          ? parsedTextManifest.texts
+          : Array.isArray(parsedTextManifest)
+            ? parsedTextManifest
+            : [];
+        await restoreTextsFromBundle(archive, textEntries, importedReport);
+      } catch (_) {
+        throw new Error("text-manifest.json is invalid.");
       }
     }
 
@@ -5464,6 +6272,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
       }
       const frameRefs = collectScreenshotRefsFromEvents(payload.report.events);
+      const textRefs = collectSectionTextRefsFromEvents(payload.report.events);
+      const textMetaByDocId = collectSectionTextMetaFromEvents(payload.report.events);
       const frameManifest = [];
       const frameEntries = [];
       for (const [frameId, ref] of frameRefs.entries()) {
@@ -5496,6 +6306,30 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
         frameEntries.push({ name: filePath, data: bytes, updatedAt: exportedAt });
       }
+      const textManifest = [];
+      const textEntries = [];
+      for (const [docId, ref] of textRefs.entries()) {
+        let text = await resolveTextFromRef(ref, { retries: 8, retryMs: 120 });
+        if (!text) text = readSectionTextCache(docId);
+        if (!text) continue;
+        const meta = cloneSectionTextMeta(textMetaByDocId.get(docId)) || {};
+        const fileType = detectTextExtension(meta.fileName || `text.${meta.fileType || "txt"}`, meta.fileType || "txt") || "txt";
+        const mime = String(ref && ref.mime || resolveTextMime(fileType, "text/plain"));
+        const filePath = `texts/${docId}.${fileType}`;
+        const bytes = encodeText(text);
+        if (!bytes.length) continue;
+        textManifest.push({
+          docId,
+          file: filePath,
+          mime,
+          createdAtMs: Number(ref && ref.createdAtMs) || Date.now(),
+          byteLength: bytes.length,
+          fileName: meta.fileName || `${docId}.${fileType}`,
+          fileType,
+          preview: meta.preview || buildTextPreview(text)
+        });
+        textEntries.push({ name: filePath, data: bytes, updatedAt: exportedAt });
+      }
       const readme = [
         "UI Recorder Pro raw bundle",
         "",
@@ -5504,6 +6338,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         "- report.json   : full editable report payload",
         "- frame-manifest.json : frame reference metadata (bundle v2)",
         "- frames/*.png  : burst frame images referenced by screenshotRef",
+        "- text-manifest.json  : section text metadata (bundle v3)",
+        "- texts/*       : per-section embedded text payloads",
         "",
         "Re-import this ZIP in the report editor to continue editing."
       ].join("\n");
@@ -5519,6 +6355,14 @@ document.addEventListener("DOMContentLoaded", async () => {
           updatedAt: exportedAt
         });
         zipEntries.push(...frameEntries);
+      }
+      if (textManifest.length) {
+        zipEntries.push({
+          name: "text-manifest.json",
+          data: encodeText(JSON.stringify({ texts: textManifest }, null, 2)),
+          updatedAt: exportedAt
+        });
+        zipEntries.push(...textEntries);
       }
       const zipBytes = buildStoredZip(zipEntries);
       const filename = `ui-report-raw-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;

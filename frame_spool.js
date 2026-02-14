@@ -2,12 +2,14 @@
   "use strict";
 
   var DB_NAME = "uir-frame-spool-v1";
-  var DB_VERSION = 1;
+  var DB_VERSION = 2;
   var STORES = {
     FRAMES: "frames",
     FRAME_META: "frame_meta",
     SESSION_REFS: "session_refs",
-    REPORT_REFS: "report_refs"
+    REPORT_REFS: "report_refs",
+    TEXT_DOCS: "text_docs",
+    TEXT_REPORT_REFS: "text_report_refs"
   };
 
   function noop() {}
@@ -155,8 +157,25 @@
     };
   }
 
+  function normalizeTextRef(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    var docId = String(raw.docId || "").trim();
+    if (!docId) return null;
+    var mime = String(raw.mime || "text/plain").trim() || "text/plain";
+    return {
+      docId: docId,
+      mime: mime,
+      byteLength: Number(raw.byteLength) || 0,
+      createdAtMs: Number(raw.createdAtMs) || nowMs()
+    };
+  }
+
   function createFrameId() {
     return "frm_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  }
+
+  function createTextDocId() {
+    return "txt_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
   }
 
   function FrameSpoolService(options) {
@@ -225,6 +244,18 @@
           : db.createObjectStore(STORES.REPORT_REFS, { keyPath: "id" });
         if (!reportRefs.indexNames.contains("reportId")) reportRefs.createIndex("reportId", "reportId", { unique: false });
         if (!reportRefs.indexNames.contains("frameId")) reportRefs.createIndex("frameId", "frameId", { unique: false });
+
+        var textDocs = db.objectStoreNames.contains(STORES.TEXT_DOCS)
+          ? request.transaction.objectStore(STORES.TEXT_DOCS)
+          : db.createObjectStore(STORES.TEXT_DOCS, { keyPath: "docId" });
+        if (!textDocs.indexNames.contains("createdAtMs")) textDocs.createIndex("createdAtMs", "createdAtMs", { unique: false });
+        if (!textDocs.indexNames.contains("mime")) textDocs.createIndex("mime", "mime", { unique: false });
+
+        var textReportRefs = db.objectStoreNames.contains(STORES.TEXT_REPORT_REFS)
+          ? request.transaction.objectStore(STORES.TEXT_REPORT_REFS)
+          : db.createObjectStore(STORES.TEXT_REPORT_REFS, { keyPath: "id" });
+        if (!textReportRefs.indexNames.contains("reportId")) textReportRefs.createIndex("reportId", "reportId", { unique: false });
+        if (!textReportRefs.indexNames.contains("docId")) textReportRefs.createIndex("docId", "docId", { unique: false });
       };
       request.onsuccess = function () {
         var db = request.result;
@@ -623,6 +654,22 @@
     return removed;
   };
 
+  FrameSpoolService.prototype.removeReportTextRefs = async function (reportId) {
+    var report = String(reportId || "").trim();
+    if (!report) return 0;
+    var db = await this._openDb();
+    var tx = db.transaction([STORES.TEXT_REPORT_REFS], "readwrite");
+    var store = tx.objectStore(STORES.TEXT_REPORT_REFS);
+    var index = store.index("reportId");
+    var removed = 0;
+    await openCursorByIndex(index, report, function (_value, cursor) {
+      cursor.delete();
+      removed += 1;
+    });
+    await txDone(tx);
+    return removed;
+  };
+
   FrameSpoolService.prototype.removeSessionRefs = async function (sessionId) {
     var session = String(sessionId || "").trim();
     if (!session) return 0;
@@ -697,6 +744,132 @@
 
     await txDone(tx);
     return { reportCount: normalized.size, refCount: desired.size };
+  };
+
+  FrameSpoolService.prototype.syncReportTextRefs = async function (reportTextMap) {
+    var normalized = new Map();
+    if (reportTextMap instanceof Map) {
+      reportTextMap.forEach(function (docIds, reportId) {
+        var report = String(reportId || "").trim();
+        if (!report) return;
+        normalized.set(report, uniqueStrings(docIds));
+      });
+    } else if (reportTextMap && typeof reportTextMap === "object") {
+      Object.keys(reportTextMap).forEach(function (reportId) {
+        var report = String(reportId || "").trim();
+        if (!report) return;
+        normalized.set(report, uniqueStrings(reportTextMap[reportId]));
+      });
+    }
+
+    var desired = new Set();
+    normalized.forEach(function (docIds, reportId) {
+      docIds.forEach(function (docId) {
+        desired.add(makeKey(reportId, docId));
+      });
+    });
+
+    var db = await this._openDb();
+    var tx = db.transaction([STORES.TEXT_REPORT_REFS], "readwrite");
+    var store = tx.objectStore(STORES.TEXT_REPORT_REFS);
+    var existingKeys = new Set();
+    await openCursorAll(store, function (value, cursor) {
+      var id = String((value && value.id) || cursor.key || "");
+      if (!id) return;
+      existingKeys.add(id);
+      if (!desired.has(id)) cursor.delete();
+    });
+
+    var stamp = nowMs();
+    desired.forEach(function (id) {
+      if (existingKeys.has(id)) return;
+      var parts = String(id).split(":");
+      var reportId = parts.shift();
+      var docId = parts.join(":");
+      store.put({ id: id, reportId: reportId, docId: docId, createdAtMs: stamp });
+    });
+
+    await txDone(tx);
+    return { reportCount: normalized.size, refCount: desired.size };
+  };
+
+  FrameSpoolService.prototype.putTextFromBytes = async function (ref, bytes, meta) {
+    var inputRef = ref && typeof ref === "object" ? ref : {};
+    var docId = String(inputRef.docId || "").trim() || createTextDocId();
+    var mime = String(inputRef.mime || "text/plain").trim() || "text/plain";
+    var createdAtMs = Number(inputRef.createdAtMs) || nowMs();
+    var payload = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    if (!payload.length) throw new Error("Text payload is empty");
+    var details = meta && typeof meta === "object" ? meta : {};
+    var fileName = String(details.fileName || "").trim();
+    var fileType = String(details.fileType || "").trim();
+    var preview = String(details.preview || "").slice(0, 240);
+
+    var db = await this._openDb();
+    var tx = db.transaction([STORES.TEXT_DOCS], "readwrite");
+    var store = tx.objectStore(STORES.TEXT_DOCS);
+    store.put({
+      docId: docId,
+      blob: new Blob([payload], { type: mime }),
+      mime: mime,
+      createdAtMs: createdAtMs,
+      byteLength: payload.length,
+      fileName: fileName,
+      fileType: fileType,
+      preview: preview
+    });
+    await txDone(tx);
+
+    return {
+      docId: docId,
+      mime: mime,
+      byteLength: payload.length,
+      createdAtMs: createdAtMs
+    };
+  };
+
+  FrameSpoolService.prototype.getTextBytes = async function (docId) {
+    var key = String(docId || "").trim();
+    if (!key) return null;
+    var db = await this._openDb();
+    var tx = db.transaction([STORES.TEXT_DOCS], "readonly");
+    var store = tx.objectStore(STORES.TEXT_DOCS);
+    var record = await requestToPromise(store.get(key));
+    await txDone(tx);
+    if (!record || !record.blob) return null;
+    var buffer = await record.blob.arrayBuffer();
+    return new Uint8Array(buffer);
+  };
+
+  FrameSpoolService.prototype.hasTextDoc = async function (docId) {
+    var key = String(docId || "").trim();
+    if (!key) return false;
+    var db = await this._openDb();
+    var tx = db.transaction([STORES.TEXT_DOCS], "readonly");
+    var store = tx.objectStore(STORES.TEXT_DOCS);
+    var record = await requestToPromise(store.get(key));
+    await txDone(tx);
+    return !!record;
+  };
+
+  FrameSpoolService.prototype.getTextDocMeta = async function (docId) {
+    var key = String(docId || "").trim();
+    if (!key) return null;
+    var db = await this._openDb();
+    var tx = db.transaction([STORES.TEXT_DOCS], "readonly");
+    var store = tx.objectStore(STORES.TEXT_DOCS);
+    var record = await requestToPromise(store.get(key));
+    await txDone(tx);
+    if (!record) return null;
+    return {
+      docId: key,
+      mime: String(record.mime || "text/plain"),
+      byteLength: Number(record.byteLength) || 0,
+      createdAtMs: Number(record.createdAtMs) || 0,
+      fileName: String(record.fileName || ""),
+      fileType: String(record.fileType || ""),
+      preview: String(record.preview || "")
+    };
   };
 
   FrameSpoolService.prototype.refreshStats = async function () {
@@ -838,6 +1011,105 @@
     this.stats.lastGcAtMs = nowMs();
     this._logEvent("frame-spool:gc", result);
     return result;
+  };
+
+  FrameSpoolService.prototype.gcText = async function (options) {
+    var opts = options || {};
+    var orphanMaxAgeMs = Math.max(60 * 1000, Number(opts.orphanMaxAgeMs) || (24 * 60 * 60 * 1000));
+    var maxBytes = Math.max(8 * 1024 * 1024, Number(opts.maxBytes) || (256 * 1024 * 1024));
+
+    var db = await this._openDb();
+    var txRead = db.transaction([STORES.TEXT_DOCS, STORES.TEXT_REPORT_REFS], "readonly");
+    var docsStore = txRead.objectStore(STORES.TEXT_DOCS);
+    var refsStore = txRead.objectStore(STORES.TEXT_REPORT_REFS);
+
+    var docs = [];
+    var keepDocIds = new Set();
+    await openCursorAll(docsStore, function (value) {
+      if (!value || !value.docId) return;
+      docs.push({
+        docId: String(value.docId),
+        createdAtMs: Number(value.createdAtMs) || 0,
+        byteLength: Number(value.byteLength) || 0
+      });
+    });
+    await openCursorAll(refsStore, function (value) {
+      if (!value || !value.docId) return;
+      keepDocIds.add(String(value.docId));
+    });
+    await txDone(txRead);
+
+    var now = nowMs();
+    var bytesBefore = docs.reduce(function (sum, item) { return sum + item.byteLength; }, 0);
+    var orphanCandidates = docs
+      .filter(function (item) {
+        if (keepDocIds.has(item.docId)) return false;
+        return (now - item.createdAtMs) >= orphanMaxAgeMs;
+      })
+      .sort(function (a, b) { return a.createdAtMs - b.createdAtMs; });
+
+    var dropDocIds = [];
+    var dropDocIdSet = new Set();
+    var bytesPlannedDrop = 0;
+    orphanCandidates.forEach(function (item) {
+      if (dropDocIdSet.has(item.docId)) return;
+      dropDocIds.push(item.docId);
+      dropDocIdSet.add(item.docId);
+      bytesPlannedDrop += item.byteLength;
+    });
+
+    var bytesAfterAgeDrop = Math.max(0, bytesBefore - bytesPlannedDrop);
+    if (bytesAfterAgeDrop > maxBytes) {
+      var remainingOrphans = docs
+        .filter(function (item) {
+          return !keepDocIds.has(item.docId) && !dropDocIdSet.has(item.docId);
+        })
+        .sort(function (a, b) { return a.createdAtMs - b.createdAtMs; });
+      for (var i = 0; i < remainingOrphans.length && bytesAfterAgeDrop > maxBytes; i++) {
+        var candidate = remainingOrphans[i];
+        if (dropDocIdSet.has(candidate.docId)) continue;
+        dropDocIds.push(candidate.docId);
+        dropDocIdSet.add(candidate.docId);
+        bytesAfterAgeDrop -= candidate.byteLength;
+      }
+    }
+
+    if (dropDocIds.length) {
+      var txWrite = db.transaction([STORES.TEXT_DOCS, STORES.TEXT_REPORT_REFS], "readwrite");
+      var docsWrite = txWrite.objectStore(STORES.TEXT_DOCS);
+      var refsWrite = txWrite.objectStore(STORES.TEXT_REPORT_REFS);
+      var refsIdx = refsWrite.index("docId");
+      for (var j = 0; j < dropDocIds.length; j++) {
+        var docId = dropDocIds[j];
+        docsWrite.delete(docId);
+        refsIdx.openCursor(IDBKeyRange.only(docId)).onsuccess = function (event) {
+          var cursor = event.target.result;
+          if (!cursor) return;
+          cursor.delete();
+          cursor.continue();
+        };
+      }
+      await txDone(txWrite);
+    }
+
+    var txStats = db.transaction([STORES.TEXT_DOCS], "readonly");
+    var docsStats = txStats.objectStore(STORES.TEXT_DOCS);
+    var byteAfter = 0;
+    var docCountAfter = 0;
+    await openCursorAll(docsStats, function (value) {
+      docCountAfter += 1;
+      byteAfter += Number((value && value.byteLength) || 0);
+    });
+    await txDone(txStats);
+
+    return {
+      deletedTextDocCount: dropDocIds.length,
+      orphanCount: orphanCandidates.length,
+      bytesBefore: bytesBefore,
+      bytesAfter: byteAfter,
+      textDocCountAfter: docCountAfter,
+      maxBytes: maxBytes
+    };
   };
 
   FrameSpoolService.prototype.close = async function () {

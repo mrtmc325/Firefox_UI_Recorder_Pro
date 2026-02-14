@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.13.4 - 2026-02-14
+
+### Added
+- Per-section text embedding for both workflow steps and interaction bursts:
+  - manual text editor + `.txt` / `.md` / `.json` import in each section card.
+  - strict 2MB UTF-8 limit per section.
+  - text stored in IndexedDB spool as lightweight refs (`sectionTextRef`, `burstTextRef`) instead of inline payloads.
+- Exported HTML now renders embedded section text in collapsible caption-style panels for steps and bursts.
+- Raw ZIP bundle v3 now includes `text-manifest.json` and `texts/*` payload files for full text round-trip fidelity.
+
+### Changed
+- Burst derivation now carries burst text refs/meta so interaction text remains bound to burst sections through reorder/move operations.
+- `buildExportHtmlAsync` now resolves text refs alongside frame refs for export parity.
+
+### Fixed
+- Raw ZIP import now restores `text-manifest.json` payloads into local text spool before builder rendering.
+
 ## v1.13.3 - 2026-02-09
 
 ### Changed

@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.13.3
+# UI Workflow Recorder Pro (Firefox) v1.13.4
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.13.3`
+- Version: `1.13.4`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -62,6 +62,12 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Interaction burst rows now support drag/drop as whole burst blocks (in addition to swap up/down).
   - Timeline column headers now always use true tab/site labels; burst titles remain row labels only.
   - Timeline Draw + Swap controls
+- Per-section text embedding:
+  - Add editable text to every workflow step and interaction burst section.
+  - Accepts `.txt`, `.md`, and `.json` imports plus manual text entry.
+  - Strict 2MB UTF-8 limit per section.
+  - Section text is rendered in collapsible caption-style panels in builder and exported HTML.
+  - Text payloads are stored in IndexedDB spool with lightweight refs in report events.
 - Annotation improvements:
   - Live preview overlays and sizing traces
   - Screenshot-based obfuscation
@@ -75,7 +81,7 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Compact TOC controls with full title/URL detail options and dense behavior for large reports
   - Professional metadata chips (friendly timestamp + compact URL label)
   - Right-side path token removed from exported rows
-- Raw ZIP export/import/merge for future re-editing.
+- Raw ZIP export/import/merge for future re-editing, including section-text payload round-trip.
 
 ## Install (Temporary Add-on)
 1. Open `about:debugging#/runtime/this-firefox` in Firefox.
@@ -162,11 +168,13 @@ Expected behavior:
 
 ## Report & Export
 - HTML export includes TOC and direct step anchors.
-- Raw ZIP export (bundle v2) includes editable payload plus referenced burst frames:
+- Raw ZIP export (bundle v3) includes editable payload plus referenced burst frames and embedded section text:
   - `manifest.json`
   - `report.json`
   - `frame-manifest.json`
   - `frames/*.png`
+  - `text-manifest.json`
+  - `texts/*`
   - `README.txt`
 - Raw ZIP import options:
   - New report
