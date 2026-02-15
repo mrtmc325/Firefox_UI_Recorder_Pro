@@ -8,9 +8,9 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.13.4. This patch adds per-section text embedding for workflow steps and interaction bursts with 2MB limits and raw ZIP v3 text round-trip support.</p>
+    <p>Version 1.13.5. This patch adds per-section read-aloud controls for embedded section text in both the report builder and exported HTML, including play/pause, restart, timeline scrub, and tempo.</p>
 
-    <h2>Version Notes (v1.13.4)</h2>
+    <h2>Version Notes (v1.13.5)</h2>
     <ul>
       <li>Cross-tab timeline now supports drag/drop for interaction burst rows, moving entire burst blocks while preserving burst integrity.</li>
       <li>Timeline column headers now use true tab/site labels only; burst display titles no longer leak into column headers.</li>
@@ -35,6 +35,8 @@
       <li>Documentation wording now matches live behavior for hotkey burst split boundaries (epoch/toggle-based), with selectable capture cadence (5/10/15 FPS) and tunable replay speed.</li>
       <li>Each workflow step and interaction burst section now supports embedded text (manual entry or <code>.txt</code>/<code>.md</code>/<code>.json</code> import) with a strict 2MB cap per section.</li>
       <li>Embedded section text is stored as IndexedDB refs and shown in builder/export as collapsible caption-style panels.</li>
+      <li>Section text panels now include read-aloud controls in both builder and exported HTML: Play/Pause, Restart, timeline scrub, and tempo.</li>
+      <li>Read-aloud scrub uses text-position seeking (character timeline), which is more portable than audio-time seeking across browser speech engines.</li>
       <li>Raw ZIP export/import now supports bundle v3 with <code>frame-manifest.json</code> + <code>frames/*</code> and <code>text-manifest.json</code> + <code>texts/*</code> for full replay + text fidelity across re-import.</li>
       <li>Report builder step actions now use a precomputed event-position map to reduce per-render lookup overhead on larger reports.</li>
       <li>Default debug logging is now disabled in background/content/popup scripts for lower long-session console noise and overhead.</li>
@@ -164,6 +166,7 @@
       <li>Reorder with drag/drop in timeline and Move up/Move down in the step list.</li>
       <li>Use builder navigation links and panel collapse controls to reduce visual noise.</li>
       <li>Use the theme icon toggle (sun/moon preview) to switch light/dark while editing.</li>
+      <li>Use section read-aloud controls to narrate embedded text for guided walkthroughs.</li>
     </ul>
 
     <h2>Report Export / Import</h2>

@@ -2330,6 +2330,49 @@ body.report.report-dense .annot-tools {
   line-height: 1.45;
 }
 
+.section-text-audio {
+  margin-top: 8px;
+  border-top: 1px dashed var(--edge);
+  padding-top: 8px;
+}
+
+.section-text-audio-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.section-text-audio-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: max(10px, calc(var(--report-section-text-size) - 2px));
+}
+
+.section-text-audio-label {
+  white-space: nowrap;
+}
+
+.section-text-audio-slider {
+  width: 112px;
+}
+
+.section-text-audio-value {
+  min-width: 38px;
+  text-align: right;
+  color: var(--muted);
+  font-size: max(10px, calc(var(--report-section-text-size) - 2px));
+}
+
+.section-text-audio-status {
+  margin-top: 6px;
+  min-height: 14px;
+  color: var(--muted);
+  font-size: max(10px, calc(var(--report-section-text-size) - 2px));
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -2712,6 +2755,16 @@ body.report.report-dark .section-text-caption,
 body.report.report-dark .section-text-editor {
   border-color: #2f333c;
   background: #090b10;
+}
+
+body.report.report-dark .section-text-audio {
+  border-top-color: #2f333c;
+}
+
+body.report.report-dark .section-text-audio-value,
+body.report.report-dark .section-text-audio-status,
+body.report.report-dark .section-text-audio-control {
+  color: #9ca3af;
 }
 
 body.report.report-dark .section-text-editor {

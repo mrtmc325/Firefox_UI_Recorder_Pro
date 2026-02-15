@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.13.4
+# UI Workflow Recorder Pro (Firefox) v1.13.5
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.13.4`
+- Version: `1.13.5`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -68,6 +68,8 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Strict 2MB UTF-8 limit per section.
   - Section text is rendered in collapsible caption-style panels in builder and exported HTML.
   - Text payloads are stored in IndexedDB spool with lightweight refs in report events.
+  - Section text now includes read-aloud controls in builder and exported HTML: play/pause, restart, timeline scrub, and tempo.
+  - Scrub seeks by text position (character timeline) because browser speech engines do not expose true audio timecode.
 - Annotation improvements:
   - Live preview overlays and sizing traces
   - Screenshot-based obfuscation

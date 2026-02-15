@@ -69,6 +69,10 @@ const SECTION_TEXT_ALLOWED_MIME = Object.freeze({
 });
 const SECTION_TEXT_CACHE_MAX = 12;
 const SECTION_TEXT_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const SECTION_NARRATION_RATE_MIN = 0.5;
+const SECTION_NARRATION_RATE_MAX = 2;
+const SECTION_NARRATION_DEFAULT_RATE = 1;
+const SECTION_NARRATION_CHUNK_TARGET = 900;
 const FRAME_DATA_URL_CACHE_MAX = 24;
 const FRAME_DATA_URL_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const FRAME_REF_RESOLVE_RETRIES_DEFAULT = 16;
@@ -441,6 +445,15 @@ function normalizeHotkeyBurstFpsForReport(value) {
   const fps = Math.round(Number(value));
   if (HOTKEY_BURST_FPS_OPTIONS.has(fps)) return fps;
   return CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
+}
+
+function normalizeSectionNarrationRate(value) {
+  return Number(clampNumber(
+    value,
+    SECTION_NARRATION_RATE_MIN,
+    SECTION_NARRATION_RATE_MAX,
+    SECTION_NARRATION_DEFAULT_RATE
+  ).toFixed(2));
 }
 
 function cloneScreenshotRef(raw) {
@@ -3421,6 +3434,7 @@ function buildExportHtml(report, options = {}) {
   });
   const tocLayoutClass = tocLayoutClassByValue[exportTheme.tocLayout] || "toc-layout-grid";
   const burstSettings = normalizeClickBurstSettings(report && report.settings);
+  const narrationRate = normalizeSectionNarrationRate(report && report.settings && report.settings.sectionNarrationRate);
   const burstSourceEvents = sourceEvents.map((ev, i) => ({ ...(ev || {}), stepId: `step-${i + 1}` }));
   const derivedBursts = deriveClickBursts(burstSourceEvents, burstSettings);
   const burstFrameMap = buildBurstFrameMap(derivedBursts);
@@ -3448,9 +3462,24 @@ function buildExportHtml(report, options = {}) {
     const captionBody = hasPayload
       ? `<pre>${escapeHtml(String(safeState.text || ""))}</pre>`
       : `<div class="section-text-caption-empty">Embedded text reference is unavailable in this export context.</div>`;
+    const audioPanel = `<div class="section-text-audio" data-audio-role="caption-audio">
+  <div class="section-text-audio-controls">
+    <button type="button" class="section-text-audio-btn" data-audio-action="toggle">Play</button>
+    <button type="button" class="section-text-audio-btn" data-audio-action="restart">Restart</button>
+    <label class="section-text-audio-control">Timeline
+      <input type="range" class="section-text-audio-slider" data-audio-action="timeline" min="0" max="100" step="1" value="0">
+      <span class="section-text-audio-value" data-audio-role="timeline-value">0%</span>
+    </label>
+    <label class="section-text-audio-control">Tempo
+      <input type="range" class="section-text-audio-slider" data-audio-action="tempo" min="${SECTION_NARRATION_RATE_MIN}" max="${SECTION_NARRATION_RATE_MAX}" step="0.05" value="${narrationRate.toFixed(2)}">
+      <span class="section-text-audio-value" data-audio-role="tempo-value">${narrationRate.toFixed(2)}x</span>
+    </label>
+  </div>
+  <div class="section-text-audio-status" data-audio-role="status">${hasPayload ? "Ready." : "No text available."}</div>
+</div>`;
     return `<details class="section-text-caption" id="${safeId}">
   <summary>${escapeHtml(String(label || "Section text"))} <span class="section-text-caption-meta">${escapeHtml(summaryMeta)}</span></summary>
-  <div class="section-text-caption-body">${captionBody}</div>
+  <div class="section-text-caption-body">${captionBody}${audioPanel}</div>
 </details>`;
   };
 
@@ -3845,6 +3874,52 @@ body{
   color:var(--muted);
   font-style:italic;
 }
+.section-text-audio{
+  margin-top:8px;
+  border-top:1px dashed var(--edge);
+  padding-top:8px;
+}
+.section-text-audio-controls{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:6px 8px;
+}
+.section-text-audio-btn{
+  appearance:none;
+  border:1px solid var(--edge);
+  background:var(--paper);
+  color:var(--ink);
+  border-radius:999px;
+  font-size:10px;
+  padding:2px 9px;
+  cursor:pointer;
+}
+.section-text-audio-btn:disabled{
+  opacity:0.55;
+  cursor:not-allowed;
+}
+.section-text-audio-control{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  color:var(--muted);
+  font-size:10px;
+}
+.section-text-audio-slider{
+  width:108px;
+}
+.section-text-audio-value{
+  min-width:36px;
+  text-align:right;
+  color:var(--muted);
+  font-size:10px;
+}
+.section-text-audio-status{
+  margin-top:6px;
+  color:var(--muted);
+  font-size:10px;
+}
 .click-burst-export-slot{margin:8px 0}
 .click-burst-export-card{
   border:1px solid var(--edge);
@@ -4182,6 +4257,293 @@ ${rows}
     slot.appendChild(card);
   });
 })();
+(function () {
+  var synth = (typeof window !== "undefined" && window.speechSynthesis && typeof window.SpeechSynthesisUtterance === "function")
+    ? window.speechSynthesis
+    : null;
+  var captions = Array.prototype.slice.call(document.querySelectorAll(".section-text-caption"));
+  if (!captions.length) return;
+  var activeNarrator = null;
+  var minRate = ${SECTION_NARRATION_RATE_MIN};
+  var maxRate = ${SECTION_NARRATION_RATE_MAX};
+  var chunkTarget = ${SECTION_NARRATION_CHUNK_TARGET};
+
+  function clamp(n, min, max, fallback) {
+    var num = Number(n);
+    if (!Number.isFinite(num)) return Number(fallback);
+    return Math.max(min, Math.min(max, num));
+  }
+
+  function normalizeRate(value) {
+    return Number(clamp(value, minRate, maxRate, ${SECTION_NARRATION_DEFAULT_RATE}).toFixed(2));
+  }
+
+  function splitSegments(rawText) {
+    var text = String(rawText || "");
+    var out = [];
+    var cursor = 0;
+    while (cursor < text.length) {
+      var remaining = text.length - cursor;
+      var chunkLen = Math.min(chunkTarget, remaining);
+      var end = cursor + chunkLen;
+      if (end < text.length) {
+        var lookahead = text.slice(cursor, Math.min(text.length, end + 180));
+        var candidates = ["\\n\\n", ". ", "? ", "! ", "\\n", "; ", ", ", " "];
+        var selected = -1;
+        candidates.forEach(function (token) {
+          var pos = lookahead.lastIndexOf(token);
+          if (pos > selected) selected = pos;
+        });
+        if (selected >= Math.floor(chunkLen * 0.45)) {
+          end = cursor + selected + 1;
+        }
+      }
+      if (end <= cursor) end = Math.min(text.length, cursor + chunkLen);
+      var content = text.slice(cursor, end);
+      if (/\\S/.test(content)) out.push({ start: cursor, end: end, text: content });
+      cursor = end;
+    }
+    if (!out.length && /\\S/.test(text)) out.push({ start: 0, end: text.length, text: text });
+    return out;
+  }
+
+  function createNarrator(text, initialRate, onUpdate) {
+    var supported = !!synth;
+    var sourceText = String(text || "");
+    var segments = splitSegments(sourceText);
+    var totalChars = sourceText.length;
+    var offset = 0;
+    var generation = 0;
+    var rate = normalizeRate(initialRate);
+    var state = supported ? "idle" : "unsupported";
+
+    function emit(extra) {
+      var payload = extra && typeof extra === "object" ? extra : {};
+      var percent = totalChars ? Math.max(0, Math.min(100, Math.round((offset / totalChars) * 100))) : 0;
+      onUpdate({
+        supported: supported,
+        state: state,
+        hasText: !!totalChars,
+        totalChars: totalChars,
+        offset: offset,
+        percent: percent,
+        rate: rate,
+        error: "",
+        reason: "",
+        raw: payload
+      });
+    }
+
+    function findSegmentIndex(nextOffset) {
+      if (!segments.length) return -1;
+      var safeOffset = Math.max(0, Math.min(totalChars, Math.round(Number(nextOffset) || 0)));
+      for (var i = 0; i < segments.length; i++) {
+        if (safeOffset < segments[i].end) return i;
+      }
+      return segments.length - 1;
+    }
+
+    function stop(nextState) {
+      if (!supported) {
+        state = "unsupported";
+        emit();
+        return;
+      }
+      generation += 1;
+      try { synth.cancel(); } catch (_) {}
+      state = nextState || "idle";
+      emit();
+    }
+
+    function speakFrom(index, token) {
+      if (!supported || token !== generation) return;
+      if (index < 0 || index >= segments.length) {
+        state = "ended";
+        offset = totalChars;
+        emit();
+        return;
+      }
+      var segment = segments[index];
+      var utterance = new SpeechSynthesisUtterance(segment.text);
+      utterance.rate = rate;
+      utterance.onboundary = function (event) {
+        if (token !== generation) return;
+        var charIndex = Number(event && event.charIndex);
+        if (Number.isFinite(charIndex)) {
+          offset = Math.max(segment.start, Math.min(segment.end, segment.start + charIndex));
+          emit();
+        }
+      };
+      utterance.onend = function () {
+        if (token !== generation) return;
+        offset = segment.end;
+        emit();
+        speakFrom(index + 1, token);
+      };
+      utterance.onerror = function (event) {
+        if (token !== generation) return;
+        state = "error";
+        emit({ error: String((event && event.error) || "Speech playback failed.") });
+      };
+      try {
+        synth.speak(utterance);
+      } catch (_) {
+        state = "error";
+        emit({ error: "Speech playback failed." });
+      }
+    }
+
+    function startFrom(nextOffset) {
+      if (!supported || !segments.length) {
+        state = supported ? "idle" : "unsupported";
+        emit();
+        return;
+      }
+      offset = Math.max(0, Math.min(totalChars, Math.round(Number(nextOffset) || 0)));
+      var index = findSegmentIndex(offset);
+      generation += 1;
+      var token = generation;
+      try { synth.cancel(); } catch (_) {}
+      state = "playing";
+      emit();
+      speakFrom(index, token);
+    }
+
+    return {
+      play: function () {
+        if (!supported || !segments.length) {
+          state = supported ? "idle" : "unsupported";
+          emit();
+          return;
+        }
+        if (state === "paused" && synth.paused) {
+          state = "playing";
+          try { synth.resume(); } catch (_) {}
+          emit();
+          return;
+        }
+        startFrom(offset);
+      },
+      pause: function () {
+        if (!supported || state !== "playing") return;
+        state = "paused";
+        try { synth.pause(); } catch (_) {}
+        emit();
+      },
+      restart: function () {
+        if (!supported || !segments.length) return;
+        offset = 0;
+        startFrom(0);
+      },
+      seek: function (percent) {
+        if (!segments.length) {
+          emit();
+          return;
+        }
+        var ratio = clamp(percent, 0, 100, 0) / 100;
+        offset = Math.max(0, Math.min(totalChars, Math.round(totalChars * ratio)));
+        if (state === "playing") startFrom(offset);
+        else emit();
+      },
+      setRate: function (nextRate) {
+        rate = normalizeRate(nextRate);
+        if (state === "playing") startFrom(offset);
+        else emit();
+      },
+      stop: function (nextState) {
+        stop(nextState || "idle");
+      },
+      getState: function () {
+        return state;
+      }
+    };
+  }
+
+  captions.forEach(function (caption) {
+    var pre = caption.querySelector(".section-text-caption-pre, .section-text-caption-body pre");
+    var controls = caption.querySelector("[data-audio-role='caption-audio']");
+    if (!controls) return;
+    var toggle = controls.querySelector("[data-audio-action='toggle']");
+    var restart = controls.querySelector("[data-audio-action='restart']");
+    var timeline = controls.querySelector("[data-audio-action='timeline']");
+    var tempo = controls.querySelector("[data-audio-action='tempo']");
+    var timelineValue = controls.querySelector("[data-audio-role='timeline-value']");
+    var tempoValue = controls.querySelector("[data-audio-role='tempo-value']");
+    var status = controls.querySelector("[data-audio-role='status']");
+    var scrubDragging = false;
+    var text = pre ? String(pre.textContent || "") : "";
+    var narrator = createNarrator(text, tempo ? tempo.value : ${SECTION_NARRATION_DEFAULT_RATE}, function (snapshot) {
+      var supported = !!snapshot.supported;
+      var hasText = !!snapshot.hasText;
+      var playing = snapshot.state === "playing";
+      if (toggle) {
+        toggle.textContent = playing ? "Pause" : "Play";
+        toggle.disabled = !supported || !hasText;
+      }
+      if (restart) restart.disabled = !supported || !hasText;
+      if (timeline) timeline.disabled = !supported || !hasText;
+      if (tempo) tempo.disabled = !supported;
+      if (!scrubDragging && timeline) timeline.value = String(Math.round(snapshot.percent || 0));
+      if (timelineValue) timelineValue.textContent = Math.round(snapshot.percent || 0) + "%";
+      if (tempoValue) tempoValue.textContent = normalizeRate(snapshot.rate).toFixed(2) + "x";
+      if (!status) return;
+      if (!supported) status.textContent = "Read-aloud is unavailable in this browser context.";
+      else if (!hasText) status.textContent = "No text available.";
+      else if (snapshot.state === "playing") status.textContent = "Reading section text…";
+      else if (snapshot.state === "paused") status.textContent = "Paused.";
+      else if (snapshot.state === "ended") status.textContent = "Playback complete.";
+      else if (snapshot.state === "error") status.textContent = "Speech playback failed.";
+      else status.textContent = "Ready.";
+    });
+
+    if (toggle) {
+      toggle.addEventListener("click", function () {
+        if (activeNarrator && activeNarrator !== narrator) {
+          activeNarrator.stop("idle");
+        }
+        activeNarrator = narrator;
+        if (narrator.getState && narrator.getState() === "playing") narrator.pause();
+        else narrator.play();
+      });
+    }
+    if (restart) {
+      restart.addEventListener("click", function () {
+        if (activeNarrator && activeNarrator !== narrator) {
+          activeNarrator.stop("idle");
+        }
+        activeNarrator = narrator;
+        narrator.restart();
+      });
+    }
+    if (timeline) {
+      timeline.addEventListener("input", function () {
+        scrubDragging = true;
+        if (timelineValue) timelineValue.textContent = Math.round(clamp(timeline.value, 0, 100, 0)) + "%";
+      });
+      timeline.addEventListener("change", function () {
+        scrubDragging = false;
+        narrator.seek(timeline.value);
+      });
+    }
+    if (tempo) {
+      tempo.addEventListener("input", function () {
+        narrator.setRate(tempo.value);
+      });
+      tempo.addEventListener("change", function () {
+        narrator.setRate(tempo.value);
+      });
+    }
+    caption.addEventListener("toggle", function () {
+      if (!caption.open) narrator.pause();
+    });
+  });
+
+  window.addEventListener("beforeunload", function () {
+    if (activeNarrator && typeof activeNarrator.stop === "function") {
+      activeNarrator.stop("idle");
+    }
+  });
+})();
 </script>
 </body></html>`;
 }
@@ -4405,6 +4767,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const ANNOTATION_SESSION_IDLE_MS = 15_000;
   let activeAnnotationTeardown = null;
   let activeBurstPlayers = [];
+  let activeNarrationControllers = [];
+  let activeNarrationController = null;
   let previewRefreshTimer = null;
   let inlinePreviewHtmlCache = "";
 
@@ -4418,6 +4782,64 @@ document.addEventListener("DOMContentLoaded", async () => {
       try { player.destroy(); } catch (_) {}
     });
     activeBurstPlayers = [];
+  }
+
+  function destroyNarrationControllers(reason = "destroy-all") {
+    if (!Array.isArray(activeNarrationControllers) || !activeNarrationControllers.length) {
+      activeNarrationControllers = [];
+      if (activeNarrationController && typeof activeNarrationController.stop === "function") {
+        try { activeNarrationController.stop(reason); } catch (_) {}
+      }
+      activeNarrationController = null;
+      return;
+    }
+    activeNarrationControllers.forEach((controller) => {
+      if (!controller || typeof controller.destroy !== "function") return;
+      try { controller.destroy(reason); } catch (_) {}
+    });
+    activeNarrationControllers = [];
+    activeNarrationController = null;
+  }
+
+  function registerNarrationController(controller) {
+    if (!controller || typeof controller.destroy !== "function") return;
+    activeNarrationControllers.push(controller);
+  }
+
+  function promoteActiveNarrationController(controller) {
+    if (!controller) return;
+    if (activeNarrationController && activeNarrationController !== controller) {
+      try {
+        if (typeof activeNarrationController.stop === "function") {
+          activeNarrationController.stop("handoff");
+        } else if (typeof activeNarrationController.pause === "function") {
+          activeNarrationController.pause();
+        }
+      } catch (_) {}
+    }
+    activeNarrationController = controller;
+  }
+
+  function clearActiveNarrationController(controller) {
+    if (activeNarrationController === controller) {
+      activeNarrationController = null;
+    }
+  }
+
+  function getSectionNarrationRateSetting() {
+    if (!hasReport) return SECTION_NARRATION_DEFAULT_RATE;
+    if (!isPlainObject(report.settings)) report.settings = {};
+    return normalizeSectionNarrationRate(report.settings.sectionNarrationRate);
+  }
+
+  async function persistSectionNarrationRateSetting(value) {
+    if (!hasReport) return SECTION_NARRATION_DEFAULT_RATE;
+    if (!isPlainObject(report.settings)) report.settings = {};
+    const nextRate = normalizeSectionNarrationRate(value);
+    if (Number(report.settings.sectionNarrationRate) === nextRate) return nextRate;
+    report.settings.sectionNarrationRate = nextRate;
+    await saveReports(reports);
+    return nextRate;
   }
 
   function normalizeTheme(theme) {
@@ -4697,6 +5119,280 @@ document.addEventListener("DOMContentLoaded", async () => {
     render();
   }
 
+  function createSectionNarratorController(config = {}) {
+    const opts = isPlainObject(config) ? config : {};
+    const synth = (
+      typeof window !== "undefined" &&
+      window.speechSynthesis &&
+      typeof window.SpeechSynthesisUtterance === "function"
+    ) ? window.speechSynthesis : null;
+    const supported = !!synth;
+    const onState = typeof opts.onState === "function" ? opts.onState : (() => {});
+    const onActivate = typeof opts.onActivate === "function" ? opts.onActivate : (() => {});
+    const onDeactivate = typeof opts.onDeactivate === "function" ? opts.onDeactivate : (() => {});
+    let destroyed = false;
+    let sourceText = "";
+    let segments = [];
+    let totalChars = 0;
+    let offset = 0;
+    let rate = normalizeSectionNarrationRate(opts.initialRate);
+    let state = supported ? "idle" : "unsupported";
+    let generation = 0;
+
+    const splitTextIntoSegments = (rawText) => {
+      const text = String(rawText || "");
+      const out = [];
+      let cursor = 0;
+      while (cursor < text.length) {
+        const remaining = text.length - cursor;
+        const chunkLen = Math.min(SECTION_NARRATION_CHUNK_TARGET, remaining);
+        let end = cursor + chunkLen;
+        if (end < text.length) {
+          const lookahead = text.slice(cursor, Math.min(text.length, end + 180));
+          const candidates = ["\n\n", ". ", "? ", "! ", "\n", "; ", ", ", " "];
+          let selected = -1;
+          candidates.forEach((token) => {
+            const pos = lookahead.lastIndexOf(token);
+            if (pos > selected) selected = pos;
+          });
+          if (selected >= Math.floor(chunkLen * 0.45)) {
+            end = cursor + selected + 1;
+          }
+        }
+        if (end <= cursor) end = Math.min(text.length, cursor + chunkLen);
+        const content = text.slice(cursor, end);
+        if (/\S/.test(content)) {
+          out.push({
+            start: cursor,
+            end,
+            text: content
+          });
+        }
+        cursor = end;
+      }
+      if (!out.length && /\S/.test(text)) {
+        out.push({ start: 0, end: text.length, text });
+      }
+      return out;
+    };
+
+    const clampOffset = (next) => {
+      if (!Number.isFinite(Number(next))) return 0;
+      return Math.max(0, Math.min(totalChars, Math.round(Number(next))));
+    };
+
+    const findSegmentIndex = (nextOffset) => {
+      if (!segments.length) return -1;
+      const safeOffset = clampOffset(nextOffset);
+      for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i];
+        if (safeOffset < segment.end) return i;
+      }
+      return segments.length - 1;
+    };
+
+    const emit = (extra = {}) => {
+      const snapshot = {
+        supported,
+        state,
+        rate,
+        totalChars,
+        offset: clampOffset(offset),
+        hasText: !!totalChars,
+        percent: totalChars ? Math.max(0, Math.min(100, Math.round((clampOffset(offset) / totalChars) * 100))) : 0,
+        error: "",
+        ...extra
+      };
+      onState(snapshot);
+      return snapshot;
+    };
+
+    const stopSpeech = (nextState = "idle", reason = "") => {
+      if (!supported) return;
+      generation += 1;
+      try { synth.cancel(); } catch (_) {}
+      state = nextState;
+      if (nextState !== "playing") onDeactivate();
+      emit({ reason });
+    };
+
+    const speakFromSegment = (segmentIndex, token) => {
+      if (destroyed || !supported) return;
+      if (token !== generation) return;
+      if (segmentIndex < 0 || segmentIndex >= segments.length) {
+        state = "ended";
+        offset = totalChars;
+        onDeactivate();
+        emit({ reason: "completed" });
+        return;
+      }
+      const segment = segments[segmentIndex];
+      const utterance = new SpeechSynthesisUtterance(segment.text);
+      utterance.rate = rate;
+      utterance.onboundary = (event) => {
+        if (destroyed || token !== generation) return;
+        const charIndex = Number(event && event.charIndex);
+        if (Number.isFinite(charIndex)) {
+          offset = Math.max(segment.start, Math.min(segment.end, segment.start + charIndex));
+          emit();
+        }
+      };
+      utterance.onend = () => {
+        if (destroyed || token !== generation) return;
+        offset = segment.end;
+        emit();
+        speakFromSegment(segmentIndex + 1, token);
+      };
+      utterance.onerror = (event) => {
+        if (destroyed || token !== generation) return;
+        state = "error";
+        onDeactivate();
+        emit({
+          error: String((event && event.error) || "Speech playback failed.")
+        });
+      };
+      try {
+        synth.speak(utterance);
+      } catch (err) {
+        state = "error";
+        onDeactivate();
+        emit({
+          error: String((err && err.message) || "Speech playback failed.")
+        });
+      }
+    };
+
+    const startFromOffset = (nextOffset = offset) => {
+      if (!supported) {
+        state = "unsupported";
+        emit({ error: "Read-aloud is unavailable in this browser context." });
+        return false;
+      }
+      if (!segments.length) {
+        offset = 0;
+        state = "idle";
+        emit({ error: "No text available." });
+        return false;
+      }
+      offset = clampOffset(nextOffset);
+      const segmentIndex = findSegmentIndex(offset);
+      generation += 1;
+      const token = generation;
+      try { synth.cancel(); } catch (_) {}
+      onActivate();
+      state = "playing";
+      emit();
+      speakFromSegment(segmentIndex, token);
+      return true;
+    };
+
+    const setText = (nextText) => {
+      sourceText = String(nextText || "");
+      segments = splitTextIntoSegments(sourceText);
+      totalChars = sourceText.length;
+      offset = clampOffset(offset);
+      if (!segments.length && supported && state === "playing") {
+        stopSpeech("idle", "no-text");
+      } else {
+        emit();
+      }
+    };
+
+    const play = () => {
+      if (!supported) {
+        state = "unsupported";
+        emit({ error: "Read-aloud is unavailable in this browser context." });
+        return false;
+      }
+      if (!segments.length) {
+        state = "idle";
+        emit({ error: "No text available." });
+        return false;
+      }
+      if (state === "paused" && synth.paused) {
+        onActivate();
+        state = "playing";
+        try { synth.resume(); } catch (_) {}
+        emit();
+        return true;
+      }
+      return startFromOffset(offset);
+    };
+
+    const pause = () => {
+      if (!supported) return false;
+      if (state !== "playing") return false;
+      state = "paused";
+      try { synth.pause(); } catch (_) {}
+      onDeactivate();
+      emit();
+      return true;
+    };
+
+    const restart = () => {
+      offset = 0;
+      return startFromOffset(0);
+    };
+
+    const seek = (percent) => {
+      if (!segments.length) {
+        emit();
+        return 0;
+      }
+      const ratio = clampNumber(percent, 0, 100, 0) / 100;
+      const nextOffset = clampOffset(Math.round(totalChars * ratio));
+      offset = nextOffset;
+      if (state === "playing") {
+        startFromOffset(nextOffset);
+      } else {
+        emit();
+      }
+      return nextOffset;
+    };
+
+    const setRate = (nextRate) => {
+      rate = normalizeSectionNarrationRate(nextRate);
+      if (state === "playing") {
+        startFromOffset(offset);
+      } else {
+        emit();
+      }
+      return rate;
+    };
+
+    const stop = (reason = "stop") => {
+      if (!supported) {
+        state = "unsupported";
+        emit({ reason });
+        return;
+      }
+      stopSpeech("idle", reason);
+    };
+
+    const destroy = (reason = "destroy") => {
+      if (destroyed) return;
+      destroyed = true;
+      stop(reason);
+      segments = [];
+      sourceText = "";
+      totalChars = 0;
+      offset = 0;
+    };
+
+    emit();
+
+    return {
+      setText,
+      play,
+      pause,
+      restart,
+      seek,
+      setRate,
+      stop,
+      destroy
+    };
+  }
+
   function getBurstTextState(burst) {
     if (!hasReport || !Array.isArray(report.events)) return { ref: null, meta: null };
     const stepIds = burstStepIdSet(burst);
@@ -4750,6 +5446,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const getState = typeof config.getState === "function" ? config.getState : (() => ({ ref: null, meta: null }));
     const onPersist = typeof config.onPersist === "function" ? config.onPersist : (async () => {});
     const onClear = typeof config.onClear === "function" ? config.onClear : (async () => {});
+    const onNarrationRateCommit = typeof config.onNarrationRateCommit === "function"
+      ? config.onNarrationRateCommit
+      : (async () => {});
+    let narrationRate = normalizeSectionNarrationRate(config.narrationRate);
 
     const panel = el("details", "section-text-panel");
     const summary = el("summary", "section-text-panel-summary");
@@ -4789,6 +5489,45 @@ document.addEventListener("DOMContentLoaded", async () => {
     caption.appendChild(captionBody);
     body.appendChild(caption);
 
+    const audioPanel = el("div", "section-text-audio noprint");
+    const audioControls = el("div", "section-text-audio-controls");
+    const audioPlayPauseBtn = el("button", "btn ghost btn-small", "Play");
+    const audioRestartBtn = el("button", "btn subtle btn-small", "Restart");
+    const audioScrubWrap = el("label", "section-text-audio-control");
+    audioScrubWrap.appendChild(el("span", "section-text-audio-label", "Timeline"));
+    const audioScrub = document.createElement("input");
+    audioScrub.type = "range";
+    audioScrub.min = "0";
+    audioScrub.max = "100";
+    audioScrub.step = "1";
+    audioScrub.value = "0";
+    audioScrub.className = "section-text-audio-slider";
+    audioScrubWrap.appendChild(audioScrub);
+    const audioProgressValue = el("span", "section-text-audio-value", "0%");
+    audioScrubWrap.appendChild(audioProgressValue);
+
+    const audioSpeedWrap = el("label", "section-text-audio-control");
+    audioSpeedWrap.appendChild(el("span", "section-text-audio-label", "Tempo"));
+    const audioSpeed = document.createElement("input");
+    audioSpeed.type = "range";
+    audioSpeed.min = String(SECTION_NARRATION_RATE_MIN);
+    audioSpeed.max = String(SECTION_NARRATION_RATE_MAX);
+    audioSpeed.step = "0.05";
+    audioSpeed.value = narrationRate.toFixed(2);
+    audioSpeed.className = "section-text-audio-slider";
+    audioSpeedWrap.appendChild(audioSpeed);
+    const audioSpeedValue = el("span", "section-text-audio-value", `${narrationRate.toFixed(2)}x`);
+    audioSpeedWrap.appendChild(audioSpeedValue);
+
+    audioControls.appendChild(audioPlayPauseBtn);
+    audioControls.appendChild(audioRestartBtn);
+    audioControls.appendChild(audioScrubWrap);
+    audioControls.appendChild(audioSpeedWrap);
+    audioPanel.appendChild(audioControls);
+    const audioStatus = el("div", "section-text-audio-status", "No text available.");
+    audioPanel.appendChild(audioStatus);
+    body.appendChild(audioPanel);
+
     const fileInput = document.createElement("input");
     fileInput.type = "file";
     fileInput.accept = ".txt,.md,.json,text/plain,text/markdown,application/json";
@@ -4804,6 +5543,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     let loadingPromise = null;
     let pendingFileName = "";
     let pendingFileType = "";
+    let scrubDragging = false;
+    let narrator = null;
 
     const setStatus = (message, isError = false) => {
       status.textContent = String(message || "");
@@ -4823,6 +5564,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       } else {
         preview.textContent = "No embedded text saved for this section.";
       }
+      if (narrator) narrator.setText(currentText);
     };
 
     const refreshSummary = () => {
@@ -4848,6 +5590,57 @@ document.addEventListener("DOMContentLoaded", async () => {
       refreshPreview();
       refreshSummary();
     };
+
+    const syncNarrationUi = (snapshotRaw) => {
+      const snapshot = isPlainObject(snapshotRaw) ? snapshotRaw : {};
+      const supported = !!snapshot.supported;
+      const hasText = !!snapshot.hasText;
+      const isPlaying = snapshot.state === "playing";
+      const isPaused = snapshot.state === "paused";
+      audioPlayPauseBtn.textContent = isPlaying ? "Pause" : "Play";
+      if (!scrubDragging) {
+        const percent = Number(clampNumber(snapshot.percent, 0, 100, 0));
+        audioScrub.value = String(Math.round(percent));
+        audioProgressValue.textContent = `${Math.round(percent)}%`;
+      }
+      const shownRate = normalizeSectionNarrationRate(snapshot.rate ?? narrationRate);
+      if (audioSpeed.value !== shownRate.toFixed(2)) {
+        audioSpeed.value = shownRate.toFixed(2);
+      }
+      audioSpeedValue.textContent = `${shownRate.toFixed(2)}x`;
+      const disabled = !supported || !hasText;
+      audioPlayPauseBtn.disabled = disabled;
+      audioRestartBtn.disabled = disabled;
+      audioScrub.disabled = disabled;
+      audioSpeed.disabled = !supported;
+      if (!supported) {
+        audioStatus.textContent = "Read-aloud is unavailable in this browser context.";
+      } else if (!hasText) {
+        audioStatus.textContent = "No text available.";
+      } else if (snapshot.error) {
+        audioStatus.textContent = String(snapshot.error);
+      } else if (isPlaying) {
+        audioStatus.textContent = "Reading section text…";
+      } else if (isPaused) {
+        audioStatus.textContent = "Paused.";
+      } else if (snapshot.state === "ended") {
+        audioStatus.textContent = "Playback complete.";
+      } else {
+        audioStatus.textContent = "Ready.";
+      }
+    };
+
+    narrator = createSectionNarratorController({
+      initialRate: narrationRate,
+      onActivate: () => {
+        promoteActiveNarrationController(narrator);
+      },
+      onDeactivate: () => {
+        clearActiveNarrationController(narrator);
+      },
+      onState: syncNarrationUi
+    });
+    registerNarrationController(narrator);
 
     const loadText = async (force = false) => {
       if (loadingPromise) return loadingPromise;
@@ -4885,6 +5678,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         loadText(false).catch((err) => {
           setStatus((err && err.message) || "Unable to load embedded text.", true);
         });
+      } else if (narrator) {
+        narrator.pause();
       }
     });
 
@@ -4983,11 +5778,54 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     });
 
+    audioPlayPauseBtn.addEventListener("click", () => {
+      if (!narrator) return;
+      if (audioPlayPauseBtn.textContent === "Pause") {
+        narrator.pause();
+      } else {
+        narrator.play();
+      }
+    });
+
+    audioRestartBtn.addEventListener("click", () => {
+      if (!narrator) return;
+      narrator.restart();
+    });
+
+    audioScrub.addEventListener("input", () => {
+      scrubDragging = true;
+      const percent = Number(clampNumber(audioScrub.value, 0, 100, 0));
+      audioProgressValue.textContent = `${Math.round(percent)}%`;
+    });
+
+    audioScrub.addEventListener("change", () => {
+      scrubDragging = false;
+      if (!narrator) return;
+      narrator.seek(audioScrub.value);
+    });
+
+    audioSpeed.addEventListener("input", () => {
+      narrationRate = normalizeSectionNarrationRate(audioSpeed.value);
+      audioSpeedValue.textContent = `${narrationRate.toFixed(2)}x`;
+      if (narrator) narrator.setRate(narrationRate);
+    });
+
+    audioSpeed.addEventListener("change", () => {
+      narrationRate = normalizeSectionNarrationRate(audioSpeed.value);
+      audioSpeedValue.textContent = `${narrationRate.toFixed(2)}x`;
+      if (narrator) narrator.setRate(narrationRate);
+      Promise.resolve(onNarrationRateCommit(narrationRate)).catch((err) => {
+        setStatus((err && err.message) || "Failed to persist narration tempo.", true);
+      });
+    });
+
     Promise.resolve(getState()).then((state) => {
       const normalized = isPlainObject(state) ? state : {};
       applyState(normalized, "");
+      if (narrator) narrator.setRate(narrationRate);
     }).catch(() => {
       applyState({ ref: null, meta: null }, "");
+      if (narrator) narrator.setRate(narrationRate);
     });
 
     return panel;
@@ -5118,6 +5956,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (!hasReport) {
     document.body.classList.remove("report-dense");
     destroyBurstPlayers();
+    destroyNarrationControllers("no-report");
     root.appendChild(el("p", null, "No saved reports yet. Record a workflow and press Stop to save it, or import a raw ZIP bundle."));
     if (toc) {
       toc.innerHTML = "";
@@ -5520,6 +6359,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function render() {
     if (!hasReport) return;
     destroyBurstPlayers();
+    destroyNarrationControllers("render-refresh");
     if (activeAnnotationTeardown) {
       try { activeAnnotationTeardown("render-refresh"); } catch (_) {}
       activeAnnotationTeardown = null;
@@ -5577,6 +6417,7 @@ document.addEventListener("DOMContentLoaded", async () => {
               const panel = createSectionTextEditorPanel({
                 label: "Interaction text",
                 defaultBaseName: `interaction-${Number.isFinite(targetBurstIndex) ? targetBurstIndex + 1 : 1}`,
+                narrationRate: getSectionNarrationRateSetting(),
                 getState: () => getBurstTextState(targetBurst),
                 onPersist: async ({ ref, meta }) => {
                   const touched = applyBurstTextState(targetBurst, ref, meta);
@@ -5589,6 +6430,9 @@ document.addEventListener("DOMContentLoaded", async () => {
                   if (!touched) throw new Error("Unable to clear interaction text.");
                   await saveReports(reports);
                   updateAux();
+                },
+                onNarrationRateCommit: async (value) => {
+                  await persistSectionNarrationRateSetting(value);
                 }
               });
               card.appendChild(panel);
@@ -5698,6 +6542,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const sectionTextPanel = createSectionTextEditorPanel({
         label: "Section text",
         defaultBaseName: String(ev.stepId || "section"),
+        narrationRate: getSectionNarrationRateSetting(),
         getState: () => ({
           ref: cloneSectionTextRef(ev.sectionTextRef),
           meta: cloneSectionTextMeta(ev.sectionTextMeta)
@@ -5719,6 +6564,9 @@ document.addEventListener("DOMContentLoaded", async () => {
           delete ev.sectionTextMeta;
           await saveReports(reports);
           updateAux();
+        },
+        onNarrationRateCommit: async (value) => {
+          await persistSectionNarrationRateSetting(value);
         }
       });
       wrap.appendChild(sectionTextPanel);
@@ -6403,6 +7251,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       frameSpoolGcTimer = null;
     }
     destroyBurstPlayers();
+    destroyNarrationControllers("beforeunload");
     if (activeAnnotationTeardown) {
       try { activeAnnotationTeardown("beforeunload"); } catch (_) {}
       activeAnnotationTeardown = null;

@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.13.5 - 2026-02-15
+
+### Added
+- Per-section read-aloud controls for workflow-step and interaction text panels in builder and exported HTML:
+  - play/pause
+  - restart
+  - timeline scrub (text-position seek)
+  - tempo control (0.50x to 2.00x)
+
+### Changed
+- Section narration now runs as a single active session at a time, automatically pausing prior section playback when a new section starts.
+- Report-level narration tempo is persisted in report settings (`sectionNarrationRate`) and reused by section panels.
+
 ## v1.13.4 - 2026-02-14
 
 ### Added
