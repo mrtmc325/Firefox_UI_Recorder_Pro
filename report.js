@@ -24,8 +24,15 @@ function safeDataImageUrl(value) {
   return s;
 }
 
+function safeDataAudioUrl(value) {
+  const s = String(value || "").trim();
+  if (!s) return "";
+  if (!/^data:audio\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+$/i.test(s)) return "";
+  return s;
+}
+
 const RAW_BUNDLE_FORMAT = "uir-report-bundle";
-const RAW_BUNDLE_VERSION = 3;
+const RAW_BUNDLE_VERSION = 4;
 const REPORT_THEME_STORAGE_KEY = "__uiRecorderReportTheme";
 const DEFAULT_REPORT_TITLE = "Report title";
 const DEFAULT_REPORT_SUBTITLE = "Report short description";
@@ -60,6 +67,7 @@ const CLICK_BURST_MARKER_SCALE = 3;
 const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TEXT_SPOOL_BYTE_CAP = 256 * 1024 * 1024;
+const AUDIO_SPOOL_BYTE_CAP = 512 * 1024 * 1024;
 const SECTION_TEXT_MAX_BYTES = 2 * 1024 * 1024;
 const SECTION_TEXT_ALLOWED_EXTENSIONS = Object.freeze(["txt", "md", "json"]);
 const SECTION_TEXT_ALLOWED_MIME = Object.freeze({
@@ -73,8 +81,28 @@ const SECTION_NARRATION_RATE_MIN = 0.5;
 const SECTION_NARRATION_RATE_MAX = 2;
 const SECTION_NARRATION_DEFAULT_RATE = 1;
 const SECTION_NARRATION_CHUNK_TARGET = 900;
+const SECTION_NARRATION_PROVIDER_DEFAULT = "browser";
+const SECTION_NARRATION_PROVIDER_OPTIONS = Object.freeze(["browser", "openai"]);
+const SECTION_NARRATION_OPENAI_MODEL = "gpt-4o-mini-tts";
+const SECTION_NARRATION_OPENAI_MAX_CHARS = 12000;
+const SECTION_NARRATION_OPENAI_API_KEY_STORAGE = "__uiRecorderNarrationOpenAiApiKey";
+const SECTION_NARRATION_OPENAI_VOICES = Object.freeze([
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "fable",
+  "nova",
+  "onyx",
+  "sage",
+  "shimmer",
+  "verse"
+]);
 const FRAME_DATA_URL_CACHE_MAX = 24;
 const FRAME_DATA_URL_CACHE_MAX_BYTES = 24 * 1024 * 1024;
+const SECTION_AUDIO_CACHE_MAX = 12;
+const SECTION_AUDIO_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const FRAME_REF_RESOLVE_RETRIES_DEFAULT = 16;
 const FRAME_REF_RESOLVE_RETRY_MS_DEFAULT = 120;
 const FRAME_REF_RESOLVE_RETRY_MAX_MS = 1000;
@@ -96,6 +124,8 @@ const frameDataUrlCache = new Map();
 let frameDataUrlCacheBytes = 0;
 const sectionTextCache = new Map();
 let sectionTextCacheBytes = 0;
+const sectionAudioCache = new Map();
+let sectionAudioCacheBytes = 0;
 let frameSpoolGcTimer = null;
 let frameSpoolSyncTimer = null;
 let frameSpoolPendingReports = null;
@@ -456,6 +486,22 @@ function normalizeSectionNarrationRate(value) {
   ).toFixed(2));
 }
 
+function normalizeSectionNarrationVoiceUri(value) {
+  return String(value || "").trim();
+}
+
+function normalizeSectionNarrationProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  if (SECTION_NARRATION_PROVIDER_OPTIONS.includes(provider)) return provider;
+  return SECTION_NARRATION_PROVIDER_DEFAULT;
+}
+
+function normalizeSectionNarrationOpenAiVoice(value) {
+  const voice = String(value || "").trim().toLowerCase();
+  if (SECTION_NARRATION_OPENAI_VOICES.includes(voice)) return voice;
+  return SECTION_NARRATION_OPENAI_VOICES[0];
+}
+
 function cloneScreenshotRef(raw) {
   if (!raw || typeof raw !== "object") return null;
   const frameId = String(raw.frameId || "").trim();
@@ -489,6 +535,67 @@ function cloneSectionTextMeta(raw) {
   const preview = String(raw.preview || "").slice(0, 240);
   if (!fileName && !fileType && !preview) return null;
   return { fileName, fileType, preview };
+}
+
+function cloneSectionAudioRef(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const docId = String(raw.docId || "").trim();
+  if (!docId) return null;
+  return {
+    docId,
+    mime: String(raw.mime || "audio/mpeg"),
+    byteLength: Number(raw.byteLength) || 0,
+    createdAtMs: Number(raw.createdAtMs) || Date.now(),
+    provider: normalizeSectionNarrationProvider(raw.provider || "openai"),
+    voice: normalizeSectionNarrationOpenAiVoice(raw.voice),
+    model: String(raw.model || SECTION_NARRATION_OPENAI_MODEL),
+    textHash: String(raw.textHash || "").trim()
+  };
+}
+
+function cloneSectionAudioMeta(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const fileName = String(raw.fileName || "").trim();
+  const fileType = String(raw.fileType || "").trim().toLowerCase();
+  const durationMs = Number(raw.durationMs) || 0;
+  const provider = normalizeSectionNarrationProvider(raw.provider || "openai");
+  const voice = normalizeSectionNarrationOpenAiVoice(raw.voice);
+  const model = String(raw.model || SECTION_NARRATION_OPENAI_MODEL).trim();
+  const textHash = String(raw.textHash || "").trim();
+  if (!fileName && !fileType && !durationMs && !provider && !voice && !model && !textHash) return null;
+  return {
+    fileName,
+    fileType,
+    durationMs,
+    provider,
+    voice,
+    model,
+    textHash
+  };
+}
+
+function fnv1aHash(input) {
+  const text = String(input || "");
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `h${(hash >>> 0).toString(16)}`;
+}
+
+function buildNarrationSourceHash(text, voice, model) {
+  return fnv1aHash([String(text || ""), String(voice || ""), String(model || "")].join("\u241f"));
+}
+
+function detectAudioExtension(mime, fallback = "mp3") {
+  const safeMime = String(mime || "").toLowerCase();
+  if (safeMime.includes("mpeg") || safeMime.includes("mp3")) return "mp3";
+  if (safeMime.includes("wav")) return "wav";
+  if (safeMime.includes("ogg")) return "ogg";
+  if (safeMime.includes("aac")) return "aac";
+  if (safeMime.includes("m4a") || safeMime.includes("mp4")) return "m4a";
+  return String(fallback || "mp3").toLowerCase();
 }
 
 function collectScreenshotRefsFromEvents(events) {
@@ -528,6 +635,38 @@ function collectSectionTextMetaFromEvents(events) {
     }
     const burstRef = cloneSectionTextRef(ev.burstTextRef);
     const burstMeta = cloneSectionTextMeta(ev.burstTextMeta);
+    if (burstRef && burstMeta && !metaByDocId.has(burstRef.docId)) {
+      metaByDocId.set(burstRef.docId, burstMeta);
+    }
+  });
+  return metaByDocId;
+}
+
+function collectSectionAudioRefsFromEvents(events) {
+  const refs = new Map();
+  const source = Array.isArray(events) ? events : [];
+  source.forEach((ev) => {
+    if (!ev || typeof ev !== "object") return;
+    const stepRef = cloneSectionAudioRef(ev.sectionAudioRef);
+    if (stepRef && !refs.has(stepRef.docId)) refs.set(stepRef.docId, stepRef);
+    const burstRef = cloneSectionAudioRef(ev.burstAudioRef);
+    if (burstRef && !refs.has(burstRef.docId)) refs.set(burstRef.docId, burstRef);
+  });
+  return refs;
+}
+
+function collectSectionAudioMetaFromEvents(events) {
+  const metaByDocId = new Map();
+  const source = Array.isArray(events) ? events : [];
+  source.forEach((ev) => {
+    if (!ev || typeof ev !== "object") return;
+    const stepRef = cloneSectionAudioRef(ev.sectionAudioRef);
+    const stepMeta = cloneSectionAudioMeta(ev.sectionAudioMeta);
+    if (stepRef && stepMeta && !metaByDocId.has(stepRef.docId)) {
+      metaByDocId.set(stepRef.docId, stepMeta);
+    }
+    const burstRef = cloneSectionAudioRef(ev.burstAudioRef);
+    const burstMeta = cloneSectionAudioMeta(ev.burstAudioMeta);
     if (burstRef && burstMeta && !metaByDocId.has(burstRef.docId)) {
       metaByDocId.set(burstRef.docId, burstMeta);
     }
@@ -616,6 +755,45 @@ function clearSectionTextCache(docId) {
   sectionTextCache.delete(key);
 }
 
+function readSectionAudioCache(docId) {
+  const key = String(docId || "").trim();
+  if (!key || !sectionAudioCache.has(key)) return "";
+  const entry = sectionAudioCache.get(key);
+  sectionAudioCache.delete(key);
+  sectionAudioCache.set(key, entry);
+  return entry && typeof entry.dataUrl === "string" ? entry.dataUrl : "";
+}
+
+function writeSectionAudioCache(docId, dataUrl) {
+  const key = String(docId || "").trim();
+  if (!key) return;
+  const value = String(dataUrl || "").trim();
+  if (!value) return;
+  const byteLength = dataUrlToBytes(value)?.length || 0;
+  if (sectionAudioCache.has(key)) {
+    const existing = sectionAudioCache.get(key);
+    sectionAudioCacheBytes = Math.max(0, sectionAudioCacheBytes - Number(existing && existing.byteLength || 0));
+    sectionAudioCache.delete(key);
+  }
+  sectionAudioCache.set(key, { dataUrl: value, byteLength });
+  sectionAudioCacheBytes += byteLength;
+  while (sectionAudioCache.size > SECTION_AUDIO_CACHE_MAX || sectionAudioCacheBytes > SECTION_AUDIO_CACHE_MAX_BYTES) {
+    const oldestKey = sectionAudioCache.keys().next().value;
+    if (!oldestKey) break;
+    const oldest = sectionAudioCache.get(oldestKey);
+    sectionAudioCacheBytes = Math.max(0, sectionAudioCacheBytes - Number(oldest && oldest.byteLength || 0));
+    sectionAudioCache.delete(oldestKey);
+  }
+}
+
+function clearSectionAudioCache(docId) {
+  const key = String(docId || "").trim();
+  if (!key || !sectionAudioCache.has(key)) return;
+  const existing = sectionAudioCache.get(key);
+  sectionAudioCacheBytes = Math.max(0, sectionAudioCacheBytes - Number(existing && existing.byteLength || 0));
+  sectionAudioCache.delete(key);
+}
+
 function waitForMs(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, Number(ms) || 0));
@@ -655,6 +833,54 @@ async function persistSectionTextDocument(rawText, options = {}) {
   };
 }
 
+async function persistSectionAudioDocument(rawBytes, options = {}) {
+  if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.putAudioFromBytes !== "function") {
+    throw new Error("Audio embedding requires local IndexedDB support.");
+  }
+  const opts = isPlainObject(options) ? options : {};
+  const existingRef = cloneSectionAudioRef(opts.existingRef);
+  const existingMeta = cloneSectionAudioMeta(opts.existingMeta) || {};
+  const bytes = rawBytes instanceof Uint8Array ? rawBytes : new Uint8Array(rawBytes || []);
+  if (!bytes.length) throw new Error("Generated narration audio was empty.");
+  const mime = String(opts.mime || existingRef?.mime || "audio/mpeg").trim() || "audio/mpeg";
+  const fileType = detectAudioExtension(mime, String(opts.fileType || existingMeta.fileType || "mp3"));
+  const fileName = String(opts.fileName || existingMeta.fileName || `narration.${fileType}`).trim() || `narration.${fileType}`;
+  const provider = normalizeSectionNarrationProvider(opts.provider || existingRef?.provider || "openai");
+  const voice = normalizeSectionNarrationOpenAiVoice(opts.voice || existingRef?.voice || SECTION_NARRATION_OPENAI_VOICES[0]);
+  const model = String(opts.model || existingRef?.model || SECTION_NARRATION_OPENAI_MODEL).trim() || SECTION_NARRATION_OPENAI_MODEL;
+  const textHash = String(opts.textHash || existingRef?.textHash || existingMeta.textHash || "").trim();
+  const durationMs = Math.max(0, Number(opts.durationMs || existingMeta.durationMs) || 0);
+  const ref = await frameSpoolClient.putAudioFromBytes({
+    docId: existingRef && existingRef.docId ? existingRef.docId : undefined,
+    mime,
+    createdAtMs: existingRef && existingRef.createdAtMs ? existingRef.createdAtMs : Date.now()
+  }, bytes, {
+    fileName,
+    fileType,
+    preview: `voice=${voice};model=${model};provider=${provider};hash=${textHash}`
+  });
+  const dataUrl = bytesToDataUrl(bytes, mime);
+  if (dataUrl) writeSectionAudioCache(ref.docId, dataUrl);
+  return {
+    ref: cloneSectionAudioRef({
+      ...ref,
+      provider,
+      voice,
+      model,
+      textHash
+    }),
+    meta: cloneSectionAudioMeta({
+      fileName,
+      fileType,
+      durationMs,
+      provider,
+      voice,
+      model,
+      textHash
+    })
+  };
+}
+
 async function resolveTextFromRef(ref, options = {}) {
   const normalized = cloneSectionTextRef(ref);
   if (!normalized) return "";
@@ -681,6 +907,43 @@ async function resolveTextFromRef(ref, options = {}) {
         const text = decodeText(bytes);
         writeSectionTextCache(normalized.docId, text);
         return text;
+      }
+    } catch (_) {}
+    if (attempt < retries) {
+      await waitForMs(Math.min(1000, retryMs * (attempt + 1)));
+    }
+  }
+  return "";
+}
+
+async function resolveAudioDataUrlFromRef(ref, options = {}) {
+  const normalized = cloneSectionAudioRef(ref);
+  if (!normalized) return "";
+  const cached = readSectionAudioCache(normalized.docId);
+  if (cached) return cached;
+  if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.getAudioBytes !== "function") {
+    return "";
+  }
+  const opts = isPlainObject(options) ? options : {};
+  const retries = Math.max(0, Math.round(clampNumber(opts.retries, 0, 40, 8)));
+  const retryMs = Math.max(20, Math.round(clampNumber(opts.retryMs, 20, 2000, 120)));
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (typeof frameSpoolClient.hasAudioDoc === "function") {
+        let exists = await frameSpoolClient.hasAudioDoc(normalized.docId);
+        if (!exists && attempt < retries) {
+          await waitForMs(retryMs);
+          continue;
+        }
+        if (!exists) return "";
+      }
+      const bytes = await frameSpoolClient.getAudioBytes(normalized.docId);
+      if (bytes && bytes.length) {
+        const dataUrl = bytesToDataUrl(bytes, normalized.mime || "audio/mpeg");
+        if (dataUrl) {
+          writeSectionAudioCache(normalized.docId, dataUrl);
+          return dataUrl;
+        }
       }
     } catch (_) {}
     if (attempt < retries) {
@@ -758,21 +1021,28 @@ async function syncFrameSpoolReportRefs(reports) {
   const list = Array.isArray(reports) ? reports : [];
   const reportFrameMap = new Map();
   const reportTextMap = new Map();
+  const reportAudioMap = new Map();
   list.forEach((report) => {
     if (!report || typeof report !== "object") return;
     const reportId = String(report.id || "").trim();
     if (!reportId) return;
     const frameIds = Array.from(collectScreenshotRefsFromEvents(report.events).keys());
     const textIds = Array.from(collectSectionTextRefsFromEvents(report.events).keys());
+    const audioIds = Array.from(collectSectionAudioRefsFromEvents(report.events).keys());
     reportFrameMap.set(reportId, frameIds);
     reportTextMap.set(reportId, textIds);
+    reportAudioMap.set(reportId, audioIds);
   });
   const frameResult = await frameSpoolClient.syncReportRefs(reportFrameMap);
   let textResult = null;
   if (typeof frameSpoolClient.syncReportTextRefs === "function") {
     textResult = await frameSpoolClient.syncReportTextRefs(reportTextMap);
   }
-  return { frameResult, textResult };
+  let audioResult = null;
+  if (typeof frameSpoolClient.syncReportAudioRefs === "function") {
+    audioResult = await frameSpoolClient.syncReportAudioRefs(reportAudioMap);
+  }
+  return { frameResult, textResult, audioResult };
 }
 
 function scheduleFrameSpoolGc(delayMs = 1200) {
@@ -789,6 +1059,12 @@ function scheduleFrameSpoolGc(delayMs = 1200) {
       if (typeof frameSpoolClient.gcText === "function") {
         await frameSpoolClient.gcText({
           maxBytes: TEXT_SPOOL_BYTE_CAP,
+          orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS
+        });
+      }
+      if (typeof frameSpoolClient.gcAudio === "function") {
+        await frameSpoolClient.gcAudio({
+          maxBytes: AUDIO_SPOOL_BYTE_CAP,
           orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS
         });
       }
@@ -1123,6 +1399,18 @@ function normalizeImportedReport(rawReport) {
     const burstTextMeta = cloneSectionTextMeta(ev.burstTextMeta);
     if (burstTextMeta) ev.burstTextMeta = burstTextMeta;
     else delete ev.burstTextMeta;
+    const sectionAudioRef = cloneSectionAudioRef(ev.sectionAudioRef);
+    if (sectionAudioRef) ev.sectionAudioRef = sectionAudioRef;
+    else delete ev.sectionAudioRef;
+    const sectionAudioMeta = cloneSectionAudioMeta(ev.sectionAudioMeta);
+    if (sectionAudioMeta) ev.sectionAudioMeta = sectionAudioMeta;
+    else delete ev.sectionAudioMeta;
+    const burstAudioRef = cloneSectionAudioRef(ev.burstAudioRef);
+    if (burstAudioRef) ev.burstAudioRef = burstAudioRef;
+    else delete ev.burstAudioRef;
+    const burstAudioMeta = cloneSectionAudioMeta(ev.burstAudioMeta);
+    if (burstAudioMeta) ev.burstAudioMeta = burstAudioMeta;
+    else delete ev.burstAudioMeta;
   });
   return imported;
 }
@@ -1174,6 +1462,29 @@ function normalizeTextManifestEntries(rawEntries) {
       fileName: String(entry.fileName || "").trim(),
       fileType: String(entry.fileType || "").trim().toLowerCase(),
       preview: String(entry.preview || "").slice(0, 240)
+    };
+  }).filter(Boolean);
+}
+
+function normalizeAudioManifestEntries(rawEntries) {
+  if (!Array.isArray(rawEntries)) return [];
+  return rawEntries.map((entry) => {
+    if (!entry || typeof entry !== "object") return null;
+    const docId = String(entry.docId || "").trim();
+    if (!docId) return null;
+    return {
+      docId,
+      file: String(entry.file || "").trim(),
+      mime: String(entry.mime || "audio/mpeg"),
+      createdAtMs: Number(entry.createdAtMs) || Date.now(),
+      byteLength: Number(entry.byteLength) || 0,
+      fileName: String(entry.fileName || "").trim(),
+      fileType: String(entry.fileType || "").trim().toLowerCase(),
+      provider: normalizeSectionNarrationProvider(entry.provider || "openai"),
+      voice: normalizeSectionNarrationOpenAiVoice(entry.voice),
+      model: String(entry.model || SECTION_NARRATION_OPENAI_MODEL).trim() || SECTION_NARRATION_OPENAI_MODEL,
+      durationMs: Number(entry.durationMs) || 0,
+      textHash: String(entry.textHash || "").trim()
     };
   }).filter(Boolean);
 }
@@ -1246,6 +1557,35 @@ async function restoreTextsFromBundle(archive, textEntries, importedReport) {
         preview: entry.preview || buildTextPreview(text)
       });
       writeSectionTextCache(ref.docId, text);
+      restoredCount += 1;
+    } catch (_) {}
+  }
+  return { restoredCount };
+}
+
+async function restoreAudiosFromBundle(archive, audioEntries, importedReport) {
+  const entries = normalizeAudioManifestEntries(audioEntries);
+  if (!entries.length) return { restoredCount: 0 };
+  if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.putAudioFromBytes !== "function") {
+    throw new Error("Audio bundle detected, but local audio spool is unavailable.");
+  }
+  let restoredCount = 0;
+  for (const entry of entries) {
+    const filePath = entry.file || `audio/${entry.docId}.${entry.fileType || detectAudioExtension(entry.mime, "mp3") || "mp3"}`;
+    const bytes = archive.get(filePath);
+    if (!bytes || !bytes.length) continue;
+    try {
+      const ref = await frameSpoolClient.putAudioFromBytes({
+        docId: entry.docId,
+        mime: entry.mime,
+        createdAtMs: entry.createdAtMs
+      }, bytes, {
+        fileName: entry.fileName || `${entry.docId}.${entry.fileType || "mp3"}`,
+        fileType: entry.fileType || detectAudioExtension(entry.mime, "mp3"),
+        preview: `voice=${entry.voice};model=${entry.model};provider=${entry.provider};hash=${entry.textHash}`
+      });
+      const dataUrl = bytesToDataUrl(bytes, entry.mime || "audio/mpeg");
+      if (dataUrl) writeSectionAudioCache(ref.docId, dataUrl);
       restoredCount += 1;
     } catch (_) {}
   }
@@ -1696,6 +2036,8 @@ function deriveClickBursts(events, rawSettings) {
         customTitle: activeBurst.customTitle || "",
         burstTextRef: cloneSectionTextRef(activeBurst.burstTextRef),
         burstTextMeta: cloneSectionTextMeta(activeBurst.burstTextMeta),
+        burstAudioRef: cloneSectionAudioRef(activeBurst.burstAudioRef),
+        burstAudioMeta: cloneSectionAudioMeta(activeBurst.burstAudioMeta),
         pageKey: activeBurst.context.pageKey,
         url: activeBurst.url || (first && first.event ? first.event.url : ""),
         startMs,
@@ -1743,6 +2085,8 @@ function deriveClickBursts(events, rawSettings) {
 
   const candidateBurstTextRef = (ev) => cloneSectionTextRef(ev && ev.burstTextRef);
   const candidateBurstTextMeta = (ev) => cloneSectionTextMeta(ev && ev.burstTextMeta);
+  const candidateBurstAudioRef = (ev) => cloneSectionAudioRef(ev && ev.burstAudioRef);
+  const candidateBurstAudioMeta = (ev) => cloneSectionAudioMeta(ev && ev.burstAudioMeta);
 
   const startHotkeyBurst = (candidate) => {
     activeBurst = {
@@ -1760,6 +2104,8 @@ function deriveClickBursts(events, rawSettings) {
       customTitle: candidate.customTitle || "",
       burstTextRef: cloneSectionTextRef(candidate.burstTextRef),
       burstTextMeta: cloneSectionTextMeta(candidate.burstTextMeta),
+      burstAudioRef: cloneSectionAudioRef(candidate.burstAudioRef),
+      burstAudioMeta: cloneSectionAudioMeta(candidate.burstAudioMeta),
       pageShiftCount: 0,
       tabShiftCount: 0
     };
@@ -1795,7 +2141,9 @@ function deriveClickBursts(events, rawSettings) {
       customTitle: candidateCustomTitle(ev)
       ,
       burstTextRef: candidateBurstTextRef(ev),
-      burstTextMeta: candidateBurstTextMeta(ev)
+      burstTextMeta: candidateBurstTextMeta(ev),
+      burstAudioRef: candidateBurstAudioRef(ev),
+      burstAudioMeta: candidateBurstAudioMeta(ev)
     };
 
     if (activeBurst) {
@@ -1828,6 +2176,12 @@ function deriveClickBursts(events, rawSettings) {
           activeBurst.burstTextMeta = cloneSectionTextMeta(candidate.burstTextMeta);
         } else if (!activeBurst.burstTextMeta && candidate.burstTextMeta) {
           activeBurst.burstTextMeta = cloneSectionTextMeta(candidate.burstTextMeta);
+        }
+        if (candidate.burstAudioRef) {
+          activeBurst.burstAudioRef = cloneSectionAudioRef(candidate.burstAudioRef);
+          activeBurst.burstAudioMeta = cloneSectionAudioMeta(candidate.burstAudioMeta);
+        } else if (!activeBurst.burstAudioMeta && candidate.burstAudioMeta) {
+          activeBurst.burstAudioMeta = cloneSectionAudioMeta(candidate.burstAudioMeta);
         }
         activeBurst.lastMs = candidate.tsMs;
         activeBurst.lastContext = candidate.context;
@@ -3385,6 +3739,7 @@ function buildExportHtml(report, options = {}) {
   const opts = isPlainObject(options) ? options : {};
   const frameDataUrls = isPlainObject(opts.frameDataUrls) ? opts.frameDataUrls : {};
   const sectionTextByDocId = isPlainObject(opts.sectionTextByDocId) ? opts.sectionTextByDocId : {};
+  const sectionAudioByDocId = isPlainObject(opts.sectionAudioByDocId) ? opts.sectionAudioByDocId : {};
   const resolveScreenshotForEvent = (ev) => {
     const inline = safeDataImageUrl(ev && ev.screenshot || "");
     if (inline) return inline;
@@ -3404,6 +3759,20 @@ function buildExportHtml(report, options = {}) {
       ref,
       loaded: true,
       text: String(sectionTextByDocId[docId] || "")
+    };
+  };
+  const resolveSectionAudioForRef = (rawRef) => {
+    const ref = cloneSectionAudioRef(rawRef);
+    if (!ref) return { ref: null, loaded: false, dataUrl: "" };
+    const docId = String(ref.docId || "").trim();
+    if (!docId) return { ref: null, loaded: false, dataUrl: "" };
+    if (!Object.prototype.hasOwnProperty.call(sectionAudioByDocId, docId)) {
+      return { ref, loaded: false, dataUrl: "" };
+    }
+    return {
+      ref,
+      loaded: true,
+      dataUrl: String(sectionAudioByDocId[docId] || "")
     };
   };
   const isQuickPreview = !!opts.quickPreview;
@@ -3447,10 +3816,14 @@ function buildExportHtml(report, options = {}) {
     return hostFromUrl(ev && ev.url);
   };
 
-  const buildExportSectionTextPanel = (panelId, label, state, metaRaw) => {
+  const buildExportSectionTextPanel = (panelId, label, state, metaRaw, audioStateRaw, audioMetaRaw) => {
     const safeState = state && typeof state === "object" ? state : { ref: null, loaded: false, text: "" };
     const ref = cloneSectionTextRef(safeState.ref);
     const meta = cloneSectionTextMeta(metaRaw);
+    const audioState = audioStateRaw && typeof audioStateRaw === "object" ? audioStateRaw : { ref: null, loaded: false, dataUrl: "" };
+    const audioRef = cloneSectionAudioRef(audioState.ref);
+    const audioMeta = cloneSectionAudioMeta(audioMetaRaw);
+    const audioDataUrl = safeDataAudioUrl(audioState.dataUrl || "");
     const hasPayload = !!(safeState.text && String(safeState.text).length);
     if (!ref && !hasPayload) return "";
     const safeId = escapeHtml(String(panelId || ""));
@@ -3462,6 +3835,13 @@ function buildExportHtml(report, options = {}) {
     const captionBody = hasPayload
       ? `<pre>${escapeHtml(String(safeState.text || ""))}</pre>`
       : `<div class="section-text-caption-empty">Embedded text reference is unavailable in this export context.</div>`;
+    const escapedAudioSrc = escapeHtml(String(audioDataUrl || ""));
+    const audioStatusText = audioDataUrl
+      ? "Ready."
+      : "No embedded narration audio available for this section.";
+    const audioSummary = audioRef
+      ? `${formatByteCount(audioRef.byteLength || 0)}${audioMeta && audioMeta.voice ? ` • ${audioMeta.voice}` : ""}`
+      : "";
     const audioPanel = `<div class="section-text-audio" data-audio-role="caption-audio">
   <div class="section-text-audio-controls">
     <button type="button" class="section-text-audio-btn" data-audio-action="toggle">Play</button>
@@ -3475,7 +3855,9 @@ function buildExportHtml(report, options = {}) {
       <span class="section-text-audio-value" data-audio-role="tempo-value">${narrationRate.toFixed(2)}x</span>
     </label>
   </div>
-  <div class="section-text-audio-status" data-audio-role="status">${hasPayload ? "Ready." : "No text available."}</div>
+  ${audioSummary ? `<div class="section-text-audio-meta">${escapeHtml(audioSummary)}</div>` : ""}
+  <div class="section-text-audio-status" data-audio-role="status">${escapeHtml(audioStatusText)}</div>
+  <audio data-audio-role="source" preload="metadata" src="${escapedAudioSrc}"></audio>
 </div>`;
     return `<details class="section-text-caption" id="${safeId}">
   <summary>${escapeHtml(String(label || "Section text"))} <span class="section-text-caption-meta">${escapeHtml(summaryMeta)}</span></summary>
@@ -3539,11 +3921,14 @@ function buildExportHtml(report, options = {}) {
     const burst = burstData[burstIndex];
     const burstId = burstDomId(derivedBursts[burstIndex], burstIndex);
     const burstRefState = resolveSectionTextForRef(derivedBursts[burstIndex] && derivedBursts[burstIndex].burstTextRef);
+    const burstAudioState = resolveSectionAudioForRef(derivedBursts[burstIndex] && derivedBursts[burstIndex].burstAudioRef);
     const burstTextPanel = buildExportSectionTextPanel(
       `${burstId}-text`,
       "Interaction text",
       burstRefState,
-      derivedBursts[burstIndex] && derivedBursts[burstIndex].burstTextMeta
+      derivedBursts[burstIndex] && derivedBursts[burstIndex].burstTextMeta,
+      burstAudioState,
+      derivedBursts[burstIndex] && derivedBursts[burstIndex].burstAudioMeta
     );
     sectionNumber += 1;
     const burstTitle = escapeHtml(String((burst && burst.title) || `Interaction ${sectionNumber}`));
@@ -3573,11 +3958,14 @@ function buildExportHtml(report, options = {}) {
       : `<span class="meta-chip meta-url" title="${metaUrlTitle}">${metaUrlLabel}</span>`;
     const meta = `<div class="step-meta"><span class="meta-chip meta-time">${metaTs || "Time n/a"}</span>${urlChip}</div>`;
     const stepTextState = resolveSectionTextForRef(ev && ev.sectionTextRef);
+    const stepAudioState = resolveSectionAudioForRef(ev && ev.sectionAudioRef);
     const stepTextPanel = buildExportSectionTextPanel(
       `${stepId}-text`,
       "Section text",
       stepTextState,
-      ev && ev.sectionTextMeta
+      ev && ev.sectionTextMeta,
+      stepAudioState,
+      ev && ev.sectionAudioMeta
     );
     sectionNumber += 1;
     rowParts.push(`<div id="${stepId}" class="step"><div class="step-title">${sectionNumber}. ${stepTitle}</div>${meta}${wrap}${stepTextPanel}</div>`);
@@ -3908,6 +4296,16 @@ body{
 }
 .section-text-audio-slider{
   width:108px;
+}
+.section-text-audio-select{
+  min-width:170px;
+  max-width:220px;
+  border:1px solid var(--edge);
+  border-radius:8px;
+  background:var(--paper);
+  color:var(--ink);
+  font-size:10px;
+  padding:2px 6px;
 }
 .section-text-audio-value{
   min-width:36px;
@@ -4258,15 +4656,13 @@ ${rows}
   });
 })();
 (function () {
-  var synth = (typeof window !== "undefined" && window.speechSynthesis && typeof window.SpeechSynthesisUtterance === "function")
-    ? window.speechSynthesis
-    : null;
   var captions = Array.prototype.slice.call(document.querySelectorAll(".section-text-caption"));
   if (!captions.length) return;
-  var activeNarrator = null;
   var minRate = ${SECTION_NARRATION_RATE_MIN};
   var maxRate = ${SECTION_NARRATION_RATE_MAX};
-  var chunkTarget = ${SECTION_NARRATION_CHUNK_TARGET};
+  var defaultRate = ${SECTION_NARRATION_DEFAULT_RATE};
+  var activeController = null;
+  var controllers = [];
 
   function clamp(n, min, max, fallback) {
     var num = Number(n);
@@ -4275,192 +4671,113 @@ ${rows}
   }
 
   function normalizeRate(value) {
-    return Number(clamp(value, minRate, maxRate, ${SECTION_NARRATION_DEFAULT_RATE}).toFixed(2));
+    return Number(clamp(value, minRate, maxRate, defaultRate).toFixed(2));
   }
 
-  function splitSegments(rawText) {
-    var text = String(rawText || "");
-    var out = [];
-    var cursor = 0;
-    while (cursor < text.length) {
-      var remaining = text.length - cursor;
-      var chunkLen = Math.min(chunkTarget, remaining);
-      var end = cursor + chunkLen;
-      if (end < text.length) {
-        var lookahead = text.slice(cursor, Math.min(text.length, end + 180));
-        var candidates = ["\\n\\n", ". ", "? ", "! ", "\\n", "; ", ", ", " "];
-        var selected = -1;
-        candidates.forEach(function (token) {
-          var pos = lookahead.lastIndexOf(token);
-          if (pos > selected) selected = pos;
-        });
-        if (selected >= Math.floor(chunkLen * 0.45)) {
-          end = cursor + selected + 1;
-        }
-      }
-      if (end <= cursor) end = Math.min(text.length, cursor + chunkLen);
-      var content = text.slice(cursor, end);
-      if (/\\S/.test(content)) out.push({ start: cursor, end: end, text: content });
-      cursor = end;
-    }
-    if (!out.length && /\\S/.test(text)) out.push({ start: 0, end: text.length, text: text });
-    return out;
-  }
-
-  function createNarrator(text, initialRate, onUpdate) {
-    var supported = !!synth;
-    var sourceText = String(text || "");
-    var segments = splitSegments(sourceText);
-    var totalChars = sourceText.length;
-    var offset = 0;
-    var generation = 0;
+  function createAudioController(audioEl, initialRate, onUpdate) {
+    var state = "idle";
     var rate = normalizeRate(initialRate);
-    var state = supported ? "idle" : "unsupported";
+    var hasAudio = !!(audioEl && String(audioEl.getAttribute("src") || "").trim());
+    if (audioEl) audioEl.playbackRate = rate;
+
+    function percent() {
+      if (!audioEl || !Number.isFinite(audioEl.duration) || audioEl.duration <= 0) return 0;
+      return Math.max(0, Math.min(100, Math.round((audioEl.currentTime / audioEl.duration) * 100)));
+    }
 
     function emit(extra) {
       var payload = extra && typeof extra === "object" ? extra : {};
-      var percent = totalChars ? Math.max(0, Math.min(100, Math.round((offset / totalChars) * 100))) : 0;
       onUpdate({
-        supported: supported,
         state: state,
-        hasText: !!totalChars,
-        totalChars: totalChars,
-        offset: offset,
-        percent: percent,
         rate: rate,
-        error: "",
-        reason: "",
-        raw: payload
+        hasAudio: hasAudio,
+        percent: percent(),
+        error: payload.error || ""
       });
     }
 
-    function findSegmentIndex(nextOffset) {
-      if (!segments.length) return -1;
-      var safeOffset = Math.max(0, Math.min(totalChars, Math.round(Number(nextOffset) || 0)));
-      for (var i = 0; i < segments.length; i++) {
-        if (safeOffset < segments[i].end) return i;
-      }
-      return segments.length - 1;
+    function play() {
+      return (async function () {
+        if (!audioEl || !hasAudio) {
+          state = "idle";
+          emit({ error: "No embedded narration audio available for this section." });
+          return false;
+        }
+        audioEl.playbackRate = rate;
+        state = "playing";
+        emit();
+        try {
+          await audioEl.play();
+        } catch (err) {
+          state = "error";
+          emit({ error: String((err && err.message) || "Audio playback failed.") });
+          return false;
+        }
+        return true;
+      })();
     }
 
-    function stop(nextState) {
-      if (!supported) {
-        state = "unsupported";
-        emit();
-        return;
-      }
-      generation += 1;
-      try { synth.cancel(); } catch (_) {}
-      state = nextState || "idle";
+    function pause() {
+      if (!audioEl || state !== "playing") return;
+      try { audioEl.pause(); } catch (_) {}
+      state = "paused";
       emit();
     }
 
-    function speakFrom(index, token) {
-      if (!supported || token !== generation) return;
-      if (index < 0 || index >= segments.length) {
+    function restart() {
+      if (!audioEl || !hasAudio) return;
+      audioEl.currentTime = 0;
+      void play();
+    }
+
+    function seek(percentValue) {
+      if (!audioEl || !hasAudio) return;
+      var ratio = clamp(percentValue, 0, 100, 0) / 100;
+      if (Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
+        audioEl.currentTime = Math.max(0, Math.min(audioEl.duration, audioEl.duration * ratio));
+      }
+      emit();
+    }
+
+    function setRate(nextRate) {
+      rate = normalizeRate(nextRate);
+      if (audioEl) audioEl.playbackRate = rate;
+      emit();
+    }
+
+    function stop() {
+      if (audioEl) {
+        try { audioEl.pause(); } catch (_) {}
+      }
+      state = "idle";
+      emit();
+    }
+
+    if (audioEl) {
+      audioEl.addEventListener("timeupdate", function () { emit(); });
+      audioEl.addEventListener("ended", function () {
         state = "ended";
-        offset = totalChars;
         emit();
-        return;
-      }
-      var segment = segments[index];
-      var utterance = new SpeechSynthesisUtterance(segment.text);
-      utterance.rate = rate;
-      utterance.onboundary = function (event) {
-        if (token !== generation) return;
-        var charIndex = Number(event && event.charIndex);
-        if (Number.isFinite(charIndex)) {
-          offset = Math.max(segment.start, Math.min(segment.end, segment.start + charIndex));
-          emit();
-        }
-      };
-      utterance.onend = function () {
-        if (token !== generation) return;
-        offset = segment.end;
-        emit();
-        speakFrom(index + 1, token);
-      };
-      utterance.onerror = function (event) {
-        if (token !== generation) return;
+      });
+      audioEl.addEventListener("error", function () {
         state = "error";
-        emit({ error: String((event && event.error) || "Speech playback failed.") });
-      };
-      try {
-        synth.speak(utterance);
-      } catch (_) {
-        state = "error";
-        emit({ error: "Speech playback failed." });
-      }
+        emit({ error: "Embedded narration audio failed to play." });
+      });
     }
 
-    function startFrom(nextOffset) {
-      if (!supported || !segments.length) {
-        state = supported ? "idle" : "unsupported";
-        emit();
-        return;
-      }
-      offset = Math.max(0, Math.min(totalChars, Math.round(Number(nextOffset) || 0)));
-      var index = findSegmentIndex(offset);
-      generation += 1;
-      var token = generation;
-      try { synth.cancel(); } catch (_) {}
-      state = "playing";
-      emit();
-      speakFrom(index, token);
-    }
-
+    emit();
     return {
-      play: function () {
-        if (!supported || !segments.length) {
-          state = supported ? "idle" : "unsupported";
-          emit();
-          return;
-        }
-        if (state === "paused" && synth.paused) {
-          state = "playing";
-          try { synth.resume(); } catch (_) {}
-          emit();
-          return;
-        }
-        startFrom(offset);
-      },
-      pause: function () {
-        if (!supported || state !== "playing") return;
-        state = "paused";
-        try { synth.pause(); } catch (_) {}
-        emit();
-      },
-      restart: function () {
-        if (!supported || !segments.length) return;
-        offset = 0;
-        startFrom(0);
-      },
-      seek: function (percent) {
-        if (!segments.length) {
-          emit();
-          return;
-        }
-        var ratio = clamp(percent, 0, 100, 0) / 100;
-        offset = Math.max(0, Math.min(totalChars, Math.round(totalChars * ratio)));
-        if (state === "playing") startFrom(offset);
-        else emit();
-      },
-      setRate: function (nextRate) {
-        rate = normalizeRate(nextRate);
-        if (state === "playing") startFrom(offset);
-        else emit();
-      },
-      stop: function (nextState) {
-        stop(nextState || "idle");
-      },
-      getState: function () {
-        return state;
-      }
+      play: play,
+      pause: pause,
+      restart: restart,
+      seek: seek,
+      setRate: setRate,
+      stop: stop,
+      getState: function () { return state; }
     };
   }
 
   captions.forEach(function (caption) {
-    var pre = caption.querySelector(".section-text-caption-pre, .section-text-caption-body pre");
     var controls = caption.querySelector("[data-audio-role='caption-audio']");
     if (!controls) return;
     var toggle = controls.querySelector("[data-audio-action='toggle']");
@@ -4470,49 +4787,49 @@ ${rows}
     var timelineValue = controls.querySelector("[data-audio-role='timeline-value']");
     var tempoValue = controls.querySelector("[data-audio-role='tempo-value']");
     var status = controls.querySelector("[data-audio-role='status']");
+    var sourceAudio = controls.querySelector("[data-audio-role='source']");
     var scrubDragging = false;
-    var text = pre ? String(pre.textContent || "") : "";
-    var narrator = createNarrator(text, tempo ? tempo.value : ${SECTION_NARRATION_DEFAULT_RATE}, function (snapshot) {
-      var supported = !!snapshot.supported;
-      var hasText = !!snapshot.hasText;
-      var playing = snapshot.state === "playing";
-      if (toggle) {
-        toggle.textContent = playing ? "Pause" : "Play";
-        toggle.disabled = !supported || !hasText;
+
+    var controller = createAudioController(
+      sourceAudio,
+      tempo ? tempo.value : defaultRate,
+      function (snapshot) {
+        var playing = snapshot.state === "playing";
+        var hasAudio = !!snapshot.hasAudio;
+        if (toggle) {
+          toggle.textContent = playing ? "Pause" : "Play";
+          toggle.disabled = !hasAudio;
+        }
+        if (restart) restart.disabled = !hasAudio;
+        if (timeline) timeline.disabled = !hasAudio;
+        if (tempo) tempo.disabled = !hasAudio;
+        if (!scrubDragging && timeline) timeline.value = String(Math.round(snapshot.percent || 0));
+        if (timelineValue) timelineValue.textContent = Math.round(snapshot.percent || 0) + "%";
+        if (tempoValue) tempoValue.textContent = normalizeRate(snapshot.rate).toFixed(2) + "x";
+        if (!status) return;
+        if (!hasAudio) status.textContent = "No embedded narration audio available for this section.";
+        else if (snapshot.error) status.textContent = String(snapshot.error);
+        else if (snapshot.state === "playing") status.textContent = "Playing narration…";
+        else if (snapshot.state === "paused") status.textContent = "Paused.";
+        else if (snapshot.state === "ended") status.textContent = "Playback complete.";
+        else status.textContent = "Ready.";
       }
-      if (restart) restart.disabled = !supported || !hasText;
-      if (timeline) timeline.disabled = !supported || !hasText;
-      if (tempo) tempo.disabled = !supported;
-      if (!scrubDragging && timeline) timeline.value = String(Math.round(snapshot.percent || 0));
-      if (timelineValue) timelineValue.textContent = Math.round(snapshot.percent || 0) + "%";
-      if (tempoValue) tempoValue.textContent = normalizeRate(snapshot.rate).toFixed(2) + "x";
-      if (!status) return;
-      if (!supported) status.textContent = "Read-aloud is unavailable in this browser context.";
-      else if (!hasText) status.textContent = "No text available.";
-      else if (snapshot.state === "playing") status.textContent = "Reading section text…";
-      else if (snapshot.state === "paused") status.textContent = "Paused.";
-      else if (snapshot.state === "ended") status.textContent = "Playback complete.";
-      else if (snapshot.state === "error") status.textContent = "Speech playback failed.";
-      else status.textContent = "Ready.";
-    });
+    );
+    controllers.push(controller);
 
     if (toggle) {
       toggle.addEventListener("click", function () {
-        if (activeNarrator && activeNarrator !== narrator) {
-          activeNarrator.stop("idle");
-        }
-        activeNarrator = narrator;
-        if (narrator.getState && narrator.getState() === "playing") narrator.pause();
-        else narrator.play();
+        if (activeController && activeController !== controller) activeController.stop();
+        activeController = controller;
+        if (controller.getState() === "playing") controller.pause();
+        else controller.play();
       });
     }
     if (restart) {
       restart.addEventListener("click", function () {
-        if (activeNarrator && activeNarrator !== narrator) {
-          activeNarrator.stop("idle");
-        }
-        activeNarrator = narrator;
-        narrator.restart();
+        if (activeController && activeController !== controller) activeController.stop();
+        activeController = controller;
+        controller.restart();
       });
     }
     if (timeline) {
@@ -4522,25 +4839,25 @@ ${rows}
       });
       timeline.addEventListener("change", function () {
         scrubDragging = false;
-        narrator.seek(timeline.value);
+        controller.seek(timeline.value);
       });
     }
     if (tempo) {
-      tempo.addEventListener("input", function () {
-        narrator.setRate(tempo.value);
-      });
-      tempo.addEventListener("change", function () {
-        narrator.setRate(tempo.value);
-      });
+      tempo.addEventListener("input", function () { controller.setRate(tempo.value); });
+      tempo.addEventListener("change", function () { controller.setRate(tempo.value); });
     }
     caption.addEventListener("toggle", function () {
-      if (!caption.open) narrator.pause();
+      if (!caption.open) controller.pause();
     });
   });
 
   window.addEventListener("beforeunload", function () {
-    if (activeNarrator && typeof activeNarrator.stop === "function") {
-      activeNarrator.stop("idle");
+    controllers.forEach(function (controller) {
+      if (!controller || typeof controller.stop !== "function") return;
+      controller.stop();
+    });
+    if (activeController && typeof activeController.stop === "function") {
+      activeController.stop();
     }
   });
 })();
@@ -4552,6 +4869,7 @@ async function buildExportHtmlAsync(report, options = {}) {
   const opts = isPlainObject(options) ? { ...options } : {};
   const frameDataUrls = isPlainObject(opts.frameDataUrls) ? { ...opts.frameDataUrls } : {};
   const sectionTextByDocId = isPlainObject(opts.sectionTextByDocId) ? { ...opts.sectionTextByDocId } : {};
+  const sectionAudioByDocId = isPlainObject(opts.sectionAudioByDocId) ? { ...opts.sectionAudioByDocId } : {};
   const refs = collectScreenshotRefsFromEvents(report && report.events);
   if (refs.size) {
     for (const [frameId, ref] of refs.entries()) {
@@ -4574,7 +4892,16 @@ async function buildExportHtmlAsync(report, options = {}) {
       sectionTextByDocId[docId] = text;
     }
   }
-  return buildExportHtml(report, { ...opts, frameDataUrls, sectionTextByDocId });
+  const audioRefs = collectSectionAudioRefsFromEvents(report && report.events);
+  if (audioRefs.size) {
+    for (const [docId, ref] of audioRefs.entries()) {
+      if (Object.prototype.hasOwnProperty.call(sectionAudioByDocId, docId)) continue;
+      const dataUrl = await resolveAudioDataUrlFromRef(ref, { retries: 8, retryMs: 120 });
+      if (!dataUrl) continue;
+      sectionAudioByDocId[docId] = dataUrl;
+    }
+  }
+  return buildExportHtml(report, { ...opts, frameDataUrls, sectionTextByDocId, sectionAudioByDocId });
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -4769,6 +5096,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   let activeBurstPlayers = [];
   let activeNarrationControllers = [];
   let activeNarrationController = null;
+  const sectionNarrationSynth = (
+    typeof window !== "undefined" &&
+    window.speechSynthesis &&
+    typeof window.SpeechSynthesisUtterance === "function"
+  ) ? window.speechSynthesis : null;
+  let sectionNarrationVoices = [];
+  let sectionNarrationVoicesSignature = "";
+  const sectionNarrationVoiceSubscribers = new Set();
+  let sectionNarrationVoicesChangedHandler = null;
   let previewRefreshTimer = null;
   let inlinePreviewHtmlCache = "";
 
@@ -4826,6 +5162,88 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  function serializeNarrationVoice(voiceRaw) {
+    if (!voiceRaw || typeof voiceRaw !== "object") return null;
+    const uri = normalizeSectionNarrationVoiceUri(voiceRaw.voiceURI || voiceRaw.uri || voiceRaw.name);
+    if (!uri) return null;
+    const name = String(voiceRaw.name || uri).trim() || uri;
+    const lang = String(voiceRaw.lang || "").trim();
+    return {
+      uri,
+      name,
+      lang,
+      default: !!voiceRaw.default,
+      localService: !!voiceRaw.localService
+    };
+  }
+
+  function collectSectionNarrationVoices() {
+    if (!sectionNarrationSynth) return [];
+    const raw = Array.isArray(sectionNarrationSynth.getVoices())
+      ? sectionNarrationSynth.getVoices()
+      : [];
+    const dedupe = new Map();
+    raw.forEach((voiceRaw) => {
+      const voice = serializeNarrationVoice(voiceRaw);
+      if (!voice) return;
+      if (!dedupe.has(voice.uri)) dedupe.set(voice.uri, voice);
+    });
+    return Array.from(dedupe.values()).sort((a, b) => {
+      if (a.default && !b.default) return -1;
+      if (!a.default && b.default) return 1;
+      if (a.localService && !b.localService) return -1;
+      if (!a.localService && b.localService) return 1;
+      const langCmp = String(a.lang || "").localeCompare(String(b.lang || ""));
+      if (langCmp !== 0) return langCmp;
+      return a.name.localeCompare(b.name);
+    });
+  }
+
+  function getSectionNarrationVoices() {
+    return Array.isArray(sectionNarrationVoices)
+      ? sectionNarrationVoices.map((voice) => ({ ...voice }))
+      : [];
+  }
+
+  function notifySectionNarrationVoiceSubscribers() {
+    const payload = getSectionNarrationVoices();
+    sectionNarrationVoiceSubscribers.forEach((subscriber) => {
+      if (typeof subscriber !== "function") return;
+      try { subscriber(payload); } catch (_) {}
+    });
+  }
+
+  function refreshSectionNarrationVoices(force = false) {
+    const next = collectSectionNarrationVoices();
+    const signature = next.map((voice) => `${voice.uri}|${voice.name}|${voice.lang}|${voice.default ? 1 : 0}`).join("||");
+    if (!force && signature === sectionNarrationVoicesSignature) return next;
+    sectionNarrationVoices = next;
+    sectionNarrationVoicesSignature = signature;
+    notifySectionNarrationVoiceSubscribers();
+    return next;
+  }
+
+  function subscribeSectionNarrationVoices(subscriber) {
+    if (typeof subscriber !== "function") return () => {};
+    sectionNarrationVoiceSubscribers.add(subscriber);
+    try { subscriber(getSectionNarrationVoices()); } catch (_) {}
+    return () => {
+      sectionNarrationVoiceSubscribers.delete(subscriber);
+    };
+  }
+
+  if (sectionNarrationSynth) {
+    refreshSectionNarrationVoices(true);
+    sectionNarrationVoicesChangedHandler = () => {
+      refreshSectionNarrationVoices();
+    };
+    if (typeof sectionNarrationSynth.addEventListener === "function") {
+      sectionNarrationSynth.addEventListener("voiceschanged", sectionNarrationVoicesChangedHandler);
+    } else {
+      sectionNarrationSynth.onvoiceschanged = sectionNarrationVoicesChangedHandler;
+    }
+  }
+
   function getSectionNarrationRateSetting() {
     if (!hasReport) return SECTION_NARRATION_DEFAULT_RATE;
     if (!isPlainObject(report.settings)) report.settings = {};
@@ -4840,6 +5258,77 @@ document.addEventListener("DOMContentLoaded", async () => {
     report.settings.sectionNarrationRate = nextRate;
     await saveReports(reports);
     return nextRate;
+  }
+
+  function getSectionNarrationVoiceUriSetting() {
+    if (!hasReport) return "";
+    if (!isPlainObject(report.settings)) report.settings = {};
+    return normalizeSectionNarrationVoiceUri(report.settings.sectionNarrationVoiceUri);
+  }
+
+  async function persistSectionNarrationVoiceUriSetting(value) {
+    if (!hasReport) return "";
+    if (!isPlainObject(report.settings)) report.settings = {};
+    const nextVoiceUri = normalizeSectionNarrationVoiceUri(value);
+    if (normalizeSectionNarrationVoiceUri(report.settings.sectionNarrationVoiceUri) === nextVoiceUri) {
+      return nextVoiceUri;
+    }
+    report.settings.sectionNarrationVoiceUri = nextVoiceUri;
+    await saveReports(reports);
+    return nextVoiceUri;
+  }
+
+  function getSectionNarrationProviderSetting() {
+    if (!hasReport) return SECTION_NARRATION_PROVIDER_DEFAULT;
+    if (!isPlainObject(report.settings)) report.settings = {};
+    return normalizeSectionNarrationProvider(report.settings.sectionNarrationProvider);
+  }
+
+  async function persistSectionNarrationProviderSetting(value) {
+    if (!hasReport) return SECTION_NARRATION_PROVIDER_DEFAULT;
+    if (!isPlainObject(report.settings)) report.settings = {};
+    const nextProvider = normalizeSectionNarrationProvider(value);
+    if (normalizeSectionNarrationProvider(report.settings.sectionNarrationProvider) === nextProvider) {
+      return nextProvider;
+    }
+    report.settings.sectionNarrationProvider = nextProvider;
+    await saveReports(reports);
+    return nextProvider;
+  }
+
+  function getSectionNarrationOpenAiVoiceSetting() {
+    if (!hasReport) return normalizeSectionNarrationOpenAiVoice("");
+    if (!isPlainObject(report.settings)) report.settings = {};
+    return normalizeSectionNarrationOpenAiVoice(report.settings.sectionNarrationOpenAiVoice);
+  }
+
+  async function persistSectionNarrationOpenAiVoiceSetting(value) {
+    if (!hasReport) return normalizeSectionNarrationOpenAiVoice(value);
+    if (!isPlainObject(report.settings)) report.settings = {};
+    const nextVoice = normalizeSectionNarrationOpenAiVoice(value);
+    if (normalizeSectionNarrationOpenAiVoice(report.settings.sectionNarrationOpenAiVoice) === nextVoice) {
+      return nextVoice;
+    }
+    report.settings.sectionNarrationOpenAiVoice = nextVoice;
+    await saveReports(reports);
+    return nextVoice;
+  }
+
+  function getSectionNarrationOpenAiApiKey() {
+    try {
+      return String(localStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE) || "").trim();
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function setSectionNarrationOpenAiApiKey(value) {
+    const next = String(value || "").trim();
+    try {
+      if (!next) localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE);
+      else localStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE, next);
+    } catch (_) {}
+    return next;
   }
 
   function normalizeTheme(theme) {
@@ -5126,18 +5615,57 @@ document.addEventListener("DOMContentLoaded", async () => {
       window.speechSynthesis &&
       typeof window.SpeechSynthesisUtterance === "function"
     ) ? window.speechSynthesis : null;
-    const supported = !!synth;
+    const supportsBrowser = !!synth;
+    const supportsCloud = (
+      typeof window !== "undefined" &&
+      typeof window.Audio === "function" &&
+      typeof window.fetch === "function" &&
+      typeof window.URL !== "undefined" &&
+      typeof window.URL.createObjectURL === "function" &&
+      typeof window.URL.revokeObjectURL === "function"
+    );
     const onState = typeof opts.onState === "function" ? opts.onState : (() => {});
     const onActivate = typeof opts.onActivate === "function" ? opts.onActivate : (() => {});
     const onDeactivate = typeof opts.onDeactivate === "function" ? opts.onDeactivate : (() => {});
+    const getCloudApiKey = typeof opts.getCloudApiKey === "function" ? opts.getCloudApiKey : (() => "");
+    const getEmbeddedCloudAudio = typeof opts.getEmbeddedCloudAudio === "function" ? opts.getEmbeddedCloudAudio : (async () => null);
+    const onCloudAudioReady = typeof opts.onCloudAudioReady === "function" ? opts.onCloudAudioReady : (async () => {});
     let destroyed = false;
     let sourceText = "";
     let segments = [];
     let totalChars = 0;
     let offset = 0;
     let rate = normalizeSectionNarrationRate(opts.initialRate);
-    let state = supported ? "idle" : "unsupported";
+    let provider = normalizeSectionNarrationProvider(opts.initialProvider);
+    let voiceUri = normalizeSectionNarrationVoiceUri(opts.initialVoiceUri);
+    let cloudVoice = normalizeSectionNarrationOpenAiVoice(opts.initialCloudVoice);
+    let state = "idle";
     let generation = 0;
+    let lastError = "";
+    const audioEl = supportsCloud ? new Audio() : null;
+    let cloudObjectUrl = "";
+    let cloudSourceKey = "";
+    let cloudRequestToken = 0;
+
+    if (audioEl) {
+      audioEl.preload = "auto";
+      audioEl.addEventListener("timeupdate", () => {
+        if (provider !== "openai") return;
+        emit();
+      });
+      audioEl.addEventListener("ended", () => {
+        if (provider !== "openai") return;
+        state = "ended";
+        onDeactivate();
+        emit({ reason: "completed" });
+      });
+      audioEl.addEventListener("error", () => {
+        if (provider !== "openai") return;
+        state = "error";
+        onDeactivate();
+        emit({ error: "Cloud audio playback failed." });
+      });
+    }
 
     const splitTextIntoSegments = (rawText) => {
       const text = String(rawText || "");
@@ -5191,33 +5719,78 @@ document.addEventListener("DOMContentLoaded", async () => {
       return segments.length - 1;
     };
 
+    const revokeCloudObjectUrl = () => {
+      if (!cloudObjectUrl) return;
+      try { URL.revokeObjectURL(cloudObjectUrl); } catch (_) {}
+      cloudObjectUrl = "";
+    };
+
+    const currentPercent = () => {
+      if (provider === "openai" && audioEl && Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
+        return Math.max(0, Math.min(100, Math.round((audioEl.currentTime / audioEl.duration) * 100)));
+      }
+      return totalChars ? Math.max(0, Math.min(100, Math.round((clampOffset(offset) / totalChars) * 100))) : 0;
+    };
+
+    const providerSupported = () => {
+      return provider === "openai" ? supportsCloud : supportsBrowser;
+    };
+
     const emit = (extra = {}) => {
       const snapshot = {
-        supported,
+        supported: providerSupported(),
+        supportsBrowser,
+        supportsCloud,
+        provider,
         state,
         rate,
+        voiceUri,
+        cloudVoice,
         totalChars,
         offset: clampOffset(offset),
         hasText: !!totalChars,
-        percent: totalChars ? Math.max(0, Math.min(100, Math.round((clampOffset(offset) / totalChars) * 100))) : 0,
-        error: "",
+        percent: currentPercent(),
+        error: lastError,
         ...extra
       };
       onState(snapshot);
       return snapshot;
     };
 
-    const stopSpeech = (nextState = "idle", reason = "") => {
-      if (!supported) return;
+    const resolveBrowserVoice = () => {
+      if (!supportsBrowser) return null;
+      const voices = Array.isArray(synth.getVoices()) ? synth.getVoices() : [];
+      if (!voices.length) return null;
+      const desiredUri = normalizeSectionNarrationVoiceUri(voiceUri);
+      if (desiredUri) {
+        const matched = voices.find((voice) => {
+          const candidate = normalizeSectionNarrationVoiceUri(voice && (voice.voiceURI || voice.name));
+          return candidate === desiredUri;
+        });
+        if (matched) return matched;
+      }
+      return voices.find((voice) => !!(voice && voice.default)) || voices[0] || null;
+    };
+
+    const stopBrowser = () => {
+      if (!supportsBrowser) return;
       generation += 1;
       try { synth.cancel(); } catch (_) {}
-      state = nextState;
-      if (nextState !== "playing") onDeactivate();
-      emit({ reason });
+    };
+
+    const stopCloud = () => {
+      cloudRequestToken += 1;
+      if (!audioEl) return;
+      try { audioEl.pause(); } catch (_) {}
+    };
+
+    const stopAllPlayback = () => {
+      stopBrowser();
+      stopCloud();
     };
 
     const speakFromSegment = (segmentIndex, token) => {
-      if (destroyed || !supported) return;
+      if (destroyed || !supportsBrowser || provider !== "browser") return;
       if (token !== generation) return;
       if (segmentIndex < 0 || segmentIndex >= segments.length) {
         state = "ended";
@@ -5229,8 +5802,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       const segment = segments[segmentIndex];
       const utterance = new SpeechSynthesisUtterance(segment.text);
       utterance.rate = rate;
+      const selectedVoice = resolveBrowserVoice();
+      if (selectedVoice) {
+        utterance.voice = selectedVoice;
+        if (selectedVoice.lang) utterance.lang = String(selectedVoice.lang);
+      }
       utterance.onboundary = (event) => {
-        if (destroyed || token !== generation) return;
+        if (destroyed || token !== generation || provider !== "browser") return;
         const charIndex = Number(event && event.charIndex);
         if (Number.isFinite(charIndex)) {
           offset = Math.max(segment.start, Math.min(segment.end, segment.start + charIndex));
@@ -5238,17 +5816,18 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
       };
       utterance.onend = () => {
-        if (destroyed || token !== generation) return;
+        if (destroyed || token !== generation || provider !== "browser") return;
         offset = segment.end;
         emit();
         speakFromSegment(segmentIndex + 1, token);
       };
       utterance.onerror = (event) => {
-        if (destroyed || token !== generation) return;
+        if (destroyed || token !== generation || provider !== "browser") return;
         state = "error";
         onDeactivate();
+        lastError = String((event && event.error) || "Speech playback failed.");
         emit({
-          error: String((event && event.error) || "Speech playback failed.")
+          error: lastError
         });
       };
       try {
@@ -5256,22 +5835,25 @@ document.addEventListener("DOMContentLoaded", async () => {
       } catch (err) {
         state = "error";
         onDeactivate();
+        lastError = String((err && err.message) || "Speech playback failed.");
         emit({
-          error: String((err && err.message) || "Speech playback failed.")
+          error: lastError
         });
       }
     };
 
-    const startFromOffset = (nextOffset = offset) => {
-      if (!supported) {
+    const startBrowserFromOffset = (nextOffset = offset) => {
+      if (!supportsBrowser) {
         state = "unsupported";
-        emit({ error: "Read-aloud is unavailable in this browser context." });
+        lastError = "Read-aloud is unavailable in this browser context.";
+        emit({ error: lastError });
         return false;
       }
       if (!segments.length) {
         offset = 0;
         state = "idle";
-        emit({ error: "No text available." });
+        lastError = "No text available.";
+        emit({ error: lastError });
         return false;
       }
       offset = clampOffset(nextOffset);
@@ -5281,9 +5863,166 @@ document.addEventListener("DOMContentLoaded", async () => {
       try { synth.cancel(); } catch (_) {}
       onActivate();
       state = "playing";
+      lastError = "";
       emit();
       speakFromSegment(segmentIndex, token);
       return true;
+    };
+
+    const buildCloudSourceKey = () => {
+      return JSON.stringify({
+        provider,
+        voice: cloudVoice,
+        text: sourceText
+      });
+    };
+
+    const waitForCloudMediaReady = () => {
+      return new Promise((resolve) => {
+        if (!audioEl) {
+          resolve(false);
+          return;
+        }
+        const done = () => {
+          cleanup();
+          resolve(true);
+        };
+        const fail = () => {
+          cleanup();
+          resolve(false);
+        };
+        const cleanup = () => {
+          audioEl.removeEventListener("loadedmetadata", done);
+          audioEl.removeEventListener("canplay", done);
+          audioEl.removeEventListener("error", fail);
+        };
+        audioEl.addEventListener("loadedmetadata", done, { once: true });
+        audioEl.addEventListener("canplay", done, { once: true });
+        audioEl.addEventListener("error", fail, { once: true });
+      });
+    };
+
+    const applyCloudAudioBytes = async (rawBytes, mime, sourceKey) => {
+      if (!audioEl) return false;
+      const bytes = rawBytes instanceof Uint8Array ? rawBytes : new Uint8Array(rawBytes || []);
+      if (!bytes.length) return false;
+      const safeMime = String(mime || "audio/mpeg").trim() || "audio/mpeg";
+      revokeCloudObjectUrl();
+      cloudObjectUrl = URL.createObjectURL(new Blob([bytes], { type: safeMime }));
+      cloudSourceKey = String(sourceKey || "");
+      audioEl.src = cloudObjectUrl;
+      audioEl.currentTime = 0;
+      audioEl.playbackRate = rate;
+      const ready = await waitForCloudMediaReady();
+      return !!ready;
+    };
+
+    const ensureCloudAudio = async () => {
+      if (!supportsCloud || !audioEl) {
+        lastError = "Cloud narration is unavailable in this browser context.";
+        state = "unsupported";
+        emit({ error: lastError });
+        return false;
+      }
+      if (!sourceText.trim()) {
+        lastError = "No text available.";
+        state = "idle";
+        emit({ error: lastError });
+        return false;
+      }
+      if (sourceText.length > SECTION_NARRATION_OPENAI_MAX_CHARS) {
+        lastError = `Cloud narration currently supports up to ${SECTION_NARRATION_OPENAI_MAX_CHARS.toLocaleString()} characters per section.`;
+        state = "error";
+        emit({ error: lastError });
+        return false;
+      }
+      const sourceHash = buildNarrationSourceHash(sourceText, cloudVoice, SECTION_NARRATION_OPENAI_MODEL);
+      const apiKey = String(getCloudApiKey() || "").trim();
+      const sourceKey = buildCloudSourceKey();
+      if (audioEl.src && cloudSourceKey === sourceKey) {
+        return true;
+      }
+      stopCloud();
+      const token = cloudRequestToken;
+      state = "loading";
+      lastError = "";
+      emit({ reason: "cloud-loading" });
+      try {
+        const embedded = await Promise.resolve(getEmbeddedCloudAudio({
+          provider: "openai",
+          voice: cloudVoice,
+          model: SECTION_NARRATION_OPENAI_MODEL,
+          textHash: sourceHash,
+          sourceText
+        }));
+        if (token !== cloudRequestToken) return false;
+        if (embedded && embedded.bytes && embedded.bytes.length) {
+          const loaded = await applyCloudAudioBytes(
+            embedded.bytes,
+            embedded.mime || "audio/mpeg",
+            sourceKey
+          );
+          if (token !== cloudRequestToken) return false;
+          if (loaded) return true;
+        }
+      } catch (_) {}
+      if (!apiKey) {
+        lastError = "Set an OpenAI API key to use cloud voices.";
+        state = "error";
+        emit({ error: lastError });
+        return false;
+      }
+      try {
+        const response = await fetch("https://api.openai.com/v1/audio/speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model: SECTION_NARRATION_OPENAI_MODEL,
+            voice: cloudVoice,
+            input: sourceText,
+            response_format: "mp3"
+          })
+        });
+        if (token !== cloudRequestToken) return false;
+        if (!response.ok) {
+          let detail = "";
+          try {
+            detail = await response.text();
+          } catch (_) {}
+          throw new Error(`OpenAI TTS request failed (${response.status}). ${String(detail || "").slice(0, 180)}`.trim());
+        }
+        const blob = await response.blob();
+        if (token !== cloudRequestToken) return false;
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const ready = await applyCloudAudioBytes(
+          bytes,
+          blob.type || "audio/mpeg",
+          sourceKey
+        );
+        if (token !== cloudRequestToken) return false;
+        if (!ready) throw new Error("Cloud audio failed to initialize.");
+        try {
+          await Promise.resolve(onCloudAudioReady({
+            bytes,
+            mime: blob.type || "audio/mpeg",
+            voice: cloudVoice,
+            model: SECTION_NARRATION_OPENAI_MODEL,
+            textHash: sourceHash,
+            sourceText,
+            durationMs: Number.isFinite(audioEl.duration) ? Math.max(0, Math.round(audioEl.duration * 1000)) : 0
+          }));
+        } catch (_) {}
+        return true;
+      } catch (err) {
+        if (token !== cloudRequestToken) return false;
+        state = "error";
+        lastError = String((err && err.message) || "Cloud narration request failed.");
+        emit({ error: lastError });
+        return false;
+      }
     };
 
     const setText = (nextText) => {
@@ -5291,50 +6030,116 @@ document.addEventListener("DOMContentLoaded", async () => {
       segments = splitTextIntoSegments(sourceText);
       totalChars = sourceText.length;
       offset = clampOffset(offset);
-      if (!segments.length && supported && state === "playing") {
-        stopSpeech("idle", "no-text");
+      cloudSourceKey = "";
+      if (provider === "browser" && !segments.length && supportsBrowser && state === "playing") {
+        stopBrowser();
+        state = "idle";
+        onDeactivate();
+        lastError = "No text available.";
+        emit({ error: lastError, reason: "no-text" });
+      } else if (provider === "openai" && state === "playing" && !sourceText.trim()) {
+        stopCloud();
+        state = "idle";
+        onDeactivate();
+        lastError = "No text available.";
+        emit({ error: lastError, reason: "no-text" });
       } else {
         emit();
       }
     };
 
-    const play = () => {
-      if (!supported) {
+    const play = async () => {
+      if (!providerSupported()) {
         state = "unsupported";
-        emit({ error: "Read-aloud is unavailable in this browser context." });
+        lastError = provider === "openai"
+          ? "Cloud narration is unavailable in this browser context."
+          : "Read-aloud is unavailable in this browser context.";
+        emit({ error: lastError });
         return false;
       }
-      if (!segments.length) {
-        state = "idle";
-        emit({ error: "No text available." });
+      if (provider === "browser") {
+        if (!segments.length) {
+          state = "idle";
+          lastError = "No text available.";
+          emit({ error: lastError });
+          return false;
+        }
+        if (state === "paused" && synth && synth.paused) {
+          onActivate();
+          state = "playing";
+          lastError = "";
+          try { synth.resume(); } catch (_) {}
+          emit();
+          return true;
+        }
+        return startBrowserFromOffset(offset);
+      }
+      if (!audioEl) {
+        state = "unsupported";
+        lastError = "Cloud narration is unavailable in this browser context.";
+        emit({ error: lastError });
         return false;
       }
-      if (state === "paused" && synth.paused) {
-        onActivate();
-        state = "playing";
-        try { synth.resume(); } catch (_) {}
-        emit();
-        return true;
+      const resumePercent = currentPercent();
+      const ready = await ensureCloudAudio();
+      if (!ready) return false;
+      if (Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
+        audioEl.currentTime = Math.max(0, Math.min(audioEl.duration, (resumePercent / 100) * audioEl.duration));
       }
-      return startFromOffset(offset);
+      audioEl.playbackRate = rate;
+      onActivate();
+      state = "playing";
+      lastError = "";
+      emit();
+      try {
+        await audioEl.play();
+      } catch (err) {
+        state = "error";
+        onDeactivate();
+        lastError = String((err && err.message) || "Cloud audio playback failed.");
+        emit({ error: lastError });
+        return false;
+      }
+      return true;
     };
 
     const pause = () => {
-      if (!supported) return false;
+      if (!providerSupported()) return false;
       if (state !== "playing") return false;
       state = "paused";
-      try { synth.pause(); } catch (_) {}
+      if (provider === "browser") {
+        try { synth.pause(); } catch (_) {}
+      } else if (audioEl) {
+        try { audioEl.pause(); } catch (_) {}
+      }
       onDeactivate();
       emit();
       return true;
     };
 
     const restart = () => {
+      if (provider === "openai") {
+        if (!audioEl) return false;
+        if (audioEl.src) audioEl.currentTime = 0;
+        return play();
+      }
       offset = 0;
-      return startFromOffset(0);
+      return startBrowserFromOffset(0);
     };
 
     const seek = (percent) => {
+      if (provider === "openai") {
+        if (!audioEl) {
+          emit();
+          return 0;
+        }
+        const ratio = clampNumber(percent, 0, 100, 0) / 100;
+        if (Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
+          audioEl.currentTime = Math.max(0, Math.min(audioEl.duration, audioEl.duration * ratio));
+        }
+        emit();
+        return audioEl.currentTime || 0;
+      }
       if (!segments.length) {
         emit();
         return 0;
@@ -5343,7 +6148,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const nextOffset = clampOffset(Math.round(totalChars * ratio));
       offset = nextOffset;
       if (state === "playing") {
-        startFromOffset(nextOffset);
+        startBrowserFromOffset(nextOffset);
       } else {
         emit();
       }
@@ -5352,27 +6157,67 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const setRate = (nextRate) => {
       rate = normalizeSectionNarrationRate(nextRate);
-      if (state === "playing") {
-        startFromOffset(offset);
-      } else {
-        emit();
+      if (provider === "openai" && audioEl) {
+        audioEl.playbackRate = rate;
+      } else if (provider === "browser" && state === "playing") {
+        startBrowserFromOffset(offset);
       }
+      emit();
       return rate;
     };
 
-    const stop = (reason = "stop") => {
-      if (!supported) {
-        state = "unsupported";
-        emit({ reason });
-        return;
+    const setVoiceUri = (nextVoiceUri) => {
+      voiceUri = normalizeSectionNarrationVoiceUri(nextVoiceUri);
+      if (provider === "browser" && state === "playing") {
+        startBrowserFromOffset(offset);
+      } else {
+        emit();
       }
-      stopSpeech("idle", reason);
+      return voiceUri;
+    };
+
+    const setCloudVoice = (nextCloudVoice) => {
+      cloudVoice = normalizeSectionNarrationOpenAiVoice(nextCloudVoice);
+      cloudSourceKey = "";
+      if (provider === "openai" && state === "playing") {
+        void play();
+      } else {
+        emit();
+      }
+      return cloudVoice;
+    };
+
+    const setProvider = (nextProvider) => {
+      const resolved = normalizeSectionNarrationProvider(nextProvider);
+      if (provider === resolved) {
+        emit();
+        return provider;
+      }
+      const resumePercent = currentPercent();
+      stopAllPlayback();
+      onDeactivate();
+      provider = resolved;
+      state = "idle";
+      if (provider === "browser") {
+        offset = clampOffset(Math.round((resumePercent / 100) * totalChars));
+      }
+      emit();
+      return provider;
+    };
+
+    const stop = (reason = "stop") => {
+      stopAllPlayback();
+      state = providerSupported() ? "idle" : "unsupported";
+      onDeactivate();
+      emit({ reason });
     };
 
     const destroy = (reason = "destroy") => {
       if (destroyed) return;
       destroyed = true;
       stop(reason);
+      revokeCloudObjectUrl();
+      cloudSourceKey = "";
       segments = [];
       sourceText = "";
       totalChars = 0;
@@ -5388,6 +6233,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       restart,
       seek,
       setRate,
+      setVoiceUri,
+      setCloudVoice,
+      setProvider,
       stop,
       destroy
     };
@@ -5440,16 +6288,79 @@ document.addEventListener("DOMContentLoaded", async () => {
     return touched;
   }
 
+  function getBurstAudioState(burst) {
+    if (!hasReport || !Array.isArray(report.events)) return { ref: null, meta: null };
+    const stepIds = burstStepIdSet(burst);
+    if (!stepIds.size) {
+      return {
+        ref: cloneSectionAudioRef(burst && burst.burstAudioRef),
+        meta: cloneSectionAudioMeta(burst && burst.burstAudioMeta)
+      };
+    }
+    for (const ev of report.events) {
+      const stepId = String(ev && ev.stepId || "").trim();
+      if (!stepIds.has(stepId)) continue;
+      const ref = cloneSectionAudioRef(ev && ev.burstAudioRef);
+      const meta = cloneSectionAudioMeta(ev && ev.burstAudioMeta);
+      if (ref || meta) return { ref, meta };
+    }
+    return {
+      ref: cloneSectionAudioRef(burst && burst.burstAudioRef),
+      meta: cloneSectionAudioMeta(burst && burst.burstAudioMeta)
+    };
+  }
+
+  function applyBurstAudioState(burst, ref, meta) {
+    if (!hasReport || !Array.isArray(report.events)) return 0;
+    const stepIds = burstStepIdSet(burst);
+    if (!stepIds.size) return 0;
+    const normalizedRef = cloneSectionAudioRef(ref);
+    const normalizedMeta = cloneSectionAudioMeta(meta);
+    let touched = 0;
+    report.events.forEach((ev) => {
+      const stepId = String(ev && ev.stepId || "").trim();
+      if (!stepIds.has(stepId)) return;
+      if (normalizedRef) ev.burstAudioRef = cloneSectionAudioRef(normalizedRef);
+      else delete ev.burstAudioRef;
+      if (normalizedMeta) ev.burstAudioMeta = cloneSectionAudioMeta(normalizedMeta);
+      else delete ev.burstAudioMeta;
+      touched += 1;
+    });
+    if (burst && typeof burst === "object") {
+      if (normalizedRef) burst.burstAudioRef = cloneSectionAudioRef(normalizedRef);
+      else delete burst.burstAudioRef;
+      if (normalizedMeta) burst.burstAudioMeta = cloneSectionAudioMeta(normalizedMeta);
+      else delete burst.burstAudioMeta;
+    }
+    return touched;
+  }
+
   function createSectionTextEditorPanel(config = {}) {
     const label = String(config.label || "Section text").trim() || "Section text";
     const defaultBaseName = String(config.defaultBaseName || "section-text").trim() || "section-text";
-    const getState = typeof config.getState === "function" ? config.getState : (() => ({ ref: null, meta: null }));
+    const getState = typeof config.getState === "function"
+      ? config.getState
+      : (() => ({ ref: null, meta: null, audioRef: null, audioMeta: null }));
     const onPersist = typeof config.onPersist === "function" ? config.onPersist : (async () => {});
     const onClear = typeof config.onClear === "function" ? config.onClear : (async () => {});
+    const onAudioPersist = typeof config.onAudioPersist === "function" ? config.onAudioPersist : (async () => {});
+    const onAudioClear = typeof config.onAudioClear === "function" ? config.onAudioClear : (async () => {});
     const onNarrationRateCommit = typeof config.onNarrationRateCommit === "function"
       ? config.onNarrationRateCommit
       : (async () => {});
+    const onNarrationVoiceCommit = typeof config.onNarrationVoiceCommit === "function"
+      ? config.onNarrationVoiceCommit
+      : (async () => {});
+    const onNarrationProviderCommit = typeof config.onNarrationProviderCommit === "function"
+      ? config.onNarrationProviderCommit
+      : (async () => {});
+    const onNarrationOpenAiVoiceCommit = typeof config.onNarrationOpenAiVoiceCommit === "function"
+      ? config.onNarrationOpenAiVoiceCommit
+      : (async () => {});
     let narrationRate = normalizeSectionNarrationRate(config.narrationRate);
+    let narrationProvider = normalizeSectionNarrationProvider(config.narrationProvider);
+    let narrationVoiceUri = normalizeSectionNarrationVoiceUri(config.narrationVoiceUri);
+    let narrationOpenAiVoice = normalizeSectionNarrationOpenAiVoice(config.narrationOpenAiVoice);
 
     const panel = el("details", "section-text-panel");
     const summary = el("summary", "section-text-panel-summary");
@@ -5493,6 +6404,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     const audioControls = el("div", "section-text-audio-controls");
     const audioPlayPauseBtn = el("button", "btn ghost btn-small", "Play");
     const audioRestartBtn = el("button", "btn subtle btn-small", "Restart");
+    const audioProviderWrap = el("label", "section-text-audio-control");
+    audioProviderWrap.appendChild(el("span", "section-text-audio-label", "Source"));
+    const audioProviderSelect = document.createElement("select");
+    audioProviderSelect.className = "section-text-audio-select";
+    audioProviderWrap.appendChild(audioProviderSelect);
+    const audioVoiceWrap = el("label", "section-text-audio-control");
+    audioVoiceWrap.appendChild(el("span", "section-text-audio-label", "Voice"));
+    const audioVoiceSelect = document.createElement("select");
+    audioVoiceSelect.className = "section-text-audio-select";
+    audioVoiceWrap.appendChild(audioVoiceSelect);
+    const audioCloudKeyBtn = el("button", "btn subtle btn-small", "Set API key");
     const audioScrubWrap = el("label", "section-text-audio-control");
     audioScrubWrap.appendChild(el("span", "section-text-audio-label", "Timeline"));
     const audioScrub = document.createElement("input");
@@ -5521,6 +6443,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     audioControls.appendChild(audioPlayPauseBtn);
     audioControls.appendChild(audioRestartBtn);
+    audioControls.appendChild(audioProviderWrap);
+    audioControls.appendChild(audioVoiceWrap);
+    audioControls.appendChild(audioCloudKeyBtn);
     audioControls.appendChild(audioScrubWrap);
     audioControls.appendChild(audioSpeedWrap);
     audioPanel.appendChild(audioControls);
@@ -5538,13 +6463,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     let currentRef = null;
     let currentMeta = null;
+    let currentAudioRef = null;
+    let currentAudioMeta = null;
     let currentText = "";
     let loaded = false;
     let loadingPromise = null;
     let pendingFileName = "";
     let pendingFileType = "";
+    let isTextDirty = false;
     let scrubDragging = false;
     let narrator = null;
+    let unsubscribeVoiceUpdates = null;
+    let voiceOptionsSignature = "";
+    let providerOptionsBound = false;
 
     const setStatus = (message, isError = false) => {
       status.textContent = String(message || "");
@@ -5581,22 +6512,122 @@ document.addEventListener("DOMContentLoaded", async () => {
       summaryMeta.textContent = `${sectionTextTypeLabel(fileType)} • ${formatByteCount(byteLength)}`;
     };
 
+    const refreshVoiceOptions = (voiceListRaw, selectedVoiceRaw = narrationVoiceUri) => {
+      if (!providerOptionsBound) {
+        while (audioProviderSelect.firstChild) audioProviderSelect.removeChild(audioProviderSelect.firstChild);
+        const browserOpt = document.createElement("option");
+        browserOpt.value = "browser";
+        browserOpt.textContent = "Browser / OS voice";
+        audioProviderSelect.appendChild(browserOpt);
+        const openAiOpt = document.createElement("option");
+        openAiOpt.value = "openai";
+        openAiOpt.textContent = "OpenAI cloud voice";
+        audioProviderSelect.appendChild(openAiOpt);
+        providerOptionsBound = true;
+      }
+      const resolvedProvider = normalizeSectionNarrationProvider(narrationProvider);
+      if (audioProviderSelect.value !== resolvedProvider) {
+        audioProviderSelect.value = resolvedProvider;
+      }
+      const normalizedList = [];
+      if (resolvedProvider === "openai") {
+        SECTION_NARRATION_OPENAI_VOICES.forEach((voice) => {
+          normalizedList.push({
+            uri: voice,
+            name: voice,
+            lang: "cloud",
+            default: voice === SECTION_NARRATION_OPENAI_VOICES[0]
+          });
+        });
+      } else {
+        const voiceList = Array.isArray(voiceListRaw) ? voiceListRaw : [];
+        const seen = new Set();
+        voiceList.forEach((voiceRaw) => {
+          if (!voiceRaw || typeof voiceRaw !== "object") return;
+          const uri = normalizeSectionNarrationVoiceUri(voiceRaw.uri || voiceRaw.voiceURI || voiceRaw.name);
+          if (!uri || seen.has(uri)) return;
+          seen.add(uri);
+          normalizedList.push({
+            uri,
+            name: String(voiceRaw.name || uri).trim() || uri,
+            lang: String(voiceRaw.lang || "").trim(),
+            default: !!voiceRaw.default
+          });
+        });
+      }
+      const signature = `${resolvedProvider}::${normalizedList
+        .map((voice) => `${voice.uri}|${voice.name}|${voice.lang}|${voice.default ? 1 : 0}`)
+        .join("||")}`;
+      if (signature !== voiceOptionsSignature) {
+        while (audioVoiceSelect.firstChild) audioVoiceSelect.removeChild(audioVoiceSelect.firstChild);
+        if (resolvedProvider === "browser") {
+          const defaultOpt = document.createElement("option");
+          defaultOpt.value = "";
+          defaultOpt.textContent = "Browser default";
+          audioVoiceSelect.appendChild(defaultOpt);
+        }
+        normalizedList.forEach((voice) => {
+          const option = document.createElement("option");
+          option.value = voice.uri;
+          const langLabel = voice.lang && voice.lang !== "cloud" ? ` (${voice.lang})` : "";
+          const defaultLabel = voice.default ? " • default" : "";
+          option.textContent = `${voice.name}${langLabel}${defaultLabel}`;
+          audioVoiceSelect.appendChild(option);
+        });
+        voiceOptionsSignature = signature;
+      }
+      let selectedVoice = resolvedProvider === "openai"
+        ? normalizeSectionNarrationOpenAiVoice(selectedVoiceRaw)
+        : normalizeSectionNarrationVoiceUri(selectedVoiceRaw);
+      if (selectedVoice) {
+        const exists = Array.from(audioVoiceSelect.options || []).some((option) => option.value === selectedVoice);
+        if (!exists) {
+          const unavailable = document.createElement("option");
+          unavailable.value = selectedVoice;
+          unavailable.textContent = "Saved voice (unavailable)";
+          audioVoiceSelect.appendChild(unavailable);
+        }
+      }
+      if (audioVoiceSelect.value !== selectedVoice) {
+        audioVoiceSelect.value = selectedVoice;
+      }
+    };
+
     const applyState = (state, textValue) => {
       const normalized = isPlainObject(state) ? state : {};
       currentRef = cloneSectionTextRef(normalized.ref);
       currentMeta = cloneSectionTextMeta(normalized.meta);
+      currentAudioRef = cloneSectionAudioRef(normalized.audioRef);
+      currentAudioMeta = cloneSectionAudioMeta(normalized.audioMeta);
       editor.value = String(textValue || "");
+      isTextDirty = false;
       refreshCounter();
       refreshPreview();
       refreshSummary();
     };
 
+    const currentNarrationTextHash = () => {
+      return buildNarrationSourceHash(currentText || "", narrationOpenAiVoice, SECTION_NARRATION_OPENAI_MODEL);
+    };
+
+    const clearEmbeddedAudioState = async () => {
+      const previous = cloneSectionAudioRef(currentAudioRef);
+      if (previous) {
+        await onAudioClear(previous);
+        clearSectionAudioCache(previous.docId);
+      }
+      currentAudioRef = null;
+      currentAudioMeta = null;
+    };
+
     const syncNarrationUi = (snapshotRaw) => {
       const snapshot = isPlainObject(snapshotRaw) ? snapshotRaw : {};
+      narrationProvider = normalizeSectionNarrationProvider(snapshot.provider ?? narrationProvider);
       const supported = !!snapshot.supported;
       const hasText = !!snapshot.hasText;
       const isPlaying = snapshot.state === "playing";
       const isPaused = snapshot.state === "paused";
+      const isLoading = snapshot.state === "loading";
       audioPlayPauseBtn.textContent = isPlaying ? "Pause" : "Play";
       if (!scrubDragging) {
         const percent = Number(clampNumber(snapshot.percent, 0, 100, 0));
@@ -5604,6 +6635,13 @@ document.addEventListener("DOMContentLoaded", async () => {
         audioProgressValue.textContent = `${Math.round(percent)}%`;
       }
       const shownRate = normalizeSectionNarrationRate(snapshot.rate ?? narrationRate);
+      if (narrationProvider === "openai") {
+        narrationOpenAiVoice = normalizeSectionNarrationOpenAiVoice(snapshot.cloudVoice ?? narrationOpenAiVoice);
+      } else {
+        narrationVoiceUri = normalizeSectionNarrationVoiceUri(snapshot.voiceUri ?? narrationVoiceUri);
+      }
+      const selectedVoice = narrationProvider === "openai" ? narrationOpenAiVoice : narrationVoiceUri;
+      refreshVoiceOptions(getSectionNarrationVoices(), selectedVoice);
       if (audioSpeed.value !== shownRate.toFixed(2)) {
         audioSpeed.value = shownRate.toFixed(2);
       }
@@ -5613,14 +6651,26 @@ document.addEventListener("DOMContentLoaded", async () => {
       audioRestartBtn.disabled = disabled;
       audioScrub.disabled = disabled;
       audioSpeed.disabled = !supported;
+      audioProviderSelect.disabled = !supported && narrationProvider === "browser";
+      audioVoiceSelect.disabled = !supported;
+      audioCloudKeyBtn.style.display = narrationProvider === "openai" ? "" : "none";
+      if (narrationProvider === "openai") {
+        audioCloudKeyBtn.textContent = getSectionNarrationOpenAiApiKey() ? "Update API key" : "Set API key";
+      }
       if (!supported) {
-        audioStatus.textContent = "Read-aloud is unavailable in this browser context.";
+        audioStatus.textContent = narrationProvider === "openai"
+          ? "Cloud narration is unavailable in this browser context."
+          : "Read-aloud is unavailable in this browser context.";
       } else if (!hasText) {
         audioStatus.textContent = "No text available.";
       } else if (snapshot.error) {
         audioStatus.textContent = String(snapshot.error);
+      } else if (isLoading) {
+        audioStatus.textContent = "Generating cloud audio…";
       } else if (isPlaying) {
-        audioStatus.textContent = "Reading section text…";
+        audioStatus.textContent = narrationProvider === "openai"
+          ? "Playing cloud narration…"
+          : "Reading section text…";
       } else if (isPaused) {
         audioStatus.textContent = "Paused.";
       } else if (snapshot.state === "ended") {
@@ -5632,6 +6682,54 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     narrator = createSectionNarratorController({
       initialRate: narrationRate,
+      initialProvider: narrationProvider,
+      initialVoiceUri: narrationVoiceUri,
+      initialCloudVoice: narrationOpenAiVoice,
+      getCloudApiKey: () => getSectionNarrationOpenAiApiKey(),
+      getEmbeddedCloudAudio: async ({ textHash, voice }) => {
+        const audioRef = cloneSectionAudioRef(currentAudioRef);
+        const audioMeta = cloneSectionAudioMeta(currentAudioMeta);
+        if (!audioRef) return null;
+        if (normalizeSectionNarrationProvider(audioRef.provider) !== "openai") return null;
+        const expectedVoice = normalizeSectionNarrationOpenAiVoice(voice);
+        const audioVoice = normalizeSectionNarrationOpenAiVoice(audioRef.voice || audioMeta?.voice);
+        if (audioVoice !== expectedVoice) return null;
+        const embeddedHash = String(audioMeta?.textHash || audioRef.textHash || "").trim();
+        if (embeddedHash && textHash && embeddedHash !== String(textHash)) return null;
+        const dataUrl = await resolveAudioDataUrlFromRef(audioRef, { retries: 4, retryMs: 120 });
+        const bytes = dataUrlToBytes(dataUrl);
+        if (!bytes || !bytes.length) return null;
+        return {
+          bytes,
+          mime: audioRef.mime || "audio/mpeg"
+        };
+      },
+      onCloudAudioReady: async ({ bytes, mime, voice, model, textHash, durationMs }) => {
+        if (isTextDirty) {
+          setStatus("Save text to persist generated narration audio with this section.");
+          return;
+        }
+        try {
+          const persisted = await persistSectionAudioDocument(bytes, {
+            existingRef: currentAudioRef,
+            existingMeta: currentAudioMeta,
+            mime,
+            fileType: detectAudioExtension(mime, "mp3"),
+            fileName: `${defaultBaseName}-narration.${detectAudioExtension(mime, "mp3")}`,
+            provider: "openai",
+            voice: normalizeSectionNarrationOpenAiVoice(voice),
+            model: String(model || SECTION_NARRATION_OPENAI_MODEL),
+            textHash: String(textHash || currentNarrationTextHash()),
+            durationMs: Number(durationMs) || 0
+          });
+          currentAudioRef = cloneSectionAudioRef(persisted.ref);
+          currentAudioMeta = cloneSectionAudioMeta(persisted.meta);
+          await onAudioPersist({
+            ref: cloneSectionAudioRef(currentAudioRef),
+            meta: cloneSectionAudioMeta(currentAudioMeta)
+          });
+        } catch (_) {}
+      },
       onActivate: () => {
         promoteActiveNarrationController(narrator);
       },
@@ -5640,6 +6738,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       },
       onState: syncNarrationUi
     });
+    unsubscribeVoiceUpdates = subscribeSectionNarrationVoices((voices) => {
+      const selectedVoice = narrationProvider === "openai" ? narrationOpenAiVoice : narrationVoiceUri;
+      refreshVoiceOptions(voices, selectedVoice);
+    });
+    const narratorDestroy = narrator.destroy.bind(narrator);
+    narrator.destroy = (reason = "destroy") => {
+      if (typeof unsubscribeVoiceUpdates === "function") {
+        try { unsubscribeVoiceUpdates(); } catch (_) {}
+        unsubscribeVoiceUpdates = null;
+      }
+      narratorDestroy(reason);
+    };
     registerNarrationController(narrator);
 
     const loadText = async (force = false) => {
@@ -5649,14 +6759,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         const state = await Promise.resolve(getState());
         const ref = cloneSectionTextRef(state && state.ref);
         const meta = cloneSectionTextMeta(state && state.meta);
+        const audioRef = cloneSectionAudioRef(state && state.audioRef);
+        const audioMeta = cloneSectionAudioMeta(state && state.audioMeta);
         let text = "";
         if (ref) {
           text = await resolveTextFromRef(ref, { retries: 8, retryMs: 120 });
         }
         currentRef = ref;
         currentMeta = meta;
+        currentAudioRef = audioRef;
+        currentAudioMeta = audioMeta;
         editor.value = text || "";
         currentText = editor.value;
+        isTextDirty = false;
         loaded = true;
         refreshCounter();
         refreshPreview();
@@ -5684,6 +6799,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     editor.addEventListener("input", () => {
+      isTextDirty = true;
       refreshCounter();
       refreshPreview();
     });
@@ -5707,6 +6823,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         pendingFileName = file.name || `${defaultBaseName}.${ext}`;
         pendingFileType = ext;
         editor.value = text;
+        isTextDirty = true;
         refreshCounter();
         refreshPreview();
         setStatus(`Loaded ${pendingFileName}. Click “Save text” to persist.`);
@@ -5745,6 +6862,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         currentRef = cloneSectionTextRef(persisted.ref);
         currentMeta = cloneSectionTextMeta(persisted.meta);
         editor.value = String(persisted.text || "");
+        isTextDirty = false;
+        await clearEmbeddedAudioState();
         pendingFileName = "";
         pendingFileType = "";
         loaded = true;
@@ -5762,10 +6881,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         const previous = cloneSectionTextRef(currentRef);
         await onClear(previous);
         if (previous) clearSectionTextCache(previous.docId);
+        await clearEmbeddedAudioState();
         currentRef = null;
         currentMeta = null;
         currentText = "";
         editor.value = "";
+        isTextDirty = false;
         pendingFileName = "";
         pendingFileType = "";
         loaded = true;
@@ -5819,13 +6940,82 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
     });
 
+    audioProviderSelect.addEventListener("change", () => {
+      narrationProvider = normalizeSectionNarrationProvider(audioProviderSelect.value);
+      voiceOptionsSignature = "";
+      const selectedVoice = narrationProvider === "openai" ? narrationOpenAiVoice : narrationVoiceUri;
+      refreshVoiceOptions(getSectionNarrationVoices(), selectedVoice);
+      if (narrator && typeof narrator.setProvider === "function") {
+        narrator.setProvider(narrationProvider);
+      }
+      Promise.resolve(onNarrationProviderCommit(narrationProvider)).catch((err) => {
+        setStatus((err && err.message) || "Failed to persist narration source.", true);
+      });
+    });
+
+    audioVoiceSelect.addEventListener("change", () => {
+      if (narrationProvider === "openai") {
+        narrationOpenAiVoice = normalizeSectionNarrationOpenAiVoice(audioVoiceSelect.value);
+        if (narrator && typeof narrator.setCloudVoice === "function") {
+          narrator.setCloudVoice(narrationOpenAiVoice);
+        }
+        Promise.resolve(onNarrationOpenAiVoiceCommit(narrationOpenAiVoice)).catch((err) => {
+          setStatus((err && err.message) || "Failed to persist cloud voice.", true);
+        });
+        return;
+      }
+      narrationVoiceUri = normalizeSectionNarrationVoiceUri(audioVoiceSelect.value);
+      if (narrator && typeof narrator.setVoiceUri === "function") {
+        narrator.setVoiceUri(narrationVoiceUri);
+      }
+      Promise.resolve(onNarrationVoiceCommit(narrationVoiceUri)).catch((err) => {
+        setStatus((err && err.message) || "Failed to persist narration voice.", true);
+      });
+    });
+
+    audioCloudKeyBtn.addEventListener("click", () => {
+      const existing = getSectionNarrationOpenAiApiKey();
+      const next = prompt(
+        "Enter OpenAI API key for cloud narration (leave empty to clear):",
+        existing
+      );
+      if (next === null) return;
+      const saved = setSectionNarrationOpenAiApiKey(next);
+      if (saved) setStatus("Cloud API key saved in local browser storage.");
+      else setStatus("Cloud API key cleared.");
+    });
+
     Promise.resolve(getState()).then((state) => {
       const normalized = isPlainObject(state) ? state : {};
       applyState(normalized, "");
       if (narrator) narrator.setRate(narrationRate);
+      if (narrator && typeof narrator.setProvider === "function") {
+        narrator.setProvider(narrationProvider);
+      }
+      if (narrator && typeof narrator.setVoiceUri === "function") {
+        narrator.setVoiceUri(narrationVoiceUri);
+      }
+      if (narrator && typeof narrator.setCloudVoice === "function") {
+        narrator.setCloudVoice(narrationOpenAiVoice);
+      }
+      voiceOptionsSignature = "";
+      const selectedVoice = narrationProvider === "openai" ? narrationOpenAiVoice : narrationVoiceUri;
+      refreshVoiceOptions(getSectionNarrationVoices(), selectedVoice);
     }).catch(() => {
       applyState({ ref: null, meta: null }, "");
       if (narrator) narrator.setRate(narrationRate);
+      if (narrator && typeof narrator.setProvider === "function") {
+        narrator.setProvider(narrationProvider);
+      }
+      if (narrator && typeof narrator.setVoiceUri === "function") {
+        narrator.setVoiceUri(narrationVoiceUri);
+      }
+      if (narrator && typeof narrator.setCloudVoice === "function") {
+        narrator.setCloudVoice(narrationOpenAiVoice);
+      }
+      voiceOptionsSignature = "";
+      const selectedVoice = narrationProvider === "openai" ? narrationOpenAiVoice : narrationVoiceUri;
+      refreshVoiceOptions(getSectionNarrationVoices(), selectedVoice);
     });
 
     return panel;
@@ -6418,7 +7608,19 @@ document.addEventListener("DOMContentLoaded", async () => {
                 label: "Interaction text",
                 defaultBaseName: `interaction-${Number.isFinite(targetBurstIndex) ? targetBurstIndex + 1 : 1}`,
                 narrationRate: getSectionNarrationRateSetting(),
-                getState: () => getBurstTextState(targetBurst),
+                narrationProvider: getSectionNarrationProviderSetting(),
+                narrationVoiceUri: getSectionNarrationVoiceUriSetting(),
+                narrationOpenAiVoice: getSectionNarrationOpenAiVoiceSetting(),
+                getState: () => {
+                  const textState = getBurstTextState(targetBurst);
+                  const audioState = getBurstAudioState(targetBurst);
+                  return {
+                    ref: textState.ref,
+                    meta: textState.meta,
+                    audioRef: audioState.ref,
+                    audioMeta: audioState.meta
+                  };
+                },
                 onPersist: async ({ ref, meta }) => {
                   const touched = applyBurstTextState(targetBurst, ref, meta);
                   if (!touched) throw new Error("Unable to attach text to this interaction block.");
@@ -6431,8 +7633,27 @@ document.addEventListener("DOMContentLoaded", async () => {
                   await saveReports(reports);
                   updateAux();
                 },
+                onAudioPersist: async ({ ref, meta }) => {
+                  const touched = applyBurstAudioState(targetBurst, ref, meta);
+                  if (!touched) throw new Error("Unable to attach narration audio to this interaction block.");
+                  await saveReports(reports);
+                },
+                onAudioClear: async () => {
+                  const touched = applyBurstAudioState(targetBurst, null, null);
+                  if (!touched) throw new Error("Unable to clear interaction narration audio.");
+                  await saveReports(reports);
+                },
                 onNarrationRateCommit: async (value) => {
                   await persistSectionNarrationRateSetting(value);
+                },
+                onNarrationProviderCommit: async (value) => {
+                  await persistSectionNarrationProviderSetting(value);
+                },
+                onNarrationVoiceCommit: async (value) => {
+                  await persistSectionNarrationVoiceUriSetting(value);
+                },
+                onNarrationOpenAiVoiceCommit: async (value) => {
+                  await persistSectionNarrationOpenAiVoiceSetting(value);
                 }
               });
               card.appendChild(panel);
@@ -6543,9 +7764,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         label: "Section text",
         defaultBaseName: String(ev.stepId || "section"),
         narrationRate: getSectionNarrationRateSetting(),
+        narrationProvider: getSectionNarrationProviderSetting(),
+        narrationVoiceUri: getSectionNarrationVoiceUriSetting(),
+        narrationOpenAiVoice: getSectionNarrationOpenAiVoiceSetting(),
         getState: () => ({
           ref: cloneSectionTextRef(ev.sectionTextRef),
-          meta: cloneSectionTextMeta(ev.sectionTextMeta)
+          meta: cloneSectionTextMeta(ev.sectionTextMeta),
+          audioRef: cloneSectionAudioRef(ev.sectionAudioRef),
+          audioMeta: cloneSectionAudioMeta(ev.sectionAudioMeta)
         }),
         onPersist: async ({ ref, meta }) => {
           const nextRef = cloneSectionTextRef(ref);
@@ -6565,8 +7791,33 @@ document.addEventListener("DOMContentLoaded", async () => {
           await saveReports(reports);
           updateAux();
         },
+        onAudioPersist: async ({ ref, meta }) => {
+          const nextRef = cloneSectionAudioRef(ref);
+          const nextMeta = cloneSectionAudioMeta(meta);
+          if (nextRef) ev.sectionAudioRef = nextRef;
+          else delete ev.sectionAudioRef;
+          if (nextMeta) ev.sectionAudioMeta = nextMeta;
+          else delete ev.sectionAudioMeta;
+          await saveReports(reports);
+        },
+        onAudioClear: async (previousRef) => {
+          const prev = cloneSectionAudioRef(previousRef || ev.sectionAudioRef);
+          if (prev) clearSectionAudioCache(prev.docId);
+          delete ev.sectionAudioRef;
+          delete ev.sectionAudioMeta;
+          await saveReports(reports);
+        },
         onNarrationRateCommit: async (value) => {
           await persistSectionNarrationRateSetting(value);
+        },
+        onNarrationProviderCommit: async (value) => {
+          await persistSectionNarrationProviderSetting(value);
+        },
+        onNarrationVoiceCommit: async (value) => {
+          await persistSectionNarrationVoiceUriSetting(value);
+        },
+        onNarrationOpenAiVoiceCommit: async (value) => {
+          await persistSectionNarrationOpenAiVoiceSetting(value);
         }
       });
       wrap.appendChild(sectionTextPanel);
@@ -6963,6 +8214,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const reportBytes = archive.get("report.json");
     const frameManifestBytes = archive.get("frame-manifest.json");
     const textManifestBytes = archive.get("text-manifest.json");
+    const audioManifestBytes = archive.get("audio-manifest.json");
     if (!manifestBytes || !reportBytes) {
       throw new Error("ZIP must include manifest.json and report.json.");
     }
@@ -7012,6 +8264,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         await restoreTextsFromBundle(archive, textEntries, importedReport);
       } catch (_) {
         throw new Error("text-manifest.json is invalid.");
+      }
+    }
+    if (audioManifestBytes) {
+      try {
+        const parsedAudioManifest = JSON.parse(decodeText(audioManifestBytes));
+        const audioEntries = Array.isArray(parsedAudioManifest && parsedAudioManifest.audio)
+          ? parsedAudioManifest.audio
+          : Array.isArray(parsedAudioManifest)
+            ? parsedAudioManifest
+            : [];
+        await restoreAudiosFromBundle(archive, audioEntries, importedReport);
+      } catch (_) {
+        throw new Error("audio-manifest.json is invalid.");
       }
     }
 
@@ -7122,6 +8387,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const frameRefs = collectScreenshotRefsFromEvents(payload.report.events);
       const textRefs = collectSectionTextRefsFromEvents(payload.report.events);
       const textMetaByDocId = collectSectionTextMetaFromEvents(payload.report.events);
+      const audioRefs = collectSectionAudioRefsFromEvents(payload.report.events);
+      const audioMetaByDocId = collectSectionAudioMetaFromEvents(payload.report.events);
       const frameManifest = [];
       const frameEntries = [];
       for (const [frameId, ref] of frameRefs.entries()) {
@@ -7178,6 +8445,33 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
         textEntries.push({ name: filePath, data: bytes, updatedAt: exportedAt });
       }
+      const audioManifest = [];
+      const audioEntries = [];
+      for (const [docId, ref] of audioRefs.entries()) {
+        const dataUrl = await resolveAudioDataUrlFromRef(ref, { retries: 8, retryMs: 120 });
+        if (!dataUrl) continue;
+        const bytes = dataUrlToBytes(dataUrl);
+        if (!bytes || !bytes.length) continue;
+        const meta = cloneSectionAudioMeta(audioMetaByDocId.get(docId)) || {};
+        const mime = String(ref && ref.mime || "audio/mpeg");
+        const fileType = detectAudioExtension(mime, meta.fileType || "mp3");
+        const filePath = `audio/${docId}.${fileType}`;
+        audioManifest.push({
+          docId,
+          file: filePath,
+          mime,
+          createdAtMs: Number(ref && ref.createdAtMs) || Date.now(),
+          byteLength: bytes.length,
+          fileName: meta.fileName || `${docId}.${fileType}`,
+          fileType,
+          provider: normalizeSectionNarrationProvider(ref && ref.provider || meta.provider || "openai"),
+          voice: normalizeSectionNarrationOpenAiVoice(ref && ref.voice || meta.voice),
+          model: String(ref && ref.model || meta.model || SECTION_NARRATION_OPENAI_MODEL),
+          durationMs: Number(meta.durationMs) || 0,
+          textHash: String(ref && ref.textHash || meta.textHash || "")
+        });
+        audioEntries.push({ name: filePath, data: bytes, updatedAt: exportedAt });
+      }
       const readme = [
         "UI Recorder Pro raw bundle",
         "",
@@ -7188,6 +8482,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         "- frames/*.png  : burst frame images referenced by screenshotRef",
         "- text-manifest.json  : section text metadata (bundle v3)",
         "- texts/*       : per-section embedded text payloads",
+        "- audio-manifest.json : section narration audio metadata (bundle v4)",
+        "- audio/*       : baked narration audio payloads for section playback",
         "",
         "Re-import this ZIP in the report editor to continue editing."
       ].join("\n");
@@ -7211,6 +8507,14 @@ document.addEventListener("DOMContentLoaded", async () => {
           updatedAt: exportedAt
         });
         zipEntries.push(...textEntries);
+      }
+      if (audioManifest.length) {
+        zipEntries.push({
+          name: "audio-manifest.json",
+          data: encodeText(JSON.stringify({ audio: audioManifest }, null, 2)),
+          updatedAt: exportedAt
+        });
+        zipEntries.push(...audioEntries);
       }
       const zipBytes = buildStoredZip(zipEntries);
       const filename = `ui-report-raw-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
@@ -7252,6 +8556,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     destroyBurstPlayers();
     destroyNarrationControllers("beforeunload");
+    if (sectionNarrationSynth && sectionNarrationVoicesChangedHandler) {
+      if (typeof sectionNarrationSynth.removeEventListener === "function") {
+        sectionNarrationSynth.removeEventListener("voiceschanged", sectionNarrationVoicesChangedHandler);
+      } else if (sectionNarrationSynth.onvoiceschanged === sectionNarrationVoicesChangedHandler) {
+        sectionNarrationSynth.onvoiceschanged = null;
+      }
+      sectionNarrationVoicesChangedHandler = null;
+    }
     if (activeAnnotationTeardown) {
       try { activeAnnotationTeardown("beforeunload"); } catch (_) {}
       activeAnnotationTeardown = null;

@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.13.5
+# UI Workflow Recorder Pro (Firefox) v1.14.0
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.13.5`
+- Version: `1.14.0`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -68,7 +68,9 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Strict 2MB UTF-8 limit per section.
   - Section text is rendered in collapsible caption-style panels in builder and exported HTML.
   - Text payloads are stored in IndexedDB spool with lightweight refs in report events.
-  - Section text now includes read-aloud controls in builder and exported HTML: play/pause, restart, timeline scrub, and tempo.
+  - Section text now includes read-aloud controls in the builder: play/pause, restart, timeline scrub, tempo, narration source (Browser/OS or OpenAI cloud), and voice selection.
+  - OpenAI cloud narration uses your API key stored in local browser storage on the builder device.
+  - Generated OpenAI narration is baked into section audio refs for export so report viewers can play audio without API keys or provider setup.
   - Scrub seeks by text position (character timeline) because browser speech engines do not expose true audio timecode.
 - Annotation improvements:
   - Live preview overlays and sizing traces
@@ -83,7 +85,7 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Compact TOC controls with full title/URL detail options and dense behavior for large reports
   - Professional metadata chips (friendly timestamp + compact URL label)
   - Right-side path token removed from exported rows
-- Raw ZIP export/import/merge for future re-editing, including section-text payload round-trip.
+- Raw ZIP export/import/merge for future re-editing, including section-text and baked narration-audio payload round-trip (bundle v4).
 
 ## Install (Temporary Add-on)
 1. Open `about:debugging#/runtime/this-firefox` in Firefox.

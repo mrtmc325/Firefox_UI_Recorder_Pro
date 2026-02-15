@@ -8,9 +8,9 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.13.5. This patch adds per-section read-aloud controls for embedded section text in both the report builder and exported HTML, including play/pause, restart, timeline scrub, and tempo.</p>
+    <p>Version 1.14.0. This minor release finalizes the section-audio narration flow: builder panels support Browser/OS and OpenAI narration sources with voice selection, generated cloud audio is cached locally per section, and exported HTML ships playback-only baked audio with no viewer API key requirements.</p>
 
-    <h2>Version Notes (v1.13.5)</h2>
+    <h2>Version Notes (v1.14.0)</h2>
     <ul>
       <li>Cross-tab timeline now supports drag/drop for interaction burst rows, moving entire burst blocks while preserving burst integrity.</li>
       <li>Timeline column headers now use true tab/site labels only; burst display titles no longer leak into column headers.</li>
@@ -35,9 +35,11 @@
       <li>Documentation wording now matches live behavior for hotkey burst split boundaries (epoch/toggle-based), with selectable capture cadence (5/10/15 FPS) and tunable replay speed.</li>
       <li>Each workflow step and interaction burst section now supports embedded text (manual entry or <code>.txt</code>/<code>.md</code>/<code>.json</code> import) with a strict 2MB cap per section.</li>
       <li>Embedded section text is stored as IndexedDB refs and shown in builder/export as collapsible caption-style panels.</li>
-      <li>Section text panels now include read-aloud controls in both builder and exported HTML: Play/Pause, Restart, timeline scrub, and tempo.</li>
+      <li>Section text panels now include full read-aloud controls in the builder: Play/Pause, Restart, timeline scrub, tempo, narration source selection (Browser/OS or OpenAI cloud), and voice selection.</li>
+      <li>When builder narration uses OpenAI voices, generated audio is stored locally per section and baked into exported HTML so viewers only need playback controls (no API key prompt).</li>
+      <li>OpenAI API keys remain local to the builder browser profile and are not required by report viewers.</li>
       <li>Read-aloud scrub uses text-position seeking (character timeline), which is more portable than audio-time seeking across browser speech engines.</li>
-      <li>Raw ZIP export/import now supports bundle v3 with <code>frame-manifest.json</code> + <code>frames/*</code> and <code>text-manifest.json</code> + <code>texts/*</code> for full replay + text fidelity across re-import.</li>
+      <li>Raw ZIP export/import now supports bundle v4 with <code>frame-manifest.json</code> + <code>frames/*</code>, <code>text-manifest.json</code> + <code>texts/*</code>, and <code>audio-manifest.json</code> + <code>audio/*</code> for full replay + text + narration fidelity across re-import.</li>
       <li>Report builder step actions now use a precomputed event-position map to reduce per-render lookup overhead on larger reports.</li>
       <li>Default debug logging is now disabled in background/content/popup scripts for lower long-session console noise and overhead.</li>
       <li>Burst replay cards now auto-pause when offscreen and resume when visible.</li>

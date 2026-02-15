@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Added
+- None yet.
+
+### Changed
+- None yet.
+
+## v1.14.0 - 2026-02-15
+
+### Added
+- Section read-aloud controls now include voice selection in the builder, using browser/OS voices exposed through Web Speech.
+- Added optional OpenAI cloud narration source in builder section-text panels, with per-report provider/voice settings and local API key prompt storage.
+- Builder now persists generated OpenAI narration audio per section and embeds baked audio into exported HTML and raw ZIP bundles (bundle v4 with `audio-manifest.json` + `audio/*`).
+
+### Changed
+- Exported HTML narration UI is now playback-only (Play/Pause, Restart, timeline, tempo) and no longer prompts report viewers for API keys/provider configuration.
+
 ## v1.13.5 - 2026-02-15
 
 ### Added

@@ -2359,6 +2359,17 @@ body.report.report-dense .annot-tools {
   width: 112px;
 }
 
+.section-text-audio-select {
+  min-width: 180px;
+  max-width: 240px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 3px 7px;
+  font-size: max(10px, calc(var(--report-section-text-size) - 2px));
+}
+
 .section-text-audio-value {
   min-width: 38px;
   text-align: right;
@@ -2371,6 +2382,12 @@ body.report.report-dense .annot-tools {
   min-height: 14px;
   color: var(--muted);
   font-size: max(10px, calc(var(--report-section-text-size) - 2px));
+}
+
+.section-text-audio-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: max(10px, calc(var(--report-section-text-size) - 3px));
 }
 
 .badge {
@@ -2765,6 +2782,16 @@ body.report.report-dark .section-text-audio-value,
 body.report.report-dark .section-text-audio-status,
 body.report.report-dark .section-text-audio-control {
   color: #9ca3af;
+}
+
+body.report.report-dark .section-text-audio-meta {
+  color: #9ca3af;
+}
+
+body.report.report-dark .section-text-audio-select {
+  border-color: #2f333c;
+  background: #090b10;
+  color: #e5e7eb;
 }
 
 body.report.report-dark .section-text-editor {
