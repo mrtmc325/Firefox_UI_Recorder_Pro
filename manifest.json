@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "UI Workflow Recorder Pro",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "description": "Record UI workflows with clean step titles, text-only redaction, and advanced reporting tools.",
   "icons": {
     "16": "icons/icon.svg",
@@ -49,9 +49,17 @@
     "styles.css",
     "docs.html"
   ],
-  "applications": {
+  "browser_specific_settings": {
     "gecko": {
-      "id": "ui-recorder-pro@local"
+      "id": "firefox-ui-recorder-pro@mrtmc325",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ],
+        "optional": [
+          "websiteContent"
+        ]
+      }
     }
   },
   "commands": {

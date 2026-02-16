@@ -109,6 +109,10 @@ const FRAME_REF_RESOLVE_RETRY_MAX_MS = 1000;
 const FRAME_REF_PLAYER_MAX_RETRIES = 20;
 const FRAME_REF_PLAYER_MAX_CONCURRENT_LOADS = 3;
 const FRAME_REF_PLAYER_PREFETCH_AHEAD = 2;
+const WEBSITE_CONTENT_DATA_COLLECTION_KEY = "websiteContent";
+const WEBSITE_CONTENT_CONSENT_REQUIRED_MESSAGE = "Cloud narration needs website content permission before text can be sent to OpenAI. Press Play and choose Allow.";
+const WEBSITE_CONTENT_CONSENT_DENIED_MESSAGE = "Cloud narration permission is not granted. Press Play and choose Allow, or enable Website content in about:addons > UI Workflow Recorder Pro > Permissions.";
+const WEBSITE_CONTENT_CONSENT_UNAVAILABLE_MESSAGE = "Cloud narration permission controls are unavailable in this Firefox context. Use Browser / OS voice, or update to a Firefox build that supports extension data collection permissions.";
 
 const frameSpoolClient = (
   typeof self !== "undefined" &&
@@ -1118,6 +1122,104 @@ function decodeText(bytes) {
   return new TextDecoder().decode(bytes);
 }
 
+function buildWebsiteContentPermissionPayload() {
+  return { data_collection: [WEBSITE_CONTENT_DATA_COLLECTION_KEY] };
+}
+
+function parseWebsiteContentPermissionError(err) {
+  const detail = String((err && err.message) || err || "").trim();
+  if (!detail) return { reason: "permissions-api-unavailable", detail: "" };
+  const lowered = detail.toLowerCase();
+  if (
+    lowered.includes("user input handler") ||
+    lowered.includes("user gesture")
+  ) {
+    return { reason: "consent-required", detail };
+  }
+  if (
+    lowered.includes("data_collection") ||
+    lowered.includes("data collection") ||
+    lowered.includes("unsupported") ||
+    lowered.includes("not supported") ||
+    lowered.includes("not available") ||
+    lowered.includes("invalid permission") ||
+    lowered.includes("unexpected property")
+  ) {
+    return { reason: "permissions-api-unavailable", detail };
+  }
+  return { reason: "permissions-api-error", detail };
+}
+
+async function hasWebsiteContentConsent() {
+  if (
+    !browser ||
+    !browser.permissions ||
+    typeof browser.permissions.contains !== "function"
+  ) {
+    return { ok: false, granted: false, reason: "permissions-api-unavailable", detail: "" };
+  }
+  try {
+    const granted = !!(await browser.permissions.contains(buildWebsiteContentPermissionPayload()));
+    return { ok: true, granted, reason: granted ? "consent-granted" : "consent-required", detail: "" };
+  } catch (err) {
+    const parsed = parseWebsiteContentPermissionError(err);
+    return { ok: false, granted: false, reason: parsed.reason, detail: parsed.detail };
+  }
+}
+
+async function requestWebsiteContentConsent() {
+  if (
+    !browser ||
+    !browser.permissions ||
+    typeof browser.permissions.request !== "function"
+  ) {
+    return { ok: false, granted: false, reason: "permissions-api-unavailable", detail: "" };
+  }
+  try {
+    const granted = !!(await browser.permissions.request(buildWebsiteContentPermissionPayload()));
+    return { ok: true, granted, reason: granted ? "consent-granted" : "consent-denied", detail: "" };
+  } catch (err) {
+    const parsed = parseWebsiteContentPermissionError(err);
+    return { ok: false, granted: false, reason: parsed.reason, detail: parsed.detail };
+  }
+}
+
+async function ensureWebsiteContentConsent(options = {}) {
+  const opts = isPlainObject(options) ? options : {};
+  const interactive = !!opts.interactive;
+  if (!browser || !browser.permissions) {
+    return { ok: false, reason: "permissions-api-unavailable" };
+  }
+  if (interactive) {
+    if (typeof browser.permissions.request !== "function") {
+      return { ok: false, reason: "permissions-api-unavailable" };
+    }
+    const requested = await requestWebsiteContentConsent();
+    if (!requested.ok) {
+      return {
+        ok: false,
+        reason: requested.reason || "permissions-api-unavailable",
+        detail: String(requested.detail || "")
+      };
+    }
+    if (requested.granted) return { ok: true, granted: true, requested: true };
+    return { ok: false, reason: "consent-denied" };
+  }
+  if (typeof browser.permissions.contains !== "function") {
+    return { ok: false, reason: "permissions-api-unavailable" };
+  }
+  const alreadyGranted = await hasWebsiteContentConsent();
+  if (!alreadyGranted.ok) {
+    return {
+      ok: false,
+      reason: alreadyGranted.reason || "permissions-api-unavailable",
+      detail: String(alreadyGranted.detail || "")
+    };
+  }
+  if (alreadyGranted.granted) return { ok: true, granted: true, requested: false };
+  return { ok: false, reason: "consent-required" };
+}
+
 function detectTextExtension(fileName, fallbackExt = "txt") {
   const fallback = SECTION_TEXT_ALLOWED_EXTENSIONS.includes(String(fallbackExt || "").toLowerCase())
     ? String(fallbackExt || "").toLowerCase()
@@ -1371,6 +1473,20 @@ function parseStoredZip(buffer) {
   }
 
   return files;
+}
+
+function parseOptionalManifestEntries(bytes, fileName, requiredKey) {
+  let parsed;
+  try {
+    parsed = JSON.parse(decodeText(bytes));
+  } catch (_) {
+    throw new Error(`${fileName} is not valid JSON.`);
+  }
+  if (Array.isArray(parsed)) return parsed;
+  if (!isPlainObject(parsed) || !Array.isArray(parsed[requiredKey])) {
+    throw new Error(`${fileName} is missing required "${requiredKey}" array.`);
+  }
+  return parsed[requiredKey];
 }
 
 function normalizeImportedReport(rawReport) {
@@ -3793,15 +3909,6 @@ function buildExportHtml(report, options = {}) {
   const fontStack = EXPORT_THEME_FONT_STACKS[exportTheme.font] || EXPORT_THEME_FONT_STACKS.trebuchet;
   const themeAccent = normalizeHexColor(exportTheme.accentColor, EXPORT_THEME_DEFAULTS.accentColor);
   const typographyVars = buildTypographyThemeVars(exportTheme);
-  const tocLayoutClassByValue = Object.freeze({
-    grid: "toc-layout-grid",
-    list: "toc-layout-list",
-    minimal: "toc-layout-minimal",
-    columns: "toc-layout-columns",
-    bands: "toc-layout-bands",
-    outline: "toc-layout-outline"
-  });
-  const tocLayoutClass = tocLayoutClassByValue[exportTheme.tocLayout] || "toc-layout-grid";
   const burstSettings = normalizeClickBurstSettings(report && report.settings);
   const narrationRate = normalizeSectionNarrationRate(report && report.settings && report.settings.sectionNarrationRate);
   const burstSourceEvents = sourceEvents.map((ev, i) => ({ ...(ev || {}), stepId: `step-${i + 1}` }));
@@ -3809,13 +3916,23 @@ function buildExportHtml(report, options = {}) {
   const burstFrameMap = buildBurstFrameMap(derivedBursts);
   const events = burstSourceEvents.filter((ev) => !shouldHideRenderedStepEvent(ev, burstFrameMap, burstSettings));
 
-  const tocClass = `toc ${tocLayoutClass}${events.length >= 100 ? " toc-dense" : ""}`;
-  const tocMetaFor = (ev) => {
-    if (exportTheme.tocMeta === "none") return "";
-    if (exportTheme.tocMeta === "url") return String((ev && ev.url) || "");
-    return hostFromUrl(ev && ev.url);
+  const normalizeSlideId = (value, fallback) => {
+    const raw = String(value || "").trim() || String(fallback || "").trim();
+    if (!raw) return "";
+    const normalized = raw.replace(/[^A-Za-z0-9_.:-]+/g, "-").replace(/^-+|-+$/g, "");
+    return normalized || "section";
   };
-
+  const tocMetaForEvent = (ev) => {
+    if (exportTheme.tocMeta === "none") return "";
+    if (exportTheme.tocMeta === "url") {
+      const parsed = parseExportUrl(ev && ev.url ? ev.url : "");
+      return parsed.fullLabel || parsed.raw || "";
+    }
+    const host = hostFromUrl(ev && ev.url ? ev.url : "");
+    if (host) return host;
+    const parsed = parseExportUrl(ev && ev.url ? ev.url : "");
+    return parsed.shortLabel || parsed.genericLabel || "";
+  };
   const buildExportSectionTextPanel = (panelId, label, state, metaRaw, audioStateRaw, audioMetaRaw) => {
     const safeState = state && typeof state === "object" ? state : { ref: null, loaded: false, text: "" };
     const ref = cloneSectionTextRef(safeState.ref);
@@ -3825,16 +3942,17 @@ function buildExportHtml(report, options = {}) {
     const audioMeta = cloneSectionAudioMeta(audioMetaRaw);
     const audioDataUrl = safeDataAudioUrl(audioState.dataUrl || "");
     const hasPayload = !!(safeState.text && String(safeState.text).length);
-    if (!ref && !hasPayload) return "";
     const safeId = escapeHtml(String(panelId || ""));
     const byteLength = Number(ref && ref.byteLength) || encodeText(String(safeState.text || "")).length;
     const fileType = (meta && meta.fileType)
       ? meta.fileType
       : detectTextExtension(meta && meta.fileName, "txt") || "txt";
-    const summaryMeta = `${sectionTextTypeLabel(fileType)} • ${formatByteCount(byteLength)}`;
+    const summaryMeta = hasPayload || ref
+      ? `${sectionTextTypeLabel(fileType)} • ${formatByteCount(byteLength)}`
+      : "No caption text";
     const captionBody = hasPayload
-      ? `<pre>${escapeHtml(String(safeState.text || ""))}</pre>`
-      : `<div class="section-text-caption-empty">Embedded text reference is unavailable in this export context.</div>`;
+      ? `<pre class="viewer-cc-pre">${escapeHtml(String(safeState.text || ""))}</pre>`
+      : `<div class="section-text-caption-empty">${ref ? "Embedded text reference is unavailable in this export context." : "No section text captured for this section."}</div>`;
     const escapedAudioSrc = escapeHtml(String(audioDataUrl || ""));
     const audioStatusText = audioDataUrl
       ? "Ready."
@@ -3842,27 +3960,51 @@ function buildExportHtml(report, options = {}) {
     const audioSummary = audioRef
       ? `${formatByteCount(audioRef.byteLength || 0)}${audioMeta && audioMeta.voice ? ` • ${audioMeta.voice}` : ""}`
       : "";
+    const audioDurationMs = Number(audioMeta && audioMeta.durationMs);
+    const safeAudioDurationMs = Number.isFinite(audioDurationMs) && audioDurationMs > 0
+      ? Math.max(0, Math.round(audioDurationMs))
+      : 0;
     const audioPanel = `<div class="section-text-audio" data-audio-role="caption-audio">
-  <div class="section-text-audio-controls">
-    <button type="button" class="section-text-audio-btn" data-audio-action="toggle">Play</button>
-    <button type="button" class="section-text-audio-btn" data-audio-action="restart">Restart</button>
-    <label class="section-text-audio-control">Timeline
-      <input type="range" class="section-text-audio-slider" data-audio-action="timeline" min="0" max="100" step="1" value="0">
-      <span class="section-text-audio-value" data-audio-role="timeline-value">0%</span>
+  <div class="viewer-player-bar">
+    <button type="button" class="section-text-audio-btn section-text-audio-btn-icon" data-audio-action="toggle" aria-label="Play narration" title="Play or pause narration"><span data-audio-role="toggle-icon">▶</span></button>
+    <button type="button" class="section-text-audio-btn section-text-audio-btn-icon" data-audio-action="restart" aria-label="Restart narration" title="Restart narration">↺</button>
+    <label class="section-text-audio-control section-text-audio-control-track" aria-label="Narration timeline">
+      <input type="range" class="section-text-audio-slider section-text-audio-slider-track" data-audio-action="timeline" min="0" max="100" step="0.1" value="0">
     </label>
-    <label class="section-text-audio-control">Tempo
-      <input type="range" class="section-text-audio-slider" data-audio-action="tempo" min="${SECTION_NARRATION_RATE_MIN}" max="${SECTION_NARRATION_RATE_MAX}" step="0.05" value="${narrationRate.toFixed(2)}">
-      <span class="section-text-audio-value" data-audio-role="tempo-value">${narrationRate.toFixed(2)}x</span>
-    </label>
+    <span class="section-text-audio-value" data-audio-role="timeline-value">00:00 | 00:00</span>
+    <details class="viewer-player-settings" data-viewer-settings>
+      <summary class="viewer-player-btn viewer-settings-btn" aria-label="Player settings" title="Player settings">⚙</summary>
+      <div class="viewer-settings-popover">
+        <label class="viewer-settings-row viewer-settings-row-tempo" title="Narration tempo" aria-label="Narration tempo">
+          <span class="viewer-settings-label">Tempo</span>
+          <input type="range" class="section-text-audio-slider section-text-audio-slider-tempo" data-audio-action="tempo" min="${SECTION_NARRATION_RATE_MIN}" max="${SECTION_NARRATION_RATE_MAX}" step="0.05" value="${narrationRate.toFixed(2)}">
+          <span class="section-text-audio-value section-text-audio-value-tempo" data-audio-role="tempo-value">${narrationRate.toFixed(2)}x</span>
+        </label>
+        <div class="viewer-settings-row">
+          <span class="viewer-settings-label">Hover fade</span>
+          <button type="button" class="viewer-player-btn viewer-controls-toggle-btn" data-viewer-action="toggle-controls" aria-label="Enable hover fade controls" title="Enable hover fade controls" aria-pressed="false">◐</button>
+        </div>
+        <div class="viewer-settings-row">
+          <span class="viewer-settings-label">Captions</span>
+          <button type="button" class="viewer-player-btn viewer-cc-toggle-btn" data-viewer-action="toggle-cc" aria-label="Hide captions" title="Hide captions" aria-pressed="true"><span class="viewer-cc-icon">CC</span></button>
+        </div>
+      </div>
+    </details>
+    <button type="button" class="viewer-player-btn viewer-fullscreen-btn" data-viewer-action="toggle-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">⛶</button>
   </div>
   ${audioSummary ? `<div class="section-text-audio-meta">${escapeHtml(audioSummary)}</div>` : ""}
   <div class="section-text-audio-status" data-audio-role="status">${escapeHtml(audioStatusText)}</div>
-  <audio data-audio-role="source" preload="metadata" src="${escapedAudioSrc}"></audio>
+  <audio data-audio-role="source" data-audio-duration-ms="${safeAudioDurationMs}" preload="metadata" src="${escapedAudioSrc}"></audio>
 </div>`;
-    return `<details class="section-text-caption" id="${safeId}">
-  <summary>${escapeHtml(String(label || "Section text"))} <span class="section-text-caption-meta">${escapeHtml(summaryMeta)}</span></summary>
-  <div class="section-text-caption-body">${captionBody}${audioPanel}</div>
-</details>`;
+    return `<div class="viewer-cc-bar${hasPayload || ref ? "" : " viewer-cc-empty"}" id="${safeId}" data-caption-role="panel">
+  <div class="viewer-cc-body">
+    <div class="viewer-cc-copy" data-cc-role="copy">
+      <div class="viewer-cc-meta-line">${escapeHtml(summaryMeta)}</div>
+      ${captionBody}
+    </div>
+    ${audioPanel}
+  </div>
+</div>`;
   };
 
   const burstData = derivedBursts.map((burst, i) => {
@@ -3905,17 +4047,56 @@ function buildExportHtml(report, options = {}) {
     bursts: burstData
   }).replace(/</g, "\\u003c");
   const burstInsertionPlan = buildBurstInsertionPlan(burstSourceEvents, events, derivedBursts);
-  const tocTimelineEvents = buildTimelineDisplayEvents(events, burstInsertionPlan);
-  const tocRows = tocTimelineEvents.map((ev, i) => {
-    const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
-    const stepTitle = escapeHtml(titleFor(ev));
-    const metaText = escapeHtml(tocMetaFor(ev));
-    return `<li><a href="#${stepId}" title="${escapeHtml(titleFor(ev))}">${i + 1}. ${stepTitle}</a>${metaText ? `<span>${metaText}</span>` : ""}</li>`;
-  }).join("\n");
 
-  const rowParts = [];
+  const slides = [];
+  const playlistRows = [];
   let sectionNumber = 0;
-  const appendExportBurstSlot = (burstIndexRaw) => {
+  const pushSlide = ({
+    id,
+    titleText,
+    metaText,
+    mediaHtml,
+    ccHtml,
+    isBurst = false,
+    urlHref = "",
+    urlLabel = "",
+    urlTitle = ""
+  }) => {
+    sectionNumber += 1;
+    const numeric = sectionNumber;
+    const normalizedId = normalizeSlideId(id, `section-${numeric}`);
+    const slideTitle = String(titleText || "Untitled section").trim() || "Untitled section";
+    const numberedTitle = `${numeric}. ${slideTitle}`;
+    const safeTitle = escapeHtml(numberedTitle);
+    const safePlaylistTitle = escapeHtml(slideTitle);
+    const safeMeta = escapeHtml(String(metaText || "").trim());
+    const safeHref = escapeHtml(String(urlHref || "").trim());
+    const safeUrlLabel = escapeHtml(String(urlLabel || "Open source page"));
+    const safeUrlTitle = escapeHtml(String(urlTitle || ""));
+    const safeMedia = mediaHtml || `<div class="viewer-media-shell"><div class="viewer-media-content"><div class="viewer-media-empty">No media captured for this section.</div></div></div>`;
+    const safeCc = ccHtml || buildExportSectionTextPanel(
+      `${normalizedId}-text`,
+      "Section text",
+      { ref: null, loaded: false, text: "" },
+      null,
+      { ref: null, loaded: false, dataUrl: "" },
+      null
+    );
+    const slide = `<article id="${normalizedId}" class="carousel-slide${isBurst ? " carousel-slide-burst" : ""}" data-slide-id="${normalizedId}" data-slide-title="${safeTitle}" data-slide-meta="${safeMeta}" data-slide-url-href="${safeHref}" data-slide-url-label="${safeUrlLabel}" data-slide-url-title="${safeUrlTitle}" aria-hidden="true">
+  ${safeMedia}
+  ${safeCc}
+</article>`;
+    slides.push({ id: normalizedId, html: slide });
+    playlistRows.push(`<button type="button" class="viewer-playlist-item" data-slide-target="${normalizedId}" aria-current="false">
+  <span class="viewer-playlist-index">${numeric}</span>
+  <span class="viewer-playlist-copy">
+    <span class="viewer-playlist-title">${safePlaylistTitle}</span>
+    ${safeMeta ? `<span class="viewer-playlist-meta">${safeMeta}</span>` : ""}
+  </span>
+</button>`);
+  };
+
+  const appendExportBurstSlide = (burstIndexRaw) => {
     const burstIndex = Number(burstIndexRaw);
     if (!Number.isFinite(burstIndex) || burstIndex < 0 || burstIndex >= burstData.length) return;
     const burst = burstData[burstIndex];
@@ -3930,33 +4111,40 @@ function buildExportHtml(report, options = {}) {
       burstAudioState,
       derivedBursts[burstIndex] && derivedBursts[burstIndex].burstAudioMeta
     );
-    sectionNumber += 1;
-    const burstTitle = escapeHtml(String((burst && burst.title) || `Interaction ${sectionNumber}`));
-    rowParts.push(
-      `<div id="${burstId}" class="step step-burst-export"><div class="step-title">${sectionNumber}. ${burstTitle}</div>${burstTextPanel}<div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div></div>`
-    );
+    const burstMedia = `<div class="viewer-media-shell">
+  <div class="viewer-media-content">
+    <div class="click-burst-export-slot" data-burst-index="${burstIndex}"></div>
+  </div>
+</div>`;
+    pushSlide({
+      id: burstId,
+      titleText: String((burst && burst.title) || "Interaction burst"),
+      metaText: String((burst && burst.meta) || "Interaction burst"),
+      mediaHtml: burstMedia,
+      ccHtml: burstTextPanel,
+      isBurst: true
+    });
   };
 
   (burstInsertionPlan.prelude || []).forEach(({ burstIndex }) => {
-    appendExportBurstSlot(burstIndex);
+    appendExportBurstSlide(burstIndex);
   });
+
   events.forEach((ev, i) => {
     const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
-    const stepTitle = escapeHtml(titleFor(ev));
-    const metaTs = escapeHtml(formatExportTimestamp(ev.ts || ""));
+    const stepTitleRaw = String(titleFor(ev) || "Workflow step");
+    const formattedTs = formatExportTimestamp(ev.ts || "");
     const parsedUrl = parseExportUrl(ev.url || "");
-    const metaUrlLabel = escapeHtml(parsedUrl.genericLabel || parsedUrl.shortLabel || "Open page");
-    const metaUrlTitle = escapeHtml(parsedUrl.fullLabel || parsedUrl.raw || "");
-    const metaUrlHref = escapeHtml(parsedUrl.safeHref || "");
     const screenshot = resolveScreenshotForEvent(ev);
     const annotation = safeDataImageUrl(ev.annotation || "");
     const img = screenshot ? `<div class="shot"><img id="step-shot-${i + 1}" src="${screenshot}" alt="Step screenshot"></div>` : "";
     const ann = screenshot && annotation ? `<img class="annot" src="${annotation}" alt="Step annotation">` : "";
-    const wrap = screenshot ? `<div class="shot-wrap">${img}${ann}</div>` : "";
-    const urlChip = metaUrlHref
-      ? `<a class="meta-chip meta-url" href="${metaUrlHref}" target="_blank" rel="noopener noreferrer" title="${metaUrlTitle}">${metaUrlLabel}</a>`
-      : `<span class="meta-chip meta-url" title="${metaUrlTitle}">${metaUrlLabel}</span>`;
-    const meta = `<div class="step-meta"><span class="meta-chip meta-time">${metaTs || "Time n/a"}</span>${urlChip}</div>`;
+    const fallbackReason = ev && ev.screenshotSkipReason
+      ? `Screenshot skipped (${ev.screenshotSkipReason}).`
+      : "Screenshot unavailable for this step.";
+    const mediaBody = screenshot
+      ? `<div class="shot-wrap">${img}${ann}</div>`
+      : `<div class="viewer-media-empty">${escapeHtml(fallbackReason)}</div>`;
     const stepTextState = resolveSectionTextForRef(ev && ev.sectionTextRef);
     const stepAudioState = resolveSectionAudioForRef(ev && ev.sectionAudioRef);
     const stepTextPanel = buildExportSectionTextPanel(
@@ -3967,15 +4155,34 @@ function buildExportHtml(report, options = {}) {
       stepAudioState,
       ev && ev.sectionAudioMeta
     );
-    sectionNumber += 1;
-    rowParts.push(`<div id="${stepId}" class="step"><div class="step-title">${sectionNumber}. ${stepTitle}</div>${meta}${wrap}${stepTextPanel}</div>`);
+    const mediaHtml = `<div class="viewer-media-shell"><div class="viewer-media-content">${mediaBody}</div></div>`;
+    const metaBits = [];
+    metaBits.push(formattedTs || "Time n/a");
+    const tocMeta = tocMetaForEvent(ev);
+    if (tocMeta) metaBits.push(tocMeta);
+    pushSlide({
+      id: stepId,
+      titleText: stepTitleRaw,
+      metaText: metaBits.join(" • "),
+      mediaHtml,
+      ccHtml: stepTextPanel,
+      urlHref: parsedUrl.safeHref || "",
+      urlLabel: parsedUrl.genericLabel || parsedUrl.shortLabel || "Open page",
+      urlTitle: parsedUrl.fullLabel || parsedUrl.raw || ""
+    });
 
     const insertions = burstInsertionPlan.byStepId.get(stepId) || [];
     insertions.forEach(({ burstIndex }) => {
-      appendExportBurstSlot(burstIndex);
+      appendExportBurstSlide(burstIndex);
     });
   });
-  const rows = rowParts.join("\n");
+
+  const slidesHtml = slides.length
+    ? slides.map((entry) => entry.html).join("\n")
+    : `<div class="viewer-empty">No steps captured.</div>`;
+  const playlistHtml = playlistRows.length
+    ? playlistRows.join("\n")
+    : `<div class="viewer-playlist-empty">No sections available.</div>`;
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${title}</title>
@@ -4012,162 +4219,17 @@ body{
   font-family:${fontStack};
   margin:12px;
   color:var(--ink);
-  background:${preset.bg};
+  background:
+    radial-gradient(1200px 500px at 20% 0%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 60%),
+    radial-gradient(900px 420px at 100% 100%, color-mix(in srgb, var(--accent-2) 10%, transparent), transparent 58%),
+    ${preset.bg};
   line-height:1.35;
 }
-.toc{
-  border:1px solid var(--edge);
-  border-radius:10px;
-  padding:6px 8px;
-  background:linear-gradient(180deg,var(--panel),var(--paper));
-  margin:6px 0 10px;
-  box-shadow:var(--shadow);
-}
-.toc h2{
-  margin:0 0 4px;
-  font-size:calc(var(--section-text-size) + 1px);
-  letter-spacing:var(--h1-letter-spacing);
-  text-transform:var(--h1-transform);
-  font-weight:var(--h1-weight);
-  color:var(--muted);
-}
-.toc ol{
-  margin:0;
-  padding:0;
-  list-style:none;
-}
-.toc.toc-layout-grid ol{
-  display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-  gap:3px 5px;
-}
-.toc.toc-layout-list ol{display:block}
-.toc.toc-layout-list li{margin:0 0 4px}
-.toc.toc-layout-list li:last-child{margin-bottom:0}
-.toc.toc-layout-columns ol{
-  display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:4px 8px;
-}
-.toc.toc-layout-bands ol{display:block}
-.toc.toc-layout-bands li{
-  margin:0 0 4px;
-  border-left:4px solid var(--accent);
-  border-radius:8px;
-  background:linear-gradient(90deg,var(--paper),var(--panel));
-}
-.toc.toc-layout-bands li:last-child{margin-bottom:0}
-.toc.toc-layout-outline ol{display:block}
-.toc.toc-layout-outline li{
-  margin:0 0 6px;
-  border-style:dashed;
-  border-width:1px;
-  border-color:var(--edge);
-  border-radius:9px;
-  background:transparent;
-}
-.toc.toc-layout-outline li:last-child{margin-bottom:0}
-.toc.toc-layout-minimal{
-  background:transparent;
-  box-shadow:none;
-  border-color:var(--edge);
-}
-.toc.toc-layout-minimal ol{display:block}
-.toc.toc-layout-minimal li{
-  border:1px solid var(--edge);
-  border-radius:8px;
-  background:linear-gradient(180deg,var(--paper),transparent);
-  padding:4px 6px;
-  margin:0 0 4px;
-}
-.toc.toc-layout-minimal li:last-child{margin-bottom:0}
-.toc li{
-  border:1px solid var(--edge);
-  border-radius:7px;
-  padding:3px 5px;
-  background:var(--panel);
-}
-.toc a{
-  display:block;
-  font-weight:var(--h2-weight);
-  letter-spacing:var(--h2-letter-spacing);
-  text-transform:var(--h2-transform);
-  color:var(--ink);
-  text-decoration:none;
-  font-size:var(--toc-text-size);
-  line-height:1.2;
-  white-space:normal;
-  word-break:break-word;
-  overflow-wrap:anywhere;
-}
-.toc a:hover{text-decoration:underline}
-.toc span{
-  display:block;
-  color:var(--muted);
-  font-size:calc(var(--toc-text-size) - 1.5px);
-  font-weight:400;
-  margin-top:0;
-  white-space:normal;
-  word-break:break-word;
-  overflow-wrap:anywhere;
-}
-.toc.toc-dense{padding:5px 6px}
-.toc.toc-dense ol{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:2px 4px}
-.toc.toc-dense li{padding:2px 4px}
-.toc.toc-dense a{font-size:calc(var(--toc-text-size) - 0.75px)}
-.toc.toc-dense span{font-size:calc(var(--toc-text-size) - 1.75px)}
-.step{
-  border:1px solid var(--edge);
-  border-radius:var(--radius);
-  padding:10px;
-  margin:8px 0;
-  background:var(--panel);
-  box-shadow:var(--shadow);
-  font-size:var(--section-text-size);
-}
-.step-title{
-  font-size:calc(var(--section-text-size) + 1px);
-  font-weight:var(--h2-weight);
-  letter-spacing:var(--h2-letter-spacing);
-  text-transform:var(--h2-transform);
-  margin-bottom:4px
-}
-.step-meta{
-  display:flex;
-  flex-wrap:wrap;
-  gap:6px;
-  margin-bottom:8px;
-}
-.meta-chip{
-  display:inline-flex;
-  align-items:center;
-  gap:4px;
-  max-width:100%;
-  padding:1px 6px;
-  border:1px solid var(--edge);
-  border-radius:999px;
-  background:linear-gradient(180deg,var(--paper),var(--panel));
-  color:var(--muted);
-  font-size:calc(var(--section-text-size) - 1.5px);
-  line-height:1.25;
-}
-.meta-time{font-variant-numeric:tabular-nums}
-.meta-time{flex:0 0 auto}
-.meta-url{
-  flex:0 1 172px;
-  color:var(--ink);
-  text-decoration:none;
-  min-width:0;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
-}
-.meta-url:hover{text-decoration:underline}
 .brand{
   display:flex;
   align-items:center;
   gap:10px;
-  margin-bottom:8px;
+  margin-bottom:10px;
   border:1px solid var(--edge);
   border-left:4px solid var(--accent);
   border-radius:14px;
@@ -4201,124 +4263,577 @@ body{
   background:linear-gradient(180deg,var(--paper),var(--panel));
   font-size:10.5px;
 }
-.burst-condensed-note{
-  margin-top:6px;
-  padding:6px 8px;
-  border:1px dashed var(--edge);
-  border-left:3px solid var(--accent);
-  border-radius:10px;
-  font-size:10px;
-  color:var(--muted);
-  background:linear-gradient(180deg,var(--paper),var(--panel));
+.viewer-shell{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 280px;
+  gap:12px;
+  align-items:stretch;
 }
-.burst-source-shot{
-  display:none !important;
-}
-.shot-wrap{position:relative;display:inline-block}
-.shot img{max-width:100%;border:1px solid var(--edge);border-radius:10px}
-.annot{position:absolute;left:0;top:0;width:100%;height:100%}
-.section-text-caption{
-  margin-top:8px;
+.viewer-stage{
+  position:relative;
   border:1px solid var(--edge);
-  border-left:3px solid var(--accent);
-  border-radius:10px;
-  background:linear-gradient(180deg,var(--paper),var(--panel));
+  border-radius:16px;
+  background:linear-gradient(180deg,var(--panel),var(--paper));
+  box-shadow:var(--shadow);
+  overflow:hidden;
+  width:100%;
+  min-height:700px;
+  height:min(86vh,980px);
 }
-.section-text-caption > summary{
-  cursor:pointer;
-  list-style:none;
+.carousel-window{
+  height:100%;
+  min-height:0;
+  overflow:hidden;
+  position:relative;
+}
+.carousel-track{
+  position:relative;
+  height:100%;
+}
+.carousel-slide{
+  position:absolute;
+  inset:0;
   display:flex;
+  flex-direction:column;
   justify-content:space-between;
-  align-items:center;
-  gap:8px;
-  padding:6px 8px;
-  font-size:calc(var(--section-text-size) - 1px);
-  font-weight:600;
+  gap:10px;
+  padding:66px 10px 10px;
+  opacity:0;
+  transform:translateX(18%);
+  transition:transform 320ms cubic-bezier(0.18,0.78,0.24,1), opacity 320ms ease;
+  pointer-events:none;
+  visibility:hidden;
 }
-.section-text-caption > summary::-webkit-details-marker{display:none}
-.section-text-caption-meta{
-  display:inline-flex;
+.carousel-slide.is-active{
+  opacity:1;
+  transform:translateX(0);
+  pointer-events:auto;
+  visibility:visible;
+  z-index:2;
+}
+.carousel-slide.is-entering-right{
+  opacity:0;
+  transform:translateX(18%);
+  visibility:visible;
+  z-index:3;
+}
+.carousel-slide.is-entering-left{
+  opacity:0;
+  transform:translateX(-18%);
+  visibility:visible;
+  z-index:3;
+}
+.carousel-slide.is-leaving-left{
+  opacity:0;
+  transform:translateX(-18%);
+  z-index:1;
+}
+.carousel-slide.is-leaving-right{
+  opacity:0;
+  transform:translateX(18%);
+  z-index:1;
+}
+.viewer-media-shell{
+  position:relative;
+  flex:1;
+  min-height:clamp(380px,62vh,880px);
+  border:1px solid var(--edge);
+  border-radius:12px;
+  background:#000;
+  overflow:hidden;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.viewer-media-content{
+  width:100%;
+  height:100%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:4px;
+}
+.viewer-media-empty{
+  color:#e2e8f0;
+  font-size:13px;
+  text-align:center;
+  border:1px dashed rgba(148, 163, 184, 0.55);
+  border-radius:10px;
+  background:rgba(15, 23, 42, 0.55);
+  padding:10px 12px;
+}
+.viewer-empty{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  height:100%;
+  min-height:320px;
+  color:var(--muted);
+  font-size:14px;
+}
+.viewer-arrow{
+  position:absolute;
+  top:50%;
+  transform:translateY(-50%);
+  z-index:7;
+  width:40px;
+  height:40px;
+  border-radius:999px;
+  border:1px solid var(--edge);
+  background:color-mix(in srgb, var(--paper) 76%, transparent);
+  color:var(--ink);
+  font-size:22px;
+  cursor:pointer;
+  transition:opacity 220ms ease, transform 180ms ease, background 180ms ease;
+}
+.viewer-arrow:hover{background:var(--paper)}
+.viewer-arrow:disabled{opacity:0.45;cursor:not-allowed}
+.viewer-arrow-prev{left:8px}
+.viewer-arrow-next{right:8px}
+.viewer-overlay{
+  position:absolute;
+  inset:8px 56px auto 56px;
+  z-index:6;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  min-height:44px;
+  padding:8px 12px;
+  border:1px solid color-mix(in srgb, var(--edge) 65%, transparent);
+  border-radius:10px;
+  background:color-mix(in srgb, var(--paper) 88%, transparent);
+  backdrop-filter:blur(2px);
+}
+.viewer-overlay-copy{
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  min-width:0;
+  flex:1 1 auto;
+}
+.viewer-overlay-title{
+  font-size:calc(var(--section-text-size) + 1px);
+  font-weight:var(--h2-weight);
+  letter-spacing:var(--h2-letter-spacing);
+  text-transform:var(--h2-transform);
+  line-height:1.25;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.viewer-overlay-meta{
+  color:var(--muted);
+  font-size:max(10px, calc(var(--section-text-size) - 2px));
+  margin-top:1px;
+  line-height:1.2;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.viewer-overlay-actions{
+  display:flex;
+  align-items:center;
+  gap:4px;
+  flex-wrap:nowrap;
+  flex:0 0 auto;
+}
+.viewer-overlay-btn{
+  appearance:none;
   border:1px solid var(--edge);
   border-radius:999px;
-  padding:1px 7px;
-  font-size:calc(var(--section-text-size) - 2px);
-  color:var(--muted);
+  display:inline-flex;
+  align-items:center;
+  background:var(--paper);
+  color:var(--ink);
+  cursor:pointer;
+  text-decoration:none;
+  font-size:10px;
+  min-height:22px;
+  padding:2px 8px;
+  white-space:nowrap;
 }
-.section-text-caption-body{
-  border-top:1px solid var(--edge);
+.viewer-overlay-btn:disabled{
+  opacity:0.55;
+  cursor:not-allowed;
+}
+.viewer-playlist{
+  border:1px solid var(--edge);
+  border-radius:16px;
+  background:linear-gradient(180deg,var(--panel),var(--paper));
+  box-shadow:var(--shadow);
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+}
+.viewer-playlist-head{
+  padding:10px 12px;
+  border-bottom:1px solid var(--edge);
+  font-size:12px;
+  color:var(--muted);
+  font-weight:600;
+  letter-spacing:0.02em;
+}
+.viewer-playlist-list{
+  overflow:auto;
+  padding:8px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.viewer-playlist-empty{
+  color:var(--muted);
+  font-size:12px;
+  padding:12px;
+}
+.viewer-playlist-item{
+  appearance:none;
+  border:1px solid var(--edge);
+  border-radius:10px;
+  background:var(--paper);
+  color:var(--ink);
+  text-align:left;
+  width:100%;
+  cursor:pointer;
+  display:flex;
+  align-items:flex-start;
+  gap:8px;
+  padding:7px 8px;
+}
+.viewer-playlist-item:hover{background:color-mix(in srgb, var(--panel) 45%, var(--paper))}
+.viewer-playlist-item[aria-current="true"]{
+  border-color:var(--accent);
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.viewer-playlist-index{
+  display:inline-flex;
+  min-width:20px;
+  justify-content:center;
+  border:1px solid var(--edge);
+  border-radius:999px;
+  font-size:10px;
+  color:var(--muted);
+  padding:1px 5px;
+  line-height:1.25;
+}
+.viewer-playlist-copy{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  min-width:0;
+}
+.viewer-playlist-title{
+  font-size:11px;
+  line-height:1.3;
+  white-space:normal;
+  word-break:break-word;
+}
+.viewer-playlist-meta{
+  color:var(--muted);
+  font-size:10px;
+  line-height:1.2;
+  max-height:0;
+  opacity:0;
+  overflow:hidden;
+  transform:translateY(-2px);
+  transition:max-height 180ms ease, opacity 160ms ease, transform 180ms ease;
+}
+.viewer-playlist-item:hover .viewer-playlist-meta,
+.viewer-playlist-item:focus-visible .viewer-playlist-meta,
+.viewer-playlist-item:active .viewer-playlist-meta{
+  max-height:44px;
+  opacity:1;
+  transform:translateY(0);
+}
+.viewer-cc-bar{
+  border:1px solid var(--edge);
+  border-left:4px solid var(--accent);
+  border-radius:12px;
+  background:linear-gradient(180deg,var(--paper),var(--panel));
+  box-shadow:0 6px 14px rgba(15,23,42,0.12);
+}
+.viewer-cc-body{
   padding:8px;
   font-size:calc(var(--section-text-size) - 1px);
 }
-.section-text-caption-body pre{
+.viewer-cc-copy{
+  margin-bottom:8px;
+}
+.viewer-shell.cc-disabled .viewer-cc-copy{
+  display:none;
+}
+.viewer-cc-meta-line{
+  margin:0 0 6px;
+  color:var(--muted);
+  font-family:inherit;
+  white-space:pre-wrap;
+  font-size:max(9px, calc(var(--section-text-size) - 3px));
+}
+.viewer-cc-pre{
   margin:0;
-  max-height:240px;
+  max-height:130px;
   overflow:auto;
   white-space:pre-wrap;
   word-break:break-word;
   font-family:inherit;
-  line-height:1.4;
+  line-height:1.35;
 }
 .section-text-caption-empty{
   color:var(--muted);
   font-style:italic;
 }
 .section-text-audio{
-  margin-top:8px;
-  border-top:1px dashed var(--edge);
-  padding-top:8px;
+  margin-top:4px;
 }
-.section-text-audio-controls{
+.viewer-player-bar{
   display:flex;
-  flex-wrap:wrap;
+  flex-wrap:nowrap;
   align-items:center;
-  gap:6px 8px;
+  gap:6px;
+  padding:6px 8px;
+  border:1px solid color-mix(in srgb, var(--edge) 75%, transparent);
+  border-radius:999px;
+  background:linear-gradient(180deg, rgba(12, 19, 35, 0.94), rgba(22, 30, 49, 0.9));
+  color:#e2e8f0;
+  transition:opacity 220ms ease, transform 220ms ease;
+}
+.viewer-shell.controls-hidden:not(.controls-awake) .viewer-player-bar{
+  opacity:0;
+  pointer-events:none;
+  transform:translateY(8px);
 }
 .section-text-audio-btn{
   appearance:none;
-  border:1px solid var(--edge);
-  background:var(--paper);
-  color:var(--ink);
+  border:1px solid rgba(226, 232, 240, 0.35);
+  background:rgba(30, 41, 59, 0.72);
+  color:#e2e8f0;
   border-radius:999px;
-  font-size:10px;
-  padding:2px 9px;
+  font-size:12px;
+  min-width:28px;
+  min-height:28px;
+  line-height:1;
+  padding:0 8px;
   cursor:pointer;
 }
 .section-text-audio-btn:disabled{
   opacity:0.55;
   cursor:not-allowed;
 }
+.section-text-audio-btn-icon{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  font-size:14px;
+}
 .section-text-audio-control{
   display:inline-flex;
   align-items:center;
-  gap:6px;
-  color:var(--muted);
+  gap:5px;
+  color:#cbd5e1;
   font-size:10px;
+}
+.section-text-audio-control-track{
+  flex:1 1 auto;
+  min-width:110px;
 }
 .section-text-audio-slider{
-  width:108px;
+  width:100%;
 }
-.section-text-audio-select{
-  min-width:170px;
-  max-width:220px;
-  border:1px solid var(--edge);
-  border-radius:8px;
-  background:var(--paper);
-  color:var(--ink);
-  font-size:10px;
-  padding:2px 6px;
+.section-text-audio-slider-track{
+  min-width:120px;
+}
+.section-text-audio-control-tempo{
+  flex:1 1 auto;
+  min-width:130px;
+}
+.section-text-audio-slider-tempo{
+  min-width:110px;
+}
+.section-text-audio-tempo-icon{
+  font-size:11px;
+  color:#cbd5e1;
 }
 .section-text-audio-value{
-  min-width:36px;
+  min-width:38px;
   text-align:right;
-  color:var(--muted);
+  color:#cbd5e1;
   font-size:10px;
+}
+.section-text-audio-value-tempo{
+  min-width:44px;
 }
 .section-text-audio-status{
   margin-top:6px;
   color:var(--muted);
   font-size:10px;
 }
-.click-burst-export-slot{margin:8px 0}
+.section-text-audio-meta{
+  margin-top:5px;
+  color:var(--muted);
+  font-size:10px;
+}
+.viewer-shell.cc-disabled .section-text-audio-status,
+.viewer-shell.cc-disabled .section-text-audio-meta{
+  display:none;
+}
+.viewer-player-btn{
+  appearance:none;
+  border:1px solid rgba(226, 232, 240, 0.35);
+  border-radius:999px;
+  background:rgba(30, 41, 59, 0.72);
+  color:#e2e8f0;
+  min-width:28px;
+  min-height:28px;
+  padding:0 8px;
+  font-size:12px;
+  line-height:1;
+  cursor:pointer;
+}
+.viewer-player-btn:disabled{
+  opacity:0.55;
+  cursor:not-allowed;
+}
+.viewer-player-btn[aria-pressed="true"]{
+  border-color:rgba(14, 165, 233, 0.85);
+  box-shadow:0 0 0 1px rgba(14, 165, 233, 0.4);
+}
+.viewer-cc-toggle-btn{
+  font-weight:700;
+  letter-spacing:0.02em;
+}
+.viewer-cc-icon{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  font-size:10px;
+}
+.viewer-player-settings{
+  position:relative;
+  margin-left:auto;
+}
+.viewer-player-settings > summary{
+  list-style:none;
+  cursor:pointer;
+}
+.viewer-player-settings > summary::-webkit-details-marker{
+  display:none;
+}
+.viewer-settings-btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:34px;
+  min-height:34px;
+  font-size:18px;
+  padding:0 10px;
+}
+.viewer-fullscreen-btn{
+  min-width:34px;
+  min-height:34px;
+  font-size:17px;
+  padding:0 10px;
+}
+.viewer-settings-popover{
+  position:absolute;
+  right:0;
+  bottom:calc(100% + 8px);
+  width:min(260px, calc(100vw - 48px));
+  padding:8px;
+  border:1px solid color-mix(in srgb, var(--edge) 75%, transparent);
+  border-radius:10px;
+  background:linear-gradient(180deg, rgba(12, 19, 35, 0.96), rgba(22, 30, 49, 0.95));
+  box-shadow:0 8px 18px rgba(0,0,0,0.35);
+  opacity:0;
+  pointer-events:none;
+  transform:translateY(4px);
+  transition:opacity 160ms ease, transform 160ms ease;
+  z-index:9;
+}
+.viewer-player-settings[open] .viewer-settings-popover{
+  opacity:1;
+  pointer-events:auto;
+  transform:translateY(0);
+}
+.viewer-settings-row{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  color:#e2e8f0;
+  font-size:10px;
+  margin-bottom:7px;
+}
+.viewer-settings-row:last-child{
+  margin-bottom:0;
+}
+.viewer-settings-row-tempo .section-text-audio-slider-tempo{
+  flex:1 1 auto;
+  min-width:96px;
+}
+.viewer-settings-label{
+  color:#cbd5e1;
+  min-width:64px;
+}
+.viewer-settings-row .viewer-player-btn{
+  margin-left:auto;
+}
+.shot-wrap{
+  position:relative;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  height:100%;
+}
+.shot{
+  width:100%;
+  height:100%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.shot img{
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  border:1px solid var(--edge);
+  border-radius:10px;
+  background:#000;
+}
+.annot{
+  position:absolute;
+  left:0;
+  top:0;
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  pointer-events:none;
+}
+.viewer-stage:fullscreen,
+.viewer-stage:-webkit-full-screen{
+  width:100vw;
+  height:100vh;
+  min-height:100vh;
+  border-radius:0;
+  border-width:0;
+}
+.viewer-stage:fullscreen .carousel-window,
+.viewer-stage:-webkit-full-screen .carousel-window{
+  height:100%;
+  min-height:0;
+}
+.viewer-stage:fullscreen .carousel-slide,
+.viewer-stage:-webkit-full-screen .carousel-slide{
+  padding:62px 10px 8px;
+}
+.viewer-stage:fullscreen .viewer-media-shell,
+.viewer-stage:-webkit-full-screen .viewer-media-shell{
+  min-height:0;
+}
+.viewer-stage:fullscreen .viewer-media-content,
+.viewer-stage:-webkit-full-screen .viewer-media-content{
+  padding:2px;
+}
+.click-burst-export-slot{width:100%}
 .click-burst-export-card{
   border:1px solid var(--edge);
   border-left:4px solid var(--accent);
@@ -4397,10 +4912,107 @@ body{
   color:var(--muted);
   font-size:10px;
 }
-@media print {
-  body{margin:0.45in;background:#fff}
-  .toc{page-break-inside:avoid}
-  .step{page-break-inside:avoid;box-shadow:none}
+@media (max-width: 1080px){
+  .viewer-shell{
+    grid-template-columns:1fr;
+  }
+  .viewer-stage{
+    min-height:620px;
+    height:min(82vh,880px);
+  }
+  .carousel-window{
+    min-height:0;
+  }
+  .viewer-playlist{
+    max-height:230px;
+  }
+  .viewer-playlist-list{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  }
+}
+@media (max-width: 720px){
+  body{margin:8px}
+  .viewer-stage{
+    min-height:540px;
+    height:min(80vh,760px);
+  }
+  .carousel-window{min-height:0}
+  .viewer-overlay{
+    inset:8px 8px auto 8px;
+  }
+  .viewer-arrow{
+    width:34px;
+    height:34px;
+    font-size:18px;
+  }
+  .viewer-arrow-prev{left:6px}
+  .viewer-arrow-next{right:6px}
+  .carousel-slide{
+    padding:64px 8px 8px;
+  }
+  .viewer-player-bar{
+    flex-wrap:wrap;
+    border-radius:12px;
+  }
+  .viewer-player-settings{
+    margin-left:0;
+  }
+  .viewer-settings-popover{
+    right:auto;
+    left:0;
+    width:min(280px, calc(100vw - 32px));
+  }
+  .section-text-audio-control-track{
+    flex:1 1 100%;
+    order:9;
+  }
+  .section-text-audio-slider-track{
+    min-width:0;
+  }
+}
+@media print{
+  body{
+    margin:0.45in;
+    background:#fff;
+  }
+  .viewer-shell{
+    display:block;
+  }
+  .viewer-stage{
+    border:0;
+    box-shadow:none;
+    min-height:auto;
+    overflow:visible;
+    background:#fff;
+  }
+  .carousel-window{
+    min-height:auto;
+    overflow:visible;
+  }
+  .carousel-track{
+    display:block;
+  }
+  .carousel-slide{
+    position:static;
+    opacity:1 !important;
+    transform:none !important;
+    visibility:visible !important;
+    pointer-events:auto;
+    page-break-inside:avoid;
+    margin:0 0 12px;
+    border:1px solid #ddd;
+    border-radius:10px;
+    padding:10px;
+    background:#fff;
+  }
+  .viewer-arrow,.viewer-overlay,.viewer-playlist{display:none !important}
+  .viewer-media-shell{min-height:200px}
+  .viewer-player-bar,
+  .section-text-audio-status,
+  .section-text-audio-meta{
+    display:none !important;
+  }
 }
 </style></head><body>
 <div class="brand">
@@ -4408,13 +5020,442 @@ body{
   <div><h1>${title}</h1>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
 </div>
 ${quickPreviewNotice}
-<section class="${tocClass}">
-  <h2>Table of Contents</h2>
-  <ol>${tocRows || "<li>No steps captured.</li>"}</ol>
-</section>
-${rows}
+<div class="viewer-shell controls-visible cc-enabled" id="viewer-shell">
+  <div class="viewer-stage" id="viewer-stage">
+    <button type="button" class="viewer-arrow viewer-arrow-prev" id="viewer-prev" aria-label="Previous section">❮</button>
+    <div class="carousel-window" id="carousel-window" aria-live="polite">
+      <div class="carousel-track" id="carousel-track">
+        ${slidesHtml}
+      </div>
+    </div>
+    <button type="button" class="viewer-arrow viewer-arrow-next" id="viewer-next" aria-label="Next section">❯</button>
+    <div class="viewer-overlay" id="viewer-overlay">
+      <div class="viewer-overlay-copy">
+        <div class="viewer-overlay-title" id="viewer-overlay-title">Section</div>
+        <div class="viewer-overlay-meta" id="viewer-overlay-meta"></div>
+      </div>
+      <div class="viewer-overlay-actions">
+        <a id="viewer-open-url" class="viewer-overlay-btn" href="#" target="_blank" rel="noopener noreferrer">Open source page</a>
+      </div>
+    </div>
+  </div>
+  <aside class="viewer-playlist" aria-label="Section navigator">
+    <div class="viewer-playlist-head">Section Queue</div>
+    <div class="viewer-playlist-list" id="viewer-playlist">
+      ${playlistHtml}
+    </div>
+  </aside>
+</div>
 <script>
-(function () {
+(function initCarouselViewer() {
+  var shell = document.getElementById("viewer-shell");
+  if (!shell) return;
+  var stage = document.getElementById("viewer-stage");
+  var slides = Array.prototype.slice.call(shell.querySelectorAll(".carousel-slide[data-slide-id]"));
+  var playlistButtons = Array.prototype.slice.call(shell.querySelectorAll(".viewer-playlist-item[data-slide-target]"));
+  var prevBtn = document.getElementById("viewer-prev");
+  var nextBtn = document.getElementById("viewer-next");
+  var overlayTitle = document.getElementById("viewer-overlay-title");
+  var overlayMeta = document.getElementById("viewer-overlay-meta");
+  var openUrl = document.getElementById("viewer-open-url");
+  var toggleControlsButtons = Array.prototype.slice.call(shell.querySelectorAll("[data-viewer-action='toggle-controls']"));
+  var toggleCcButtons = Array.prototype.slice.call(shell.querySelectorAll("[data-viewer-action='toggle-cc']"));
+  var fullscreenButtons = Array.prototype.slice.call(shell.querySelectorAll("[data-viewer-action='toggle-fullscreen']"));
+  var settingsMenus = Array.prototype.slice.call(shell.querySelectorAll(".viewer-player-settings"));
+  if (!slides.length) {
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    toggleControlsButtons.forEach(function (btn) { btn.disabled = true; });
+    toggleCcButtons.forEach(function (btn) { btn.disabled = true; });
+    fullscreenButtons.forEach(function (btn) { btn.disabled = true; });
+    if (openUrl) {
+      openUrl.style.display = "none";
+      openUrl.setAttribute("aria-hidden", "true");
+    }
+    return;
+  }
+
+  var focusSelector = "a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]";
+  var currentIndex = 0;
+  var controlsMode = "visible";
+  var ccEnabled = true;
+  var controlsHideTimer = null;
+  var animating = false;
+
+  function closeSettingsMenus(exceptMenu) {
+    settingsMenus.forEach(function (menu) {
+      if (!menu || menu === exceptMenu) return;
+      if (menu.open) menu.open = false;
+    });
+  }
+
+  function normalizeIndex(index) {
+    var total = slides.length;
+    if (!total) return 0;
+    var value = Number(index);
+    if (!Number.isFinite(value)) return 0;
+    var out = Math.floor(value) % total;
+    if (out < 0) out += total;
+    return out;
+  }
+
+  function updateHash(id) {
+    if (!id) return;
+    var nextHash = "#" + id;
+    if (location.hash === nextHash) return;
+    try {
+      if (typeof history !== "undefined" && history && typeof history.replaceState === "function") {
+        history.replaceState(null, "", nextHash);
+      } else {
+        location.hash = nextHash;
+      }
+    } catch (_) {}
+  }
+
+  function readHashIndex() {
+    var hash = String(location.hash || "").replace(/^#/, "").trim();
+    if (!hash) return -1;
+    for (var i = 0; i < slides.length; i++) {
+      if (slides[i].id === hash) return i;
+    }
+    return -1;
+  }
+
+  function setSlideTabState(slide, active) {
+    if (!slide) return;
+    slide.setAttribute("aria-hidden", active ? "false" : "true");
+    var focusables = Array.prototype.slice.call(slide.querySelectorAll(focusSelector));
+    focusables.forEach(function (node) {
+      if (!node || node === slide) return;
+      if (active) {
+        if (node.hasAttribute("data-viewer-tabindex")) {
+          var prev = node.getAttribute("data-viewer-tabindex");
+          node.removeAttribute("data-viewer-tabindex");
+          if (prev === "__none__") node.removeAttribute("tabindex");
+          else node.setAttribute("tabindex", prev);
+        }
+        return;
+      }
+      if (!node.hasAttribute("data-viewer-tabindex")) {
+        var current = node.getAttribute("tabindex");
+        node.setAttribute("data-viewer-tabindex", current === null ? "__none__" : current);
+      }
+      node.setAttribute("tabindex", "-1");
+      if (document.activeElement === node) {
+        try { node.blur(); } catch (_) {}
+      }
+    });
+  }
+
+  function syncPlaylist(index) {
+    var activeSlide = slides[index];
+    var activeId = activeSlide ? activeSlide.getAttribute("data-slide-id") : "";
+    playlistButtons.forEach(function (btn) {
+      var matches = String(btn.getAttribute("data-slide-target") || "") === activeId;
+      btn.setAttribute("aria-current", matches ? "true" : "false");
+      if (matches && typeof btn.scrollIntoView === "function") {
+        try { btn.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (_) {}
+      }
+    });
+  }
+
+  function updateOverlay(index) {
+    var slide = slides[index];
+    if (!slide) return;
+    if (overlayTitle) overlayTitle.textContent = String(slide.getAttribute("data-slide-title") || "Section");
+    if (overlayMeta) overlayMeta.textContent = String(slide.getAttribute("data-slide-meta") || "");
+    if (!openUrl) return;
+    var href = String(slide.getAttribute("data-slide-url-href") || "");
+    var label = String(slide.getAttribute("data-slide-url-label") || "Open source page");
+    var title = String(slide.getAttribute("data-slide-url-title") || "");
+    if (!href) {
+      openUrl.style.display = "none";
+      openUrl.setAttribute("aria-hidden", "true");
+      openUrl.removeAttribute("href");
+      openUrl.textContent = "Open source page";
+      return;
+    }
+    openUrl.style.display = "";
+    openUrl.setAttribute("aria-hidden", "false");
+    openUrl.setAttribute("href", href);
+    openUrl.textContent = label;
+    openUrl.title = title || label;
+  }
+
+  function dispatchSlideChange(index) {
+    var slide = slides[index];
+    if (!slide) return;
+    var detail = { index: index, slideId: String(slide.getAttribute("data-slide-id") || "") };
+    try {
+      window.dispatchEvent(new CustomEvent("viewer:slidechange", { detail: detail }));
+    } catch (_) {
+      var evt = document.createEvent("Event");
+      evt.initEvent("viewer:slidechange", true, true);
+      evt.detail = detail;
+      window.dispatchEvent(evt);
+    }
+  }
+
+  function wakeControls() {
+    if (controlsMode !== "hidden") return;
+    shell.classList.add("controls-awake");
+    if (controlsHideTimer) clearTimeout(controlsHideTimer);
+    controlsHideTimer = setTimeout(function () {
+      shell.classList.remove("controls-awake");
+    }, 1600);
+  }
+
+  function setControlsMode(mode) {
+    controlsMode = mode === "hidden" ? "hidden" : "visible";
+    shell.classList.toggle("controls-visible", controlsMode === "visible");
+    shell.classList.toggle("controls-hidden", controlsMode === "hidden");
+    toggleControlsButtons.forEach(function (btn) {
+      if (!btn) return;
+      btn.textContent = controlsMode === "visible" ? "◐" : "●";
+      btn.title = controlsMode === "visible" ? "Enable hover fade controls" : "Keep controls visible";
+      btn.setAttribute("aria-label", controlsMode === "visible" ? "Enable hover fade controls" : "Keep controls visible");
+      btn.setAttribute("aria-pressed", controlsMode === "hidden" ? "true" : "false");
+    });
+    if (controlsMode === "hidden") {
+      wakeControls();
+    } else {
+      shell.classList.remove("controls-awake");
+      if (controlsHideTimer) clearTimeout(controlsHideTimer);
+    }
+  }
+
+  function setCcEnabled(enabled) {
+    ccEnabled = !!enabled;
+    shell.classList.toggle("cc-enabled", ccEnabled);
+    shell.classList.toggle("cc-disabled", !ccEnabled);
+    toggleCcButtons.forEach(function (btn) {
+      if (!btn) return;
+      btn.title = ccEnabled ? "Hide captions" : "Show captions";
+      btn.setAttribute("aria-label", ccEnabled ? "Hide captions" : "Show captions");
+      btn.setAttribute("aria-pressed", ccEnabled ? "true" : "false");
+      btn.classList.toggle("is-disabled", !ccEnabled);
+    });
+  }
+
+  function isStageFullscreen() {
+    if (typeof document === "undefined") return false;
+    var current = document.fullscreenElement || document.webkitFullscreenElement || null;
+    if (!current || !stage) return false;
+    return current === stage;
+  }
+
+  function syncFullscreenButtons() {
+    var active = isStageFullscreen();
+    fullscreenButtons.forEach(function (btn) {
+      if (!btn) return;
+      btn.textContent = active ? "🗗" : "⛶";
+      btn.title = active ? "Exit fullscreen" : "Enter fullscreen";
+      btn.setAttribute("aria-label", active ? "Exit fullscreen" : "Enter fullscreen");
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+
+  function toggleFullscreen() {
+    if (!stage) return;
+    var doc = document;
+    var current = doc.fullscreenElement || doc.webkitFullscreenElement || null;
+    if (current === stage) {
+      if (typeof doc.exitFullscreen === "function") {
+        doc.exitFullscreen().catch(function () {});
+      } else if (typeof doc.webkitExitFullscreen === "function") {
+        doc.webkitExitFullscreen();
+      }
+      return;
+    }
+    if (typeof stage.requestFullscreen === "function") {
+      stage.requestFullscreen().catch(function () {});
+    } else if (typeof stage.webkitRequestFullscreen === "function") {
+      stage.webkitRequestFullscreen();
+    }
+  }
+
+  function activateImmediate(index, shouldUpdateHash) {
+    currentIndex = normalizeIndex(index);
+    slides.forEach(function (slide, idx) {
+      var active = idx === currentIndex;
+      slide.classList.remove("is-entering-right", "is-entering-left", "is-leaving-left", "is-leaving-right");
+      slide.classList.toggle("is-active", active);
+      slide.style.visibility = active ? "visible" : "hidden";
+      setSlideTabState(slide, active);
+    });
+    syncPlaylist(currentIndex);
+    updateOverlay(currentIndex);
+    if (shouldUpdateHash !== false) {
+      updateHash(String(slides[currentIndex].getAttribute("data-slide-id") || ""));
+    }
+    closeSettingsMenus();
+    dispatchSlideChange(currentIndex);
+  }
+
+  function goToSlide(targetIndex, direction, options) {
+    var opts = options && typeof options === "object" ? options : {};
+    if (!slides.length) return;
+    var nextIndex = normalizeIndex(targetIndex);
+    if (nextIndex === currentIndex || animating) {
+      if (opts.updateHash) updateHash(String(slides[nextIndex].getAttribute("data-slide-id") || ""));
+      return;
+    }
+    var dir = direction === "prev" ? "prev" : "next";
+    var currentSlide = slides[currentIndex];
+    var nextSlide = slides[nextIndex];
+    animating = true;
+    nextSlide.classList.remove("is-leaving-left", "is-leaving-right");
+    nextSlide.style.visibility = "visible";
+    nextSlide.classList.add(dir === "next" ? "is-entering-right" : "is-entering-left");
+    setSlideTabState(nextSlide, true);
+
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        currentSlide.classList.remove("is-entering-right", "is-entering-left");
+        currentSlide.classList.add(dir === "next" ? "is-leaving-left" : "is-leaving-right");
+        currentSlide.classList.remove("is-active");
+        nextSlide.classList.add("is-active");
+        nextSlide.classList.remove("is-entering-right", "is-entering-left");
+        setSlideTabState(currentSlide, false);
+        currentIndex = nextIndex;
+        syncPlaylist(currentIndex);
+        updateOverlay(currentIndex);
+        if (opts.updateHash !== false) {
+          updateHash(String(nextSlide.getAttribute("data-slide-id") || ""));
+        }
+        closeSettingsMenus();
+        dispatchSlideChange(currentIndex);
+        wakeControls();
+        setTimeout(function () {
+          currentSlide.classList.remove("is-leaving-left", "is-leaving-right");
+          currentSlide.style.visibility = "hidden";
+          animating = false;
+        }, 360);
+      });
+    });
+  }
+
+  playlistButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var targetId = String(btn.getAttribute("data-slide-target") || "");
+      var idx = slides.findIndex(function (slide) {
+        return String(slide.getAttribute("data-slide-id") || "") === targetId;
+      });
+      if (idx < 0) return;
+      var dir = idx > currentIndex ? "next" : "prev";
+      goToSlide(idx, dir, { updateHash: true });
+    });
+  });
+
+  if (prevBtn) {
+    prevBtn.addEventListener("click", function () {
+      goToSlide(currentIndex - 1, "prev", { updateHash: true });
+    });
+  }
+  if (nextBtn) {
+    nextBtn.addEventListener("click", function () {
+      goToSlide(currentIndex + 1, "next", { updateHash: true });
+    });
+  }
+  toggleControlsButtons.forEach(function (btn) {
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      setControlsMode(controlsMode === "visible" ? "hidden" : "visible");
+    });
+  });
+  toggleCcButtons.forEach(function (btn) {
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      setCcEnabled(!ccEnabled);
+    });
+  });
+  fullscreenButtons.forEach(function (btn) {
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      toggleFullscreen();
+    });
+  });
+  settingsMenus.forEach(function (menu) {
+    if (!menu) return;
+    menu.addEventListener("toggle", function () {
+      if (!menu.open) return;
+      closeSettingsMenus(menu);
+      wakeControls();
+    });
+  });
+
+  var onWake = function () { wakeControls(); };
+  if (stage) {
+    stage.addEventListener("mousemove", onWake);
+    stage.addEventListener("focusin", onWake);
+    stage.addEventListener("mouseenter", onWake);
+    stage.addEventListener("touchstart", onWake, { passive: true });
+  }
+
+  document.addEventListener("keydown", function (event) {
+    if (!event) return;
+    var key = String(event.key || "");
+    if (key === "Escape") {
+      closeSettingsMenus();
+      wakeControls();
+      return;
+    }
+    var target = event.target;
+    if (target && target.closest && target.closest("input, textarea, select, button, [contenteditable='true']")) return;
+    if (key === "ArrowRight") {
+      event.preventDefault();
+      goToSlide(currentIndex + 1, "next", { updateHash: true });
+      return;
+    }
+    if (key === "ArrowLeft") {
+      event.preventDefault();
+      goToSlide(currentIndex - 1, "prev", { updateHash: true });
+      return;
+    }
+    if (key === "Home") {
+      event.preventDefault();
+      goToSlide(0, "prev", { updateHash: true });
+      return;
+    }
+    if (key === "End") {
+      event.preventDefault();
+      goToSlide(slides.length - 1, "next", { updateHash: true });
+      return;
+    }
+    wakeControls();
+  });
+  document.addEventListener("click", function (event) {
+    var target = event && event.target ? event.target : null;
+    settingsMenus.forEach(function (menu) {
+      if (!menu || !menu.open) return;
+      if (target && menu.contains(target)) return;
+      menu.open = false;
+    });
+  });
+
+  window.addEventListener("hashchange", function () {
+    var idx = readHashIndex();
+    if (idx < 0 || idx === currentIndex) return;
+    goToSlide(idx, idx > currentIndex ? "next" : "prev", { updateHash: false });
+  });
+  window.addEventListener("fullscreenchange", syncFullscreenButtons);
+  window.addEventListener("webkitfullscreenchange", syncFullscreenButtons);
+
+  window.addEventListener("beforeunload", function () {
+    if (controlsHideTimer) clearTimeout(controlsHideTimer);
+  });
+
+  setControlsMode("visible");
+  setCcEnabled(true);
+  syncFullscreenButtons();
+  if (slides.length <= 1) {
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+  }
+  var initialFromHash = readHashIndex();
+  activateImmediate(initialFromHash >= 0 ? initialFromHash : 0, false);
+})();
+(function initBurstPlayers() {
   var payload = ${burstDataJson};
   var slots = Array.prototype.slice.call(document.querySelectorAll(".click-burst-export-slot[data-burst-index]"));
   if (!slots.length) return;
@@ -4477,6 +5518,7 @@ ${rows}
       slot.remove();
       return;
     }
+    var parentSlide = slot.closest(".carousel-slide");
     var frames = Array.isArray(burst && burst.frames) ? burst.frames : [];
     if (frames.length < 2) {
       slot.remove();
@@ -4587,9 +5629,13 @@ ${rows}
         return;
       }
       var frameIndex = 0;
-      var isPlaying = autoPlay;
+      var isPlaying = false;
       var timer = null;
       var speedMultiplier = defaultSpeedMultiplier;
+
+      function isActiveSlide() {
+        return !parentSlide || parentSlide.classList.contains("is-active");
+      }
 
       function drawFrame(i) {
         var frame = loaded[i];
@@ -4621,20 +5667,19 @@ ${rows}
 
       function startLoop() {
         stopLoop();
-        if (!isPlaying || loaded.length < 2) return;
+        if (!isPlaying || loaded.length < 2 || !isActiveSlide()) return;
         var baseFrameDurationMs = Math.max(16, Math.round(1000 / sourceFps));
         var frameDurationMs = Math.max(16, Math.round(baseFrameDurationMs / speedMultiplier));
         timer = setInterval(function () {
           frameIndex += 1;
-          if (frameIndex >= loaded.length) {
-            frameIndex = 0;
-          }
+          if (frameIndex >= loaded.length) frameIndex = 0;
           drawFrame(frameIndex);
         }, frameDurationMs);
       }
 
       function setPlaying(next) {
-        isPlaying = !!next;
+        var shouldPlay = !!next && isActiveSlide();
+        isPlaying = shouldPlay;
         toggle.textContent = isPlaying ? "Pause" : "Play";
         startLoop();
       }
@@ -4648,15 +5693,20 @@ ${rows}
         speedValue.textContent = speedMultiplier.toFixed(2) + "x";
         if (isPlaying) startLoop();
       });
+      window.addEventListener("viewer:slidechange", function () {
+        if (!isActiveSlide()) {
+          setPlaying(false);
+        }
+      });
 
       drawFrame(frameIndex);
-      setPlaying(autoPlay);
+      setPlaying(autoPlay && isActiveSlide());
     });
     slot.appendChild(card);
   });
 })();
-(function () {
-  var captions = Array.prototype.slice.call(document.querySelectorAll(".section-text-caption"));
+(function initViewerCaptions() {
+  var captions = Array.prototype.slice.call(document.querySelectorAll(".viewer-cc-bar[data-caption-role='panel']"));
   if (!captions.length) return;
   var minRate = ${SECTION_NARRATION_RATE_MIN};
   var maxRate = ${SECTION_NARRATION_RATE_MAX};
@@ -4674,24 +5724,105 @@ ${rows}
     return Number(clamp(value, minRate, maxRate, defaultRate).toFixed(2));
   }
 
+  function normalizeSeconds(value) {
+    var numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) return 0;
+    return numeric;
+  }
+
+  function formatClock(value) {
+    var total = Math.floor(normalizeSeconds(value));
+    var mins = Math.floor(total / 60);
+    var secs = total % 60;
+    return String(mins).padStart(2, "0") + ":" + String(secs).padStart(2, "0");
+  }
+
+  function formatTimelineClock(current, total) {
+    return formatClock(current) + " | " + formatClock(total);
+  }
+
   function createAudioController(audioEl, initialRate, onUpdate) {
     var state = "idle";
     var rate = normalizeRate(initialRate);
     var hasAudio = !!(audioEl && String(audioEl.getAttribute("src") || "").trim());
+    var fallbackDurationSeconds = 0;
+    var rafToken = null;
+    if (audioEl) {
+      var fallbackDurationMs = Number(audioEl.getAttribute("data-audio-duration-ms"));
+      if (Number.isFinite(fallbackDurationMs) && fallbackDurationMs > 0) {
+        fallbackDurationSeconds = fallbackDurationMs / 1000;
+      }
+    }
     if (audioEl) audioEl.playbackRate = rate;
 
+    function stopTicker() {
+      if (rafToken === null) return;
+      try { cancelAnimationFrame(rafToken); } catch (_) {}
+      rafToken = null;
+    }
+
+    function startTicker() {
+      if (rafToken !== null) return;
+      var tick = function () {
+        rafToken = null;
+        if (state !== "playing") return;
+        emit();
+        try {
+          rafToken = requestAnimationFrame(tick);
+        } catch (_) {}
+      };
+      try {
+        rafToken = requestAnimationFrame(tick);
+      } catch (_) {}
+    }
+
+    function resolveDurationSeconds() {
+      if (!audioEl) return fallbackDurationSeconds;
+      var duration = Number(audioEl.duration);
+      if (Number.isFinite(duration) && duration > 0) return duration;
+      try {
+        if (audioEl.seekable && audioEl.seekable.length > 0) {
+          var seekableEnd = Number(audioEl.seekable.end(audioEl.seekable.length - 1));
+          if (Number.isFinite(seekableEnd) && seekableEnd > 0) return seekableEnd;
+        }
+      } catch (_) {}
+      try {
+        if (audioEl.buffered && audioEl.buffered.length > 0) {
+          var bufferedEnd = Number(audioEl.buffered.end(audioEl.buffered.length - 1));
+          if (Number.isFinite(bufferedEnd) && bufferedEnd > 0) return bufferedEnd;
+        }
+      } catch (_) {}
+      if (fallbackDurationSeconds > 0) return fallbackDurationSeconds;
+      return 0;
+    }
+
     function percent() {
-      if (!audioEl || !Number.isFinite(audioEl.duration) || audioEl.duration <= 0) return 0;
-      return Math.max(0, Math.min(100, Math.round((audioEl.currentTime / audioEl.duration) * 100)));
+      if (!audioEl) return 0;
+      var duration = resolveDurationSeconds();
+      if (!(duration > 0)) return 0;
+      var current = Number(audioEl.currentTime);
+      if (!Number.isFinite(current) || current < 0) current = 0;
+      return Math.max(0, Math.min(100, (current / duration) * 100));
+    }
+
+    function currentSeconds() {
+      if (!audioEl) return 0;
+      var current = Number(audioEl.currentTime);
+      if (!Number.isFinite(current) || current < 0) return 0;
+      return current;
     }
 
     function emit(extra) {
       var payload = extra && typeof extra === "object" ? extra : {};
+      var totalSeconds = resolveDurationSeconds();
+      var current = currentSeconds();
       onUpdate({
         state: state,
         rate: rate,
         hasAudio: hasAudio,
         percent: percent(),
+        currentSeconds: current,
+        totalSeconds: totalSeconds,
         error: payload.error || ""
       });
     }
@@ -4706,10 +5837,12 @@ ${rows}
         audioEl.playbackRate = rate;
         state = "playing";
         emit();
+        startTicker();
         try {
           await audioEl.play();
         } catch (err) {
           state = "error";
+          stopTicker();
           emit({ error: String((err && err.message) || "Audio playback failed.") });
           return false;
         }
@@ -4721,6 +5854,7 @@ ${rows}
       if (!audioEl || state !== "playing") return;
       try { audioEl.pause(); } catch (_) {}
       state = "paused";
+      stopTicker();
       emit();
     }
 
@@ -4733,8 +5867,9 @@ ${rows}
     function seek(percentValue) {
       if (!audioEl || !hasAudio) return;
       var ratio = clamp(percentValue, 0, 100, 0) / 100;
-      if (Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
-        audioEl.currentTime = Math.max(0, Math.min(audioEl.duration, audioEl.duration * ratio));
+      var duration = resolveDurationSeconds();
+      if (duration > 0) {
+        audioEl.currentTime = Math.max(0, Math.min(duration, duration * ratio));
       }
       emit();
     }
@@ -4750,17 +5885,34 @@ ${rows}
         try { audioEl.pause(); } catch (_) {}
       }
       state = "idle";
+      stopTicker();
       emit();
     }
 
     if (audioEl) {
+      audioEl.addEventListener("loadedmetadata", function () { emit(); });
+      audioEl.addEventListener("durationchange", function () { emit(); });
+      audioEl.addEventListener("progress", function () { emit(); });
+      audioEl.addEventListener("seeked", function () { emit(); });
+      audioEl.addEventListener("play", function () {
+        if (state !== "error") state = "playing";
+        startTicker();
+        emit();
+      });
+      audioEl.addEventListener("pause", function () {
+        if (state === "playing") state = "paused";
+        stopTicker();
+        emit();
+      });
       audioEl.addEventListener("timeupdate", function () { emit(); });
       audioEl.addEventListener("ended", function () {
         state = "ended";
+        stopTicker();
         emit();
       });
       audioEl.addEventListener("error", function () {
         state = "error";
+        stopTicker();
         emit({ error: "Embedded narration audio failed to play." });
       });
     }
@@ -4789,6 +5941,9 @@ ${rows}
     var status = controls.querySelector("[data-audio-role='status']");
     var sourceAudio = controls.querySelector("[data-audio-role='source']");
     var scrubDragging = false;
+    var lastTotalSeconds = 0;
+    var ownerSlide = caption.closest(".carousel-slide");
+    var ownerSlideId = ownerSlide ? ownerSlide.getAttribute("data-slide-id") : "";
 
     var controller = createAudioController(
       sourceAudio,
@@ -4797,14 +5952,22 @@ ${rows}
         var playing = snapshot.state === "playing";
         var hasAudio = !!snapshot.hasAudio;
         if (toggle) {
-          toggle.textContent = playing ? "Pause" : "Play";
+          toggle.textContent = playing ? "❚❚" : "▶";
+          toggle.title = playing ? "Pause narration" : "Play narration";
+          toggle.setAttribute("aria-label", playing ? "Pause narration" : "Play narration");
           toggle.disabled = !hasAudio;
         }
         if (restart) restart.disabled = !hasAudio;
         if (timeline) timeline.disabled = !hasAudio;
         if (tempo) tempo.disabled = !hasAudio;
-        if (!scrubDragging && timeline) timeline.value = String(Math.round(snapshot.percent || 0));
-        if (timelineValue) timelineValue.textContent = Math.round(snapshot.percent || 0) + "%";
+        var totalSeconds = normalizeSeconds(snapshot.totalSeconds);
+        var currentSeconds = normalizeSeconds(snapshot.currentSeconds);
+        lastTotalSeconds = totalSeconds;
+        var percentValue = totalSeconds > 0
+          ? Math.max(0, Math.min(100, (currentSeconds / totalSeconds) * 100))
+          : clamp(snapshot.percent, 0, 100, 0);
+        if (!scrubDragging && timeline) timeline.value = String(percentValue.toFixed(1));
+        if (timelineValue) timelineValue.textContent = formatTimelineClock(currentSeconds, totalSeconds);
         if (tempoValue) tempoValue.textContent = normalizeRate(snapshot.rate).toFixed(2) + "x";
         if (!status) return;
         if (!hasAudio) status.textContent = "No embedded narration audio available for this section.";
@@ -4815,7 +5978,7 @@ ${rows}
         else status.textContent = "Ready.";
       }
     );
-    controllers.push(controller);
+    controllers.push({ controller: controller, slideId: ownerSlideId });
 
     if (toggle) {
       toggle.addEventListener("click", function () {
@@ -4835,7 +5998,11 @@ ${rows}
     if (timeline) {
       timeline.addEventListener("input", function () {
         scrubDragging = true;
-        if (timelineValue) timelineValue.textContent = Math.round(clamp(timeline.value, 0, 100, 0)) + "%";
+        var previewPercent = clamp(timeline.value, 0, 100, 0);
+        var previewCurrent = lastTotalSeconds > 0
+          ? (previewPercent / 100) * lastTotalSeconds
+          : 0;
+        if (timelineValue) timelineValue.textContent = formatTimelineClock(previewCurrent, lastTotalSeconds);
       });
       timeline.addEventListener("change", function () {
         scrubDragging = false;
@@ -4846,15 +6013,29 @@ ${rows}
       tempo.addEventListener("input", function () { controller.setRate(tempo.value); });
       tempo.addEventListener("change", function () { controller.setRate(tempo.value); });
     }
-    caption.addEventListener("toggle", function () {
-      if (!caption.open) controller.pause();
+  });
+
+  window.addEventListener("viewer:slidechange", function (event) {
+    var detail = event && event.detail ? event.detail : {};
+    var activeSlideId = String(detail.slideId || "");
+    controllers.forEach(function (entry) {
+      if (!entry || !entry.controller || typeof entry.controller.pause !== "function") return;
+      if (entry.slideId !== activeSlideId) entry.controller.pause();
     });
+    if (activeController) {
+      var activeEntry = controllers.find(function (entry) {
+        return entry && entry.controller === activeController;
+      });
+      if (activeEntry && activeEntry.slideId !== activeSlideId) {
+        activeController.pause();
+      }
+    }
   });
 
   window.addEventListener("beforeunload", function () {
-    controllers.forEach(function (controller) {
-      if (!controller || typeof controller.stop !== "function") return;
-      controller.stop();
+    controllers.forEach(function (entry) {
+      if (!entry || !entry.controller || typeof entry.controller.stop !== "function") return;
+      entry.controller.stop();
     });
     if (activeController && typeof activeController.stop === "function") {
       activeController.stop();
@@ -5917,7 +7098,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       return !!ready;
     };
 
-    const ensureCloudAudio = async () => {
+    const ensureCloudAudio = async (options = {}) => {
+      const opts = isPlainObject(options) ? options : {};
+      const interactive = !!opts.interactive;
       if (!supportsCloud || !audioEl) {
         lastError = "Cloud narration is unavailable in this browser context.";
         state = "unsupported";
@@ -5941,6 +7124,28 @@ document.addEventListener("DOMContentLoaded", async () => {
       const sourceKey = buildCloudSourceKey();
       if (audioEl.src && cloudSourceKey === sourceKey) {
         return true;
+      }
+      const failConsent = (consentRaw) => {
+        const consent = isPlainObject(consentRaw) ? consentRaw : {};
+        const reason = String(consent.reason || "");
+        const detail = String(consent.detail || "").trim();
+        if (reason === "consent-denied") {
+          lastError = WEBSITE_CONTENT_CONSENT_DENIED_MESSAGE;
+        } else if (reason.startsWith("permissions-api")) {
+          lastError = WEBSITE_CONTENT_CONSENT_UNAVAILABLE_MESSAGE;
+        } else {
+          lastError = WEBSITE_CONTENT_CONSENT_REQUIRED_MESSAGE;
+        }
+        if (detail && reason.startsWith("permissions-api")) {
+          lastError = `${lastError} (${detail.slice(0, 180)})`;
+        }
+        state = reason === "consent-required" || reason === "consent-denied" ? "idle" : "error";
+        emit({ error: lastError, reason });
+        return false;
+      };
+      if (apiKey) {
+        const preflightConsent = await ensureWebsiteContentConsent({ interactive });
+        if (!preflightConsent.ok) return failConsent(preflightConsent);
       }
       stopCloud();
       const token = cloudRequestToken;
@@ -6048,7 +7253,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     };
 
-    const play = async () => {
+    const play = async (options = {}) => {
+      const opts = isPlainObject(options) ? options : {};
+      const interactive = !!opts.interactive;
       if (!providerSupported()) {
         state = "unsupported";
         lastError = provider === "openai"
@@ -6081,7 +7288,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         return false;
       }
       const resumePercent = currentPercent();
-      const ready = await ensureCloudAudio();
+      const ready = await ensureCloudAudio({ interactive });
       if (!ready) return false;
       if (Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
         audioEl.currentTime = Math.max(0, Math.min(audioEl.duration, (resumePercent / 100) * audioEl.duration));
@@ -6117,11 +7324,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       return true;
     };
 
-    const restart = () => {
+    const restart = (options = {}) => {
       if (provider === "openai") {
         if (!audioEl) return false;
         if (audioEl.src) audioEl.currentTime = 0;
-        return play();
+        return play(options);
       }
       offset = 0;
       return startBrowserFromOffset(0);
@@ -6180,7 +7387,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       cloudVoice = normalizeSectionNarrationOpenAiVoice(nextCloudVoice);
       cloudSourceKey = "";
       if (provider === "openai" && state === "playing") {
-        void play();
+        void play({ interactive: false });
       } else {
         emit();
       }
@@ -6904,13 +8111,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (audioPlayPauseBtn.textContent === "Pause") {
         narrator.pause();
       } else {
-        narrator.play();
+        void narrator.play({ interactive: true });
       }
     });
 
     audioRestartBtn.addEventListener("click", () => {
       if (!narrator) return;
-      narrator.restart();
+      void narrator.restart({ interactive: true });
     });
 
     audioScrub.addEventListener("input", () => {
@@ -8241,42 +9448,30 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     const importedReport = normalizeImportedReport(reportPayload);
     if (frameManifestBytes) {
+      const frameEntries = parseOptionalManifestEntries(frameManifestBytes, "frame-manifest.json", "frames");
       try {
-        const parsedFrameManifest = JSON.parse(decodeText(frameManifestBytes));
-        const frameEntries = Array.isArray(parsedFrameManifest && parsedFrameManifest.frames)
-          ? parsedFrameManifest.frames
-          : Array.isArray(parsedFrameManifest)
-            ? parsedFrameManifest
-            : [];
         await restoreFramesFromBundle(archive, frameEntries, importedReport);
-      } catch (_) {
-        throw new Error("frame-manifest.json is invalid.");
+      } catch (err) {
+        const detail = String((err && err.message) || err || "unknown error");
+        throw new Error(`Failed to restore frame assets from frame-manifest.json: ${detail}`);
       }
     }
     if (textManifestBytes) {
+      const textEntries = parseOptionalManifestEntries(textManifestBytes, "text-manifest.json", "texts");
       try {
-        const parsedTextManifest = JSON.parse(decodeText(textManifestBytes));
-        const textEntries = Array.isArray(parsedTextManifest && parsedTextManifest.texts)
-          ? parsedTextManifest.texts
-          : Array.isArray(parsedTextManifest)
-            ? parsedTextManifest
-            : [];
         await restoreTextsFromBundle(archive, textEntries, importedReport);
-      } catch (_) {
-        throw new Error("text-manifest.json is invalid.");
+      } catch (err) {
+        const detail = String((err && err.message) || err || "unknown error");
+        throw new Error(`Failed to restore text assets from text-manifest.json: ${detail}`);
       }
     }
     if (audioManifestBytes) {
+      const audioEntries = parseOptionalManifestEntries(audioManifestBytes, "audio-manifest.json", "audio");
       try {
-        const parsedAudioManifest = JSON.parse(decodeText(audioManifestBytes));
-        const audioEntries = Array.isArray(parsedAudioManifest && parsedAudioManifest.audio)
-          ? parsedAudioManifest.audio
-          : Array.isArray(parsedAudioManifest)
-            ? parsedAudioManifest
-            : [];
         await restoreAudiosFromBundle(archive, audioEntries, importedReport);
-      } catch (_) {
-        throw new Error("audio-manifest.json is invalid.");
+      } catch (err) {
+        const detail = String((err && err.message) || err || "unknown error");
+        throw new Error(`Failed to restore audio assets from audio-manifest.json: ${detail}`);
       }
     }
 

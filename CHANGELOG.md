@@ -10,6 +10,25 @@ All notable changes to this project are documented in this file.
 ### Changed
 - None yet.
 
+## v1.15.0 - 2026-02-16
+
+### Added
+- Exported HTML report viewer now ships as a carousel player experience with:
+  - right-side section queue navigation
+  - slide-by-slide prev/next controls
+  - bottom player bar with icon controls
+  - gear settings menu for hover-fade mode, caption visibility, and narration tempo
+
+### Changed
+- Exported report queue rows now avoid duplicate section numbering in titles, and queue metadata is revealed on hover/focus for a cleaner default view.
+- Narration timeline display in exported reports now shows clock format (`mm:ss | mm:ss`) instead of percentage progress.
+- Increased fullscreen/settings control button size and refined top section header alignment in the exported player shell.
+- Clarified documentation that saved report retention intentionally rolls over to the latest 3 reports after each stop/save.
+
+### Fixed
+- Exported report narration timeline now tracks embedded audio playback more reliably, including fallback duration handling when media metadata reports late.
+- Prevented section overlay/header cards from visually cutting into the media frame in exported carousel slides.
+
 ## v1.14.0 - 2026-02-15
 
 ### Added

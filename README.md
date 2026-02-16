@@ -171,27 +171,36 @@ Expected behavior:
 - Exported HTML follows chosen style while keeping consistent layout and compact metadata.
 
 ## Report & Export
-- HTML export includes TOC and direct step anchors.
-- Raw ZIP export (bundle v3) includes editable payload plus referenced burst frames and embedded section text:
+- HTML export opens as a carousel-style report viewer with direct step anchors, left/right slide navigation, and a right-side section queue.
+- Exported viewer narration controls are in a compact bottom player bar (icon actions, time timeline `mm:ss | mm:ss`, fullscreen) with advanced toggles grouped under a gear menu.
+- Raw ZIP export (bundle v4) includes editable payload plus referenced burst frames, embedded section text, and baked narration audio:
   - `manifest.json`
   - `report.json`
   - `frame-manifest.json`
   - `frames/*.png`
   - `text-manifest.json`
   - `texts/*`
+  - `audio-manifest.json`
+  - `audio/*`
   - `README.txt`
 - Raw ZIP import options:
   - New report
   - Merge into current report
 - Backward compatibility:
   - v1 raw bundles with inline screenshots still import unchanged.
+- Recorder keeps the 3 most recent saved reports. On each new stop/save, older reports beyond 3 are removed automatically.
 - Reorder before export using step controls and timeline drag/drop.
 - Export presets apply to generated HTML bundles.
 
 ## Privacy
 - Data remains local in browser storage.
-- No external API/network service calls are required.
+- No external API/network service calls are required for core capture/export features.
+- OpenAI cloud narration is optional and only used when selected in the builder with an API key and granted Firefox website content permission.
 - Redaction applies to report text fields; screenshots are not masked automatically.
+
+## Publishing to AMO
+- AMO submission checklist and reviewer notes template: `docs/AMO_SUBMISSION.md`
+- Privacy and data-handling policy details: `PRIVACY.md`
 
 ## Keyboard Shortcuts
 - `Ctrl+Shift+Y`: start/stop recording.
