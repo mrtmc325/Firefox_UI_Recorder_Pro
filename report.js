@@ -86,6 +86,7 @@ const SECTION_NARRATION_PROVIDER_OPTIONS = Object.freeze(["browser", "openai"]);
 const SECTION_NARRATION_OPENAI_MODEL = "gpt-4o-mini-tts";
 const SECTION_NARRATION_OPENAI_MAX_CHARS = 12000;
 const SECTION_NARRATION_OPENAI_API_KEY_STORAGE = "__uiRecorderNarrationOpenAiApiKey";
+const SECTION_DESCRIPTION_MAX_CHARS = 200;
 const SECTION_NARRATION_OPENAI_VOICES = Object.freeze([
   "alloy",
   "ash",
@@ -1757,6 +1758,22 @@ function titleFor(ev) {
   return cleanTitle(ev.type || "Step", "Step");
 }
 
+function normalizeSectionDescriptionText(value) {
+  return String(value ?? "").replace(/\r\n?/g, "\n").slice(0, SECTION_DESCRIPTION_MAX_CHARS);
+}
+
+function sectionDescriptionRawFor(ev) {
+  if (!ev || typeof ev !== "object") return "";
+  if (Object.prototype.hasOwnProperty.call(ev, "sectionDescription")) {
+    return normalizeSectionDescriptionText(ev.sectionDescription || "");
+  }
+  return normalizeSectionDescriptionText(ev.sectionSubtitle || "");
+}
+
+function sectionDescriptionFor(ev) {
+  return sectionDescriptionRawFor(ev).trim();
+}
+
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -1776,7 +1793,7 @@ function filterEvents(events, query, typeFilter, urlFilter) {
     if (typeFilter && typeFilter !== "all" && ev.type !== typeFilter) return false;
     if (uf && !lower(ev.url || "").includes(uf)) return false;
     if (!q) return true;
-    const hay = [ev.url, ev.label, ev.text, ev.human, ev.value, ev.outcome].join(" ");
+    const hay = [sectionDescriptionFor(ev), ev.label, ev.text, ev.human, ev.value, ev.outcome].join(" ");
     return lower(hay).includes(q);
   });
 }
@@ -2028,9 +2045,10 @@ function renderTableOfContents(target, events) {
     link.textContent = heading;
     link.title = `${index + 1}. ${titleFor(ev)}`;
     item.appendChild(link);
-    if (ev && ev.url) {
-      const meta = el("span", "toc-meta", String(ev.url));
-      meta.title = ev.url;
+    const sectionDescription = sectionDescriptionFor(ev);
+    if (sectionDescription) {
+      const meta = el("span", "toc-meta", sectionDescription);
+      meta.title = sectionDescription;
       item.appendChild(meta);
     }
     list.appendChild(item);
@@ -3922,17 +3940,7 @@ function buildExportHtml(report, options = {}) {
     const normalized = raw.replace(/[^A-Za-z0-9_.:-]+/g, "-").replace(/^-+|-+$/g, "");
     return normalized || "section";
   };
-  const tocMetaForEvent = (ev) => {
-    if (exportTheme.tocMeta === "none") return "";
-    if (exportTheme.tocMeta === "url") {
-      const parsed = parseExportUrl(ev && ev.url ? ev.url : "");
-      return parsed.fullLabel || parsed.raw || "";
-    }
-    const host = hostFromUrl(ev && ev.url ? ev.url : "");
-    if (host) return host;
-    const parsed = parseExportUrl(ev && ev.url ? ev.url : "");
-    return parsed.shortLabel || parsed.genericLabel || "";
-  };
+  const stepSubtitleForExport = (ev) => sectionDescriptionFor(ev);
   const buildExportSectionTextPanel = (panelId, label, state, metaRaw, audioStateRaw, audioMetaRaw) => {
     const safeState = state && typeof state === "object" ? state : { ref: null, loaded: false, text: "" };
     const ref = cloneSectionTextRef(safeState.ref);
@@ -3973,7 +3981,7 @@ function buildExportHtml(report, options = {}) {
     </label>
     <span class="section-text-audio-value" data-audio-role="timeline-value">00:00 | 00:00</span>
     <details class="viewer-player-settings" data-viewer-settings>
-      <summary class="viewer-player-btn viewer-settings-btn" aria-label="Player settings" title="Player settings">⚙</summary>
+      <summary class="viewer-player-btn viewer-settings-btn" aria-label="Player settings" title="Player settings"><span class="viewer-icon viewer-icon-gear" aria-hidden="true"></span></summary>
       <div class="viewer-settings-popover">
         <label class="viewer-settings-row viewer-settings-row-tempo" title="Narration tempo" aria-label="Narration tempo">
           <span class="viewer-settings-label">Tempo</span>
@@ -3986,11 +3994,11 @@ function buildExportHtml(report, options = {}) {
         </div>
         <div class="viewer-settings-row">
           <span class="viewer-settings-label">Captions</span>
-          <button type="button" class="viewer-player-btn viewer-cc-toggle-btn" data-viewer-action="toggle-cc" aria-label="Hide captions" title="Hide captions" aria-pressed="true"><span class="viewer-cc-icon">CC</span></button>
+          <button type="button" class="viewer-player-btn viewer-cc-toggle-btn" data-viewer-action="toggle-cc" aria-label="Show captions" title="Show captions" aria-pressed="false"><span class="viewer-cc-icon">CC</span></button>
         </div>
       </div>
     </details>
-    <button type="button" class="viewer-player-btn viewer-fullscreen-btn" data-viewer-action="toggle-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen">⛶</button>
+    <button type="button" class="viewer-player-btn viewer-fullscreen-btn" data-viewer-action="toggle-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen"><span class="viewer-icon viewer-icon-fullscreen" data-viewer-role="fullscreen-icon" aria-hidden="true"></span></button>
   </div>
   ${audioSummary ? `<div class="section-text-audio-meta">${escapeHtml(audioSummary)}</div>` : ""}
   <div class="section-text-audio-status" data-audio-role="status">${escapeHtml(audioStatusText)}</div>
@@ -4008,15 +4016,13 @@ function buildExportHtml(report, options = {}) {
   };
 
   const burstData = derivedBursts.map((burst, i) => {
-    const startIso = new Date(burst.startMs || Date.now()).toISOString();
-    const endIso = new Date(burst.endMs || Date.now()).toISOString();
     const contextChips = Array.isArray(burst.contextChips)
       ? burst.contextChips.map((chip) => String(chip || "").trim()).filter(Boolean)
       : [];
     return {
       id: burst.id,
       title: burstDisplayTitle(burst, i),
-      meta: `${burst.frames.length} interactions • ${formatExportTimestamp(startIso)} → ${formatExportTimestamp(endIso)}${contextChips.length ? ` • ${contextChips.join(" • ")}` : ""}`,
+      meta: `${burst.frames.length} interactions${contextChips.length ? ` • ${contextChips.join(" • ")}` : ""}`,
       sourceFps: Number.isFinite(Number(burst.sourceFps)) ? Number(burst.sourceFps) : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps,
       targetFps: Number.isFinite(Number(burst.targetFps)) ? Math.round(Number(burst.targetFps)) : null,
       contextChips,
@@ -4054,25 +4060,20 @@ function buildExportHtml(report, options = {}) {
   const pushSlide = ({
     id,
     titleText,
+    subtitleText = "",
     metaText,
     mediaHtml,
     ccHtml,
-    isBurst = false,
-    urlHref = "",
-    urlLabel = "",
-    urlTitle = ""
+    isBurst = false
   }) => {
     sectionNumber += 1;
     const numeric = sectionNumber;
     const normalizedId = normalizeSlideId(id, `section-${numeric}`);
     const slideTitle = String(titleText || "Untitled section").trim() || "Untitled section";
-    const numberedTitle = `${numeric}. ${slideTitle}`;
-    const safeTitle = escapeHtml(numberedTitle);
+    const safeTitle = escapeHtml(slideTitle);
     const safePlaylistTitle = escapeHtml(slideTitle);
+    const safeSubtitle = escapeHtml(String(subtitleText || "").trim());
     const safeMeta = escapeHtml(String(metaText || "").trim());
-    const safeHref = escapeHtml(String(urlHref || "").trim());
-    const safeUrlLabel = escapeHtml(String(urlLabel || "Open source page"));
-    const safeUrlTitle = escapeHtml(String(urlTitle || ""));
     const safeMedia = mediaHtml || `<div class="viewer-media-shell"><div class="viewer-media-content"><div class="viewer-media-empty">No media captured for this section.</div></div></div>`;
     const safeCc = ccHtml || buildExportSectionTextPanel(
       `${normalizedId}-text`,
@@ -4082,7 +4083,7 @@ function buildExportHtml(report, options = {}) {
       { ref: null, loaded: false, dataUrl: "" },
       null
     );
-    const slide = `<article id="${normalizedId}" class="carousel-slide${isBurst ? " carousel-slide-burst" : ""}" data-slide-id="${normalizedId}" data-slide-title="${safeTitle}" data-slide-meta="${safeMeta}" data-slide-url-href="${safeHref}" data-slide-url-label="${safeUrlLabel}" data-slide-url-title="${safeUrlTitle}" aria-hidden="true">
+    const slide = `<article id="${normalizedId}" class="carousel-slide${isBurst ? " carousel-slide-burst" : ""}" data-slide-id="${normalizedId}" data-slide-title="${safeTitle}" data-slide-subtitle="${safeSubtitle}" data-slide-meta="${safeMeta}" aria-hidden="true">
   ${safeMedia}
   ${safeCc}
 </article>`;
@@ -4119,6 +4120,7 @@ function buildExportHtml(report, options = {}) {
     pushSlide({
       id: burstId,
       titleText: String((burst && burst.title) || "Interaction burst"),
+      subtitleText: String((burst && burst.meta) || "Interaction burst"),
       metaText: String((burst && burst.meta) || "Interaction burst"),
       mediaHtml: burstMedia,
       ccHtml: burstTextPanel,
@@ -4133,8 +4135,6 @@ function buildExportHtml(report, options = {}) {
   events.forEach((ev, i) => {
     const stepId = ev && ev.stepId ? String(ev.stepId) : `step-${i + 1}`;
     const stepTitleRaw = String(titleFor(ev) || "Workflow step");
-    const formattedTs = formatExportTimestamp(ev.ts || "");
-    const parsedUrl = parseExportUrl(ev.url || "");
     const screenshot = resolveScreenshotForEvent(ev);
     const annotation = safeDataImageUrl(ev.annotation || "");
     const img = screenshot ? `<div class="shot"><img id="step-shot-${i + 1}" src="${screenshot}" alt="Step screenshot"></div>` : "";
@@ -4156,19 +4156,14 @@ function buildExportHtml(report, options = {}) {
       ev && ev.sectionAudioMeta
     );
     const mediaHtml = `<div class="viewer-media-shell"><div class="viewer-media-content">${mediaBody}</div></div>`;
-    const metaBits = [];
-    metaBits.push(formattedTs || "Time n/a");
-    const tocMeta = tocMetaForEvent(ev);
-    if (tocMeta) metaBits.push(tocMeta);
+    const sectionDescription = sectionDescriptionFor(ev);
     pushSlide({
       id: stepId,
       titleText: stepTitleRaw,
-      metaText: metaBits.join(" • "),
+      subtitleText: stepSubtitleForExport(ev),
+      metaText: sectionDescription,
       mediaHtml,
-      ccHtml: stepTextPanel,
-      urlHref: parsedUrl.safeHref || "",
-      urlLabel: parsedUrl.genericLabel || parsedUrl.shortLabel || "Open page",
-      urlTitle: parsedUrl.fullLabel || parsedUrl.raw || ""
+      ccHtml: stepTextPanel
     });
 
     const insertions = burstInsertionPlan.byStepId.get(stepId) || [];
@@ -4297,7 +4292,7 @@ body{
   flex-direction:column;
   justify-content:space-between;
   gap:10px;
-  padding:66px 10px 10px;
+  padding:84px 10px 10px;
   opacity:0;
   transform:translateX(18%);
   transition:transform 320ms cubic-bezier(0.18,0.78,0.24,1), opacity 320ms ease;
@@ -4376,86 +4371,89 @@ body{
   top:50%;
   transform:translateY(-50%);
   z-index:7;
-  width:40px;
-  height:40px;
+  width:54px;
+  height:54px;
   border-radius:999px;
-  border:1px solid var(--edge);
-  background:color-mix(in srgb, var(--paper) 76%, transparent);
-  color:var(--ink);
-  font-size:22px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid color-mix(in srgb, var(--accent) 42%, var(--edge) 58%);
+  background:color-mix(in srgb, var(--paper) 20%, transparent);
+  backdrop-filter:blur(3px);
+  box-shadow:0 10px 18px rgba(2, 6, 23, 0.3);
+  color:color-mix(in srgb, #ffffff 90%, var(--accent) 10%);
+  font-size:30px;
+  line-height:1;
   cursor:pointer;
-  transition:opacity 220ms ease, transform 180ms ease, background 180ms ease;
+  transition:opacity 220ms ease, transform 180ms ease, background 180ms ease, border-color 180ms ease;
 }
-.viewer-arrow:hover{background:var(--paper)}
+.viewer-arrow:hover{
+  background:color-mix(in srgb, var(--paper) 34%, transparent);
+  border-color:color-mix(in srgb, var(--accent) 58%, var(--edge) 42%);
+  transform:translateY(-50%) scale(1.03);
+}
+.viewer-arrow:active{
+  transform:translateY(-50%) scale(0.98);
+}
 .viewer-arrow:disabled{opacity:0.45;cursor:not-allowed}
-.viewer-arrow-prev{left:8px}
-.viewer-arrow-next{right:8px}
+.viewer-arrow-prev{left:16px}
+.viewer-arrow-next{right:16px}
 .viewer-overlay{
   position:absolute;
   inset:8px 56px auto 56px;
   z-index:6;
   display:flex;
-  align-items:center;
-  justify-content:space-between;
+  align-items:flex-start;
+  justify-content:flex-start;
   gap:8px;
-  min-height:44px;
-  padding:8px 12px;
+  min-height:56px;
+  padding:9px 12px;
   border:1px solid color-mix(in srgb, var(--edge) 65%, transparent);
-  border-radius:10px;
-  background:color-mix(in srgb, var(--paper) 88%, transparent);
-  backdrop-filter:blur(2px);
+  border-left:4px solid var(--accent);
+  border-radius:12px;
+  background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 90%, transparent), color-mix(in srgb, var(--paper) 90%, transparent));
+  backdrop-filter:blur(3px);
+  box-shadow:0 10px 18px rgba(2, 6, 23, 0.2);
 }
 .viewer-overlay-copy{
   display:flex;
   flex-direction:column;
-  justify-content:center;
+  justify-content:flex-start;
+  gap:2px;
   min-width:0;
   flex:1 1 auto;
 }
 .viewer-overlay-title{
-  font-size:calc(var(--section-text-size) + 1px);
-  font-weight:var(--h2-weight);
-  letter-spacing:var(--h2-letter-spacing);
-  text-transform:var(--h2-transform);
+  font-size:max(17px, calc(var(--title-size) - 1px));
+  font-weight:var(--title-weight);
+  letter-spacing:var(--title-letter-spacing);
+  text-transform:var(--title-transform);
   line-height:1.25;
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
 }
-.viewer-overlay-meta{
+.viewer-overlay-subtitle{
   color:var(--muted);
-  font-size:max(10px, calc(var(--section-text-size) - 2px));
-  margin-top:1px;
+  font-size:max(12px, calc(var(--subtitle-size) - 0.5px));
+  font-weight:var(--h3-weight);
+  letter-spacing:var(--h3-letter-spacing);
+  text-transform:var(--h3-transform);
   line-height:1.2;
-  white-space:nowrap;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  max-height:0;
+  opacity:0;
   overflow:hidden;
-  text-overflow:ellipsis;
+  transform:translateY(-2px);
+  transition:max-height 180ms ease, opacity 160ms ease, transform 180ms ease;
 }
-.viewer-overlay-actions{
-  display:flex;
-  align-items:center;
-  gap:4px;
-  flex-wrap:nowrap;
-  flex:0 0 auto;
-}
-.viewer-overlay-btn{
-  appearance:none;
-  border:1px solid var(--edge);
-  border-radius:999px;
-  display:inline-flex;
-  align-items:center;
-  background:var(--paper);
-  color:var(--ink);
-  cursor:pointer;
-  text-decoration:none;
-  font-size:10px;
-  min-height:22px;
-  padding:2px 8px;
-  white-space:nowrap;
-}
-.viewer-overlay-btn:disabled{
-  opacity:0.55;
-  cursor:not-allowed;
+.viewer-overlay.has-subtitle:hover .viewer-overlay-subtitle,
+.viewer-overlay.has-subtitle:focus-within .viewer-overlay-subtitle,
+.viewer-overlay.has-subtitle.is-expanded .viewer-overlay-subtitle{
+  max-height:72px;
+  opacity:1;
+  transform:translateY(0);
 }
 .viewer-playlist{
   border:1px solid var(--edge);
@@ -4724,14 +4722,34 @@ body{
   justify-content:center;
   min-width:34px;
   min-height:34px;
-  font-size:18px;
-  padding:0 10px;
+  padding:0 8px;
+  line-height:0;
 }
 .viewer-fullscreen-btn{
   min-width:34px;
   min-height:34px;
-  font-size:17px;
-  padding:0 10px;
+  padding:0 8px;
+  line-height:0;
+}
+.viewer-icon{
+  display:inline-block;
+  width:20px;
+  height:20px;
+  background-repeat:no-repeat;
+  background-position:center;
+  background-size:contain;
+  flex:0 0 auto;
+}
+.viewer-icon-gear{
+  width:21px;
+  height:21px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e2e8f0' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='3.2'/%3E%3Cpath d='M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z'/%3E%3C/svg%3E");
+}
+.viewer-icon-fullscreen{
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e2e8f0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='8 3 3 3 3 8'/%3E%3Cpolyline points='16 3 21 3 21 8'/%3E%3Cpolyline points='21 16 21 21 16 21'/%3E%3Cpolyline points='8 21 3 21 3 16'/%3E%3C/svg%3E");
+}
+.viewer-icon-fullscreen.is-exit{
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e2e8f0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='10 3 10 7 6 7'/%3E%3Cpolyline points='14 3 14 7 18 7'/%3E%3Cpolyline points='21 10 17 10 17 6'/%3E%3Cpolyline points='21 14 17 14 17 18'/%3E%3Cpolyline points='14 21 14 17 18 17'/%3E%3Cpolyline points='10 21 10 17 6 17'/%3E%3Cpolyline points='3 14 7 14 7 18'/%3E%3Cpolyline points='3 10 7 10 7 6'/%3E%3C/svg%3E");
 }
 .viewer-settings-popover{
   position:absolute;
@@ -4823,7 +4841,7 @@ body{
 }
 .viewer-stage:fullscreen .carousel-slide,
 .viewer-stage:-webkit-full-screen .carousel-slide{
-  padding:62px 10px 8px;
+  padding:76px 10px 8px;
 }
 .viewer-stage:fullscreen .viewer-media-shell,
 .viewer-stage:-webkit-full-screen .viewer-media-shell{
@@ -4942,14 +4960,14 @@ body{
     inset:8px 8px auto 8px;
   }
   .viewer-arrow{
-    width:34px;
-    height:34px;
-    font-size:18px;
+    width:42px;
+    height:42px;
+    font-size:24px;
   }
-  .viewer-arrow-prev{left:6px}
-  .viewer-arrow-next{right:6px}
+  .viewer-arrow-prev{left:10px}
+  .viewer-arrow-next{right:10px}
   .carousel-slide{
-    padding:64px 8px 8px;
+    padding:78px 8px 8px;
   }
   .viewer-player-bar{
     flex-wrap:wrap;
@@ -5020,7 +5038,7 @@ body{
   <div><h1>${title}</h1>${subtitle ? `<p>${subtitle}</p>` : ""}</div>
 </div>
 ${quickPreviewNotice}
-<div class="viewer-shell controls-visible cc-enabled" id="viewer-shell">
+<div class="viewer-shell controls-visible cc-disabled" id="viewer-shell">
   <div class="viewer-stage" id="viewer-stage">
     <button type="button" class="viewer-arrow viewer-arrow-prev" id="viewer-prev" aria-label="Previous section">❮</button>
     <div class="carousel-window" id="carousel-window" aria-live="polite">
@@ -5032,15 +5050,12 @@ ${quickPreviewNotice}
     <div class="viewer-overlay" id="viewer-overlay">
       <div class="viewer-overlay-copy">
         <div class="viewer-overlay-title" id="viewer-overlay-title">Section</div>
-        <div class="viewer-overlay-meta" id="viewer-overlay-meta"></div>
-      </div>
-      <div class="viewer-overlay-actions">
-        <a id="viewer-open-url" class="viewer-overlay-btn" href="#" target="_blank" rel="noopener noreferrer">Open source page</a>
+        <div class="viewer-overlay-subtitle" id="viewer-overlay-subtitle"></div>
       </div>
     </div>
   </div>
-  <aside class="viewer-playlist" aria-label="Section navigator">
-    <div class="viewer-playlist-head">Section Queue</div>
+  <aside class="viewer-playlist" aria-label="Workflow navigator">
+    <div class="viewer-playlist-head">Workflow Queue</div>
     <div class="viewer-playlist-list" id="viewer-playlist">
       ${playlistHtml}
     </div>
@@ -5055,9 +5070,9 @@ ${quickPreviewNotice}
   var playlistButtons = Array.prototype.slice.call(shell.querySelectorAll(".viewer-playlist-item[data-slide-target]"));
   var prevBtn = document.getElementById("viewer-prev");
   var nextBtn = document.getElementById("viewer-next");
+  var overlay = document.getElementById("viewer-overlay");
   var overlayTitle = document.getElementById("viewer-overlay-title");
-  var overlayMeta = document.getElementById("viewer-overlay-meta");
-  var openUrl = document.getElementById("viewer-open-url");
+  var overlaySubtitle = document.getElementById("viewer-overlay-subtitle");
   var toggleControlsButtons = Array.prototype.slice.call(shell.querySelectorAll("[data-viewer-action='toggle-controls']"));
   var toggleCcButtons = Array.prototype.slice.call(shell.querySelectorAll("[data-viewer-action='toggle-cc']"));
   var fullscreenButtons = Array.prototype.slice.call(shell.querySelectorAll("[data-viewer-action='toggle-fullscreen']"));
@@ -5068,17 +5083,13 @@ ${quickPreviewNotice}
     toggleControlsButtons.forEach(function (btn) { btn.disabled = true; });
     toggleCcButtons.forEach(function (btn) { btn.disabled = true; });
     fullscreenButtons.forEach(function (btn) { btn.disabled = true; });
-    if (openUrl) {
-      openUrl.style.display = "none";
-      openUrl.setAttribute("aria-hidden", "true");
-    }
     return;
   }
 
   var focusSelector = "a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]";
   var currentIndex = 0;
   var controlsMode = "visible";
-  var ccEnabled = true;
+  var ccEnabled = false;
   var controlsHideTimer = null;
   var animating = false;
 
@@ -5163,23 +5174,14 @@ ${quickPreviewNotice}
     var slide = slides[index];
     if (!slide) return;
     if (overlayTitle) overlayTitle.textContent = String(slide.getAttribute("data-slide-title") || "Section");
-    if (overlayMeta) overlayMeta.textContent = String(slide.getAttribute("data-slide-meta") || "");
-    if (!openUrl) return;
-    var href = String(slide.getAttribute("data-slide-url-href") || "");
-    var label = String(slide.getAttribute("data-slide-url-label") || "Open source page");
-    var title = String(slide.getAttribute("data-slide-url-title") || "");
-    if (!href) {
-      openUrl.style.display = "none";
-      openUrl.setAttribute("aria-hidden", "true");
-      openUrl.removeAttribute("href");
-      openUrl.textContent = "Open source page";
-      return;
+    if (overlaySubtitle) {
+      var subtitle = String(slide.getAttribute("data-slide-subtitle") || "").trim();
+      overlaySubtitle.textContent = subtitle;
+      if (overlay) {
+        overlay.classList.toggle("has-subtitle", !!subtitle);
+        overlay.classList.remove("is-expanded");
+      }
     }
-    openUrl.style.display = "";
-    openUrl.setAttribute("aria-hidden", "false");
-    openUrl.setAttribute("href", href);
-    openUrl.textContent = label;
-    openUrl.title = title || label;
   }
 
   function dispatchSlideChange(index) {
@@ -5248,7 +5250,8 @@ ${quickPreviewNotice}
     var active = isStageFullscreen();
     fullscreenButtons.forEach(function (btn) {
       if (!btn) return;
-      btn.textContent = active ? "🗗" : "⛶";
+      var icon = btn.querySelector("[data-viewer-role='fullscreen-icon']");
+      if (icon) icon.classList.toggle("is-exit", active);
       btn.title = active ? "Exit fullscreen" : "Enter fullscreen";
       btn.setAttribute("aria-label", active ? "Exit fullscreen" : "Enter fullscreen");
       btn.setAttribute("aria-pressed", active ? "true" : "false");
@@ -5391,6 +5394,13 @@ ${quickPreviewNotice}
     stage.addEventListener("mouseenter", onWake);
     stage.addEventListener("touchstart", onWake, { passive: true });
   }
+  if (overlay) {
+    overlay.addEventListener("click", function () {
+      if (!overlay.classList.contains("has-subtitle")) return;
+      overlay.classList.toggle("is-expanded");
+      wakeControls();
+    });
+  }
 
   document.addEventListener("keydown", function (event) {
     if (!event) return;
@@ -5446,7 +5456,7 @@ ${quickPreviewNotice}
   });
 
   setControlsMode("visible");
-  setCcEnabled(true);
+  setCcEnabled(false);
   syncFullscreenButtons();
   if (slides.length <= 1) {
     if (prevBtn) prevBtn.disabled = true;
@@ -8323,10 +8333,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (rawTitle) return rawTitle;
       const firstEvent = entry && Array.isArray(entry.events) && entry.events.length ? entry.events[0] : null;
       if (firstEvent) {
+        const customStepTitle = firstEvent.editedTitle ? String(firstEvent.editedTitle).trim() : "";
+        if (customStepTitle) return customStepTitle;
         const tabTitle = firstEvent.tabTitle ? String(firstEvent.tabTitle).trim() : "";
         if (tabTitle) return tabTitle;
-        const host = hostFromUrl(firstEvent.url || "");
-        if (host) return host;
       }
       return `Report ${index + 1}`;
     }
@@ -8713,11 +8723,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         setTypeFilterValue(value || "all");
         render();
       },
-      applyUrlFilter: (value) => {
-        if (!urlFilter) return;
+      applyUrlFilter: urlFilter ? (value) => {
         urlFilter.value = value || "";
         render();
-      },
+      } : null,
       applySearch: (value) => {
         if (!search) return;
         search.value = value || "";
@@ -8907,9 +8916,38 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       wrap.appendChild(title);
 
-      const tabLabel = ev.tabId !== null && ev.tabId !== undefined ? `Tab ${ev.tabId}` : "Tab";
-      const metaText = `${ev.ts || ""} — ${ev.url || ""} — ${tabLabel}`;
+      const metaText = String(ev.ts || "").trim() || "Time n/a";
       wrap.appendChild(el("div", "step-meta", metaText));
+
+      const subtitleWrap = el("div", "step-subtitle-wrap");
+      const subtitle = document.createElement("textarea");
+      subtitle.className = "step-subtitle-input";
+      subtitle.rows = 2;
+      subtitle.wrap = "soft";
+      subtitle.maxLength = SECTION_DESCRIPTION_MAX_CHARS;
+      subtitle.placeholder = `Add subsection description (up to ${SECTION_DESCRIPTION_MAX_CHARS} characters)`;
+      subtitle.value = sectionDescriptionRawFor(ev);
+      const subtitleCount = el("div", "step-subtitle-count", `${subtitle.value.length}/${SECTION_DESCRIPTION_MAX_CHARS}`);
+      const updateSubtitleCount = () => {
+        subtitleCount.textContent = `${subtitle.value.length}/${SECTION_DESCRIPTION_MAX_CHARS}`;
+      };
+      subtitle.addEventListener("input", () => {
+        const normalized = normalizeSectionDescriptionText(subtitle.value);
+        if (normalized !== subtitle.value) subtitle.value = normalized;
+        updateSubtitleCount();
+      });
+      subtitle.addEventListener("blur", async () => {
+        const nextDescription = normalizeSectionDescriptionText(subtitle.value);
+        subtitle.value = nextDescription;
+        if (nextDescription.trim()) ev.sectionDescription = nextDescription;
+        else delete ev.sectionDescription;
+        updateSubtitleCount();
+        await saveReports(reports);
+        updateAux();
+      });
+      subtitleWrap.appendChild(subtitle);
+      subtitleWrap.appendChild(subtitleCount);
+      wrap.appendChild(subtitleWrap);
 
       const actions = el("div", "step-actions noprint");
       const eventPos = eventPositionMap.has(ev) ? eventPositionMap.get(ev) : -1;

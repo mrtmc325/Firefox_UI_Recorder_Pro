@@ -10,6 +10,22 @@ All notable changes to this project are documented in this file.
 ### Changed
 - None yet.
 
+## v1.15.3 - 2026-02-17
+
+### Added
+- Builder workflow-step cards now include a dedicated subsection description textarea:
+  - hard capped at 200 characters
+  - wraps naturally for multi-line readability
+  - supports standard ASCII symbols/punctuation without restrictive filtering
+
+### Changed
+- Bumped extension version to `1.15.3` in `manifest.json`.
+- Exported carousel section header bar now shows the section title without numeric prefix.
+- Exported carousel subtitle metadata now omits URL/timestamp display and uses subsection descriptions when provided.
+- Exported header subtitle reveal is now collapsible (hover/focus/click) for cleaner default viewing.
+- Exported right rail naming is standardized as **Workflow Queue**.
+- Builder and export docs now reflect Workflow Queue naming and subsection-description behavior.
+
 ## v1.15.0 - 2026-02-16
 
 ### Added

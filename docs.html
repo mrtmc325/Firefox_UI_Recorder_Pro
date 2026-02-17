@@ -8,9 +8,20 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.14.0. This minor release finalizes the section-audio narration flow: builder panels support Browser/OS and OpenAI narration sources with voice selection, generated cloud audio is cached locally per section, and exported HTML ships playback-only baked audio with no viewer API key requirements.</p>
+    <p>Version 1.15.3. This release refines the exported carousel viewer and section editing: Workflow Queue naming is now consistent, exported section headers are cleaner (no URL/timestamp metadata), and subsection descriptions are now editable with a strict 200-character cap.</p>
 
-    <h2>Version Notes (v1.14.0)</h2>
+    <h2>Version Notes (v1.15.3)</h2>
+    <ul>
+      <li>Exported carousel right rail now uses <strong>Workflow Queue</strong> naming consistently.</li>
+      <li>Exported top section title bar no longer includes numeric prefixes.</li>
+      <li>Exported section subtitle metadata no longer shows URL/time details.</li>
+      <li>Section subtitle reveal in export is collapsible (hover/focus/click) for cleaner default presentation.</li>
+      <li>Builder step cards now include a dedicated subsection description textarea with a strict 200-character limit.</li>
+      <li>Subsection descriptions support standard ASCII punctuation/symbols and wrap naturally.</li>
+      <li>Report/docs references were updated to remove deprecated section-URL metadata language.</li>
+    </ul>
+
+    <h2>Prior Notes (v1.14.0 and earlier)</h2>
     <ul>
       <li>Cross-tab timeline now supports drag/drop for interaction burst rows, moving entire burst blocks while preserving burst integrity.</li>
       <li>Timeline column headers now use true tab/site labels only; burst display titles no longer leak into column headers.</li>
@@ -145,11 +156,10 @@
       <li><strong>Export theme &gt; Font</strong>: choose a readable family for your audience</li>
       <li><strong>Export theme &gt; Report title size</strong>: adjust the editable title scale</li>
       <li><strong>Export theme &gt; Report description size</strong>: tune subtitle prominence</li>
-      <li><strong>Export theme &gt; Table of Contents text size</strong>: tighten or enlarge TOC readability</li>
+      <li><strong>Export theme &gt; Section header theme</strong>: style exported carousel section headers and queue heading cards</li>
       <li><strong>Export theme &gt; Section text size</strong>: tune workflow step/body text size</li>
       <li><strong>Export theme &gt; Title/Heading themes</strong>: choose style presets for Title, Heading 1, Heading 2, and Heading 3</li>
-      <li><strong>Export theme &gt; Table of Contents layout</strong>: use Compact cards for dense workflows</li>
-      <li><strong>Export theme &gt; Table of Contents details</strong>: Host only for concise output, URL for technical detail</li>
+      <li><strong>Workflow Queue</strong>: use right-side queue cards to jump sections; subtitle details reveal on hover/focus.</li>
       <li><strong>Export theme &gt; Accent</strong>: set your team or project color</li>
     </ul>
 
@@ -168,12 +178,14 @@
       <li>Reorder with drag/drop in timeline and Move up/Move down in the step list.</li>
       <li>Use builder navigation links and panel collapse controls to reduce visual noise.</li>
       <li>Use the theme icon toggle (sun/moon preview) to switch light/dark while editing.</li>
+      <li>Use the subsection description textarea per step to add concise context (max 200 characters, ASCII supported).</li>
       <li>Use section read-aloud controls to narrate embedded text for guided walkthroughs.</li>
     </ul>
 
     <h2>Report Export / Import</h2>
     <ul>
-      <li><strong>Export HTML bundle</strong>: Portable carousel-style report viewer with step anchors, slide navigation, right-side section queue, and selected export theme profile.</li>
+      <li><strong>Export HTML bundle</strong>: Portable carousel-style report viewer with step anchors, slide navigation, right-side Workflow Queue, and selected export theme profile.</li>
+      <li><strong>Exported section header</strong>: Clean title bar with optional collapsible subsection description (no embedded URL/timestamp metadata).</li>
       <li><strong>Exported narration bar</strong>: Icon-based bottom player with timeline clock (<code>mm:ss | mm:ss</code>), fullscreen toggle, and gear menu for captions/fade/tempo settings.</li>
       <li><strong>Export raw ZIP</strong>: Editable payload for re-import later (bundle v4 includes frame manifest + frame files, text manifest + text payload files, and audio manifest + baked narration audio payload files).</li>
       <li><strong>Import raw ZIP</strong>: Import as new report or merge into active report.</li>

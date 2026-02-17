@@ -129,7 +129,7 @@
               </label>
               <label class="row">
                 Search
-                <input id="search" type="text" placeholder="URL, label, text..." />
+                <input id="search" type="text" placeholder="label, text, value..." />
               </label>
               <label class="row">
                 Type filter
@@ -142,10 +142,6 @@
                   <option value="nav">Nav</option>
                   <option value="note">Note</option>
                 </select>
-              </label>
-              <label class="row">
-                URL filter
-                <input id="url-filter" type="text" placeholder="contains..." />
               </label>
             </div>
           </details>
@@ -274,11 +270,7 @@
                         </select>
                       </label>
                       <label class="row">
-                        Table of Contents text size
-                        <select id="export-theme-toc-size"></select>
-                      </label>
-                      <label class="row">
-                        Table of Contents text theme
+                        Section header theme
                         <select id="export-theme-h2-style">
                           <option value="modern">Modern</option>
                           <option value="classic">Classic</option>
@@ -301,34 +293,6 @@
                           <option value="technical">Technical</option>
                           <option value="elegant">Elegant</option>
                           <option value="compact">Compact</option>
-                        </select>
-                      </label>
-                    </div>
-                  </details>
-
-                  <details class="export-theme-group">
-                    <summary class="export-theme-summary">
-                      <span class="export-theme-summary-title">Table of Contents</span>
-                      <span class="export-theme-summary-meta">TOC</span>
-                    </summary>
-                    <div class="export-theme-group-body export-theme-grid">
-                      <label class="row">
-                        TOC layout
-                        <select id="export-theme-layout">
-                          <option value="grid">Compact cards</option>
-                          <option value="list">Single list</option>
-                          <option value="minimal">Minimal numbers</option>
-                          <option value="columns">Two-column detail</option>
-                          <option value="bands">Banded rows</option>
-                          <option value="outline">Outline blocks</option>
-                        </select>
-                      </label>
-                      <label class="row">
-                        TOC details
-                        <select id="export-theme-meta">
-                          <option value="host">Host only</option>
-                          <option value="url">Compact URL</option>
-                          <option value="none">Title only</option>
                         </select>
                       </label>
                     </div>

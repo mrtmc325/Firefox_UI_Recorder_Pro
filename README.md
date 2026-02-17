@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.14.0
+# UI Workflow Recorder Pro (Firefox) v1.15.3
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.14.0`
+- Version: `1.15.3`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -56,6 +56,14 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Collapsible in-page preview section
   - Auto refresh while expanded when filters/theme change
   - Added to builder navigation
+- Exported carousel workflow viewer:
+  - Right-side navigator is now labeled **Workflow Queue**.
+  - Top section title bar in export no longer prefixes section numbers.
+  - URL/timestamp metadata is removed from exported section headers in favor of optional subsection descriptions.
+  - Section subtitle reveal is collapsible (hover/focus/click) for cleaner default presentation.
+- Step-level subsection descriptions:
+  - Each workflow step now has a dedicated subsection description textarea in the builder.
+  - Input is capped at 200 characters and supports standard ASCII symbols/punctuation.
 - Reordering and merge workflows:
   - Move up/down controls per step
   - Cross-tab timeline drag/drop with flow-in placement
@@ -77,14 +85,12 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Screenshot-based obfuscation
   - Idle teardown and flattened save-on-close for memory stability
 - Export style system:
-  - 15 palette presets, 15 font choices, Table of Contents layout modes, and accent color
-  - Adjustable typography sizes for report title, short description, TOC text, and section text
+  - 15 palette presets, 15 font choices, and accent color
+  - Adjustable typography sizes for report title, short description, and section text
   - Heading theme profiles for Title, Heading 1, Heading 2, and Heading 3 (Word-style controls)
-  - Condensed, collapsible theme editor groups (Visual foundation, Typography, TOC, Burst replay)
+  - Condensed, collapsible theme editor groups (Visual foundation, Typography, Burst replay)
   - Export theme subgroup controls reflowed for narrow left rails to prevent clipped labels and misaligned inputs
-  - Compact TOC controls with full title/URL detail options and dense behavior for large reports
-  - Professional metadata chips (friendly timestamp + compact URL label)
-  - Right-side path token removed from exported rows
+  - Section header theme applies to exported carousel header surfaces
 - Raw ZIP export/import/merge for future re-editing, including section-text and baked narration-audio payload round-trip (bundle v4).
 
 ## Install (Temporary Add-on)
@@ -160,18 +166,17 @@ Use when generating professional deliverables from the same capture data.
   - `Export theme > Font`
   - `Export theme > Report title size`
   - `Export theme > Report description size`
-  - `Export theme > Table of Contents text size`
+  - `Export theme > Section header theme`
   - `Export theme > Section text size`
   - `Export theme > Title theme / Heading 1 / Heading 2 / Heading 3`
-  - `Export theme > Table of Contents layout`
-  - `Export theme > Table of Contents details`
+  - `Workflow Queue` hover-reveal behavior for subsection descriptions
   - `Export theme > Accent`
 
 Expected behavior:
 - Exported HTML follows chosen style while keeping consistent layout and compact metadata.
 
 ## Report & Export
-- HTML export opens as a carousel-style report viewer with direct step anchors, left/right slide navigation, and a right-side section queue.
+- HTML export opens as a carousel-style report viewer with direct step anchors, left/right slide navigation, and a right-side Workflow Queue.
 - Exported viewer narration controls are in a compact bottom player bar (icon actions, time timeline `mm:ss | mm:ss`, fullscreen) with advanced toggles grouped under a gear menu.
 - Raw ZIP export (bundle v4) includes editable payload plus referenced burst frames, embedded section text, and baked narration audio:
   - `manifest.json`
