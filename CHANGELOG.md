@@ -4,11 +4,36 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.16.0 - 2026-03-04
+
 ### Added
-- None yet.
+- `GET_STATE` now includes:
+  - `stopFinalization` diagnostic state (`active`, `jobId`, `phase`, timestamps, source, error, dropped frame count).
+  - `burstPerf` counters (capture attempts/success/failure, dropped frames, backpressure pauses, moving averages, queue high-water).
+- `GET_STATE` now also includes `spoolRuntime` diagnostics (`queueDepth`, `queueBytes`, `droppedFrames`, `backpressureLevel`, `decodeMode`, `safetyCapActive`).
+- Popup GIF diagnostics now surface stop-finalization progress, effective burst FPS, and spool pressure/byte-budget state.
+- Hotkey GIF replay now supports cursor-path overlay rendering from throttled burst-time cursor samples.
 
 ### Changed
-- None yet.
+- Bumped extension version to `1.16.0` in `manifest.json`.
+- Section speech-to-text in the report editor now uses upload-only transcription (`Transcribe audio file`) instead of live microphone capture.
+- Removed active live-mic codepaths from the section editor UX (no report-tab recording, no popup capture controls, no workflow-tab proxy flow).
+- Runtime `SECTION_MIC_*` requests are now explicitly rejected with a stable `mic-capture-removed` response.
+- README/docs now document upload-only STT behavior and remove prior mic-capture fallback guidance.
+- Stop recording now returns control immediately and performs spool drain + snapshot persistence in a serialized background finalization job.
+- Stop lifecycle screenshot capture is now adaptive (captured only under healthy queue pressure, skipped under burst/backpressure conditions with explicit metadata reason).
+- Burst loop scheduling now uses explicit backoff delays and single-point scheduling per tick, removing forced `0ms` reschedule behavior under load.
+- Under sustained spool pressure, newest burst synthetic frames are dropped to prioritize browser responsiveness.
+- Burst stabilization mode now defaults to reliability-first behavior:
+  - burst JPEG quality defaults to 75 in stability mode.
+  - effective burst FPS is pressure-governed (healthy target capped at 10 FPS, then 8/6/4 as pressure rises).
+  - spool decode defaults to inline-safe cooperative processing.
+  - queue byte budgets are enforced per spool stage (capture/process/write).
+
+### Fixed
+- Exported burst carousel playback now uses stable contain-fit rendering per burst, preventing frame-size jitter and media misalignment.
+- Exported burst autoplay now resumes reliably on slide re-entry unless manually paused.
+- Cursor trail rendering now segments at tab/page/viewport context boundaries to avoid cross-context connector lines in multi-tab bursts.
 
 ## v1.15.3 - 2026-02-17
 

@@ -24,6 +24,10 @@ let settings = {
   pageWatchEnabled: true,
   pageWatchMs: 500,
   hotkeyBurstFps: 5,
+  hotkeyBurstImageFormat: "jpeg",
+  hotkeyBurstJpegQuality: 75,
+  burstStabilityMode: true,
+  burstMaxEffectiveFps: 10,
   clickBurstMarkerColor: "#2563eb",
   clickBurstMarkerStyle: "rounded-bold",
 
@@ -69,6 +73,32 @@ let recordingStartedAtMs = 0;
 let lifecycleQueue = Promise.resolve();
 let pendingHotkeyStopTimer = null;
 let pendingHotkeyStopUntilMs = null;
+let stopInProgress = false;
+let stopFinalizationQueue = Promise.resolve();
+let stopFinalizationState = {
+  active: false,
+  jobId: null,
+  phase: "idle",
+  startedAtMs: null,
+  updatedAtMs: null,
+  source: null,
+  lastError: null,
+  droppedBurstFrames: 0
+};
+let burstCaptureFailureStreak = 0;
+let burstPerf = {
+  captureAttempts: 0,
+  captureSuccesses: 0,
+  captureFailures: 0,
+  backpressurePauses: 0,
+  droppedFrames: 0,
+  avgCaptureMs: 0,
+  avgSpoolMs: 0,
+  writeQueueHighWater: 0,
+  queueBytesHighWater: 0,
+  effectiveBurstFps: 0
+};
+const burstCursorSamplesByTab = new Map();
 
 const DEBUG_LOGS = false;
 const EVENT_COMPACT_TRIGGER_COUNT = 600;
@@ -80,10 +110,73 @@ const HOTKEY_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB = 160;
 const HOTKEY_BURST_RECENT_WINDOW_MS = 180000;
 const HOTKEY_BURST_DEFAULT_FPS = 5;
 const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
+const HOTKEY_BURST_IMAGE_FORMAT_OPTIONS = new Set(["jpeg", "png"]);
+const HOTKEY_BURST_DEFAULT_IMAGE_FORMAT = "jpeg";
+const HOTKEY_BURST_DEFAULT_JPEG_QUALITY = 75;
+const HOTKEY_BURST_STABILITY_MAX_FPS_DEFAULT = 10;
+const HOTKEY_BURST_STABILITY_MAX_FPS_MIN = 4;
+const HOTKEY_BURST_STABILITY_MAX_FPS_MAX = 15;
+const HOTKEY_BURST_MODERATE_FPS_CAP = 8;
+const HOTKEY_BURST_HIGH_FPS_CAP = 6;
+const HOTKEY_BURST_SEVERE_FPS_CAP = 4;
 const HOTKEY_STOP_GRACE_MS = 2000;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
-const FRAME_SPOOL_BACKPRESSURE_RESUME_THRESHOLD = 8;
+const BURST_BACKOFF_CAPTURE_FAIL_BASE_MS = 150;
+const BURST_BACKOFF_CAPTURE_FAIL_MAX_MS = 1000;
+const BURST_BACKOFF_NO_ACTIVE_TAB_MS = 250;
+const BURST_BACKOFF_BACKPRESSURE_MIN_MS = 180;
+const BURST_CURSOR_SAMPLE_MAX_AGE_MS = 1400;
+const STOP_LIFECYCLE_CAPTURE_TIMEOUT_MS = 600;
+const SECTION_MIC_PROXY_ENABLED = false;
+const SECTION_MIC_PROXY_MAX_BYTES = 24 * 1024 * 1024;
+const SECTION_MIC_PROXY_MAX_DURATION_MS = 5 * 60 * 1000;
+const MIC_PROXY_SESSION_MAX_AGE_MS = 8 * 60 * 1000;
+const MIC_PROXY_PREPARE_TIMEOUT_MS = 8 * 1000;
+const MIC_PROXY_ARM_EXPIRY_MS = 90 * 1000;
+const MIC_PROXY_START_CONFIRM_TIMEOUT_MS = 15 * 1000;
+const SECTION_MIC_PROXY_INJECT_TIMEOUT_MS = 10 * 1000;
+const SECTION_MIC_PROXY_STOP_RESPONSE_TIMEOUT_MS = 15 * 1000;
+const SECTION_MIC_PROXY_DISCARD_RESPONSE_TIMEOUT_MS = 8 * 1000;
+const MIC_DIAG_STORAGE_KEY = "__uiRecorderMicDiag";
+const MIC_DIAG_MAX_ENTRIES = 300;
+const MIC_DIAG_TTL_MS = 24 * 60 * 60 * 1000;
+const MIC_PROXY_STATE = Object.freeze({
+  NONE: "none",
+  AWAITING_USER_START: "awaiting-user-start",
+  STARTING: "starting",
+  RECORDING: "recording",
+  STOPPING: "stopping",
+  FAILED: "failed",
+  EXPIRED: "expired"
+});
+const MIC_PROXY_REASON = Object.freeze({
+  NONE: "",
+  ARM_EXPIRED: "arm-expired",
+  START_CONFIRM_TIMEOUT: "start-confirm-timeout",
+  TARGET_NOT_INJECTABLE: "target-not-injectable",
+  NO_ELIGIBLE_TAB: "no-eligible-tab",
+  PREPARE_TIMEOUT: "prepare-timeout",
+  PROXY_STATUS_TIMEOUT: "proxy-status-timeout",
+  PROXY_START_FAILED: "proxy-start-failed",
+  PROXY_STOP_FAILED: "proxy-stop-failed",
+  PROXY_DISCARD_FAILED: "proxy-discard-failed",
+  SESSION_NOT_FOUND: "session-not-found",
+  SESSION_OWNER_MISMATCH: "session-owner-mismatch",
+  SESSION_STATE_INVALID: "session-state-invalid",
+  TAB_CONTEXT_UNAVAILABLE: "tab-context-unavailable",
+  PERMISSION_DENIED: "permission-denied",
+  NOT_FOUND: "not-found",
+  ATTACH_FAILED: "attach-failed",
+  RECORDER_FAILED: "recorder-failed"
+});
+const micProxySessions = new Map();
+const micProxyOwnerSessionByTabId = new Map();
+const micProxyArmTimers = new Map();
+const micProxyStartConfirmTimers = new Map();
+const lastUsableWebTabByWindow = new Map();
+let micDiagBuffer = [];
+let micDiagPersistTimer = null;
 
 const frameSpool = (
   typeof self !== "undefined" &&
@@ -93,6 +186,13 @@ const frameSpool = (
   captureQueueMax: 6,
   processQueueMax: 12,
   writeQueueMax: 18,
+  captureQueueBytesCap: 12 * 1024 * 1024,
+  processQueueBytesCap: 24 * 1024 * 1024,
+  writeQueueBytesCap: 24 * 1024 * 1024,
+  decodeWorkerEnabled: false,
+  decodeWorkerCount: 1,
+  decodeBatchSize: 1,
+  decodeDispatchPolicy: "single-worker-safe",
   log: (event, payload) => bgLog(event, payload),
   warn: (event, payload) => bgWarn(event, payload)
 }) : null;
@@ -118,6 +218,259 @@ function formatError(err) {
   if (err && err.stack) return err.stack;
   if (err && err.message) return err.message;
   return String(err);
+}
+
+function nextEmaValue(current, sample, weight = 0.2) {
+  const value = Number(sample);
+  if (!Number.isFinite(value) || value < 0) return Number(current) || 0;
+  const prev = Number(current);
+  if (!Number.isFinite(prev) || prev <= 0) return value;
+  return (prev * (1 - weight)) + (value * weight);
+}
+
+function resetBurstPerf() {
+  burstCaptureFailureStreak = 0;
+  burstPerf = {
+    captureAttempts: 0,
+    captureSuccesses: 0,
+    captureFailures: 0,
+    backpressurePauses: 0,
+    droppedFrames: 0,
+    avgCaptureMs: 0,
+    avgSpoolMs: 0,
+    writeQueueHighWater: 0,
+    queueBytesHighWater: 0,
+    effectiveBurstFps: 0
+  };
+}
+
+function updateWriteQueueHighWater(queueState) {
+  if (!queueState || typeof queueState !== "object") return;
+  const next = Number(queueState.writeQueue) || 0;
+  burstPerf.writeQueueHighWater = Math.max(
+    Number(burstPerf.writeQueueHighWater) || 0,
+    next
+  );
+  const bytes = Number(queueState.queueBytes) || 0;
+  burstPerf.queueBytesHighWater = Math.max(
+    Number(burstPerf.queueBytesHighWater) || 0,
+    bytes
+  );
+}
+
+function getFrameSpoolQueueState() {
+  if (!frameSpool || typeof frameSpool.getQueueState !== "function") return null;
+  try {
+    return frameSpool.getQueueState();
+  } catch (_) {
+    return null;
+  }
+}
+
+function getFrameSpoolWorkerSnapshot() {
+  return {
+    enabled: false,
+    workerCount: 0,
+    batchSize: 0,
+    dispatchCursor: 0,
+    inflightBatches: 0,
+    decodeQueueDepth: 0,
+    workerHealth: []
+  };
+}
+
+function getFrameSpoolCaps() {
+  return {
+    captureQueueCap: Math.max(1, Number(frameSpool && frameSpool.captureQueueMax) || 6),
+    processQueueCap: Math.max(1, Number(frameSpool && frameSpool.processQueueMax) || 12),
+    writeQueueCap: Math.max(1, Number(frameSpool && frameSpool.writeQueueMax) || 18)
+  };
+}
+
+function getFrameSpoolBackpressureLevel(queueState) {
+  const state = queueState && typeof queueState === "object" ? queueState : null;
+  if (!state) return "healthy";
+  const rawLevel = String(state.backpressureLevel || "").trim().toLowerCase();
+  if (rawLevel === "moderate" || rawLevel === "high" || rawLevel === "severe") return rawLevel;
+  const caps = getFrameSpoolCaps();
+  const writeRatio = (Number(state.writeQueue) || 0) / Math.max(1, caps.writeQueueCap);
+  const processRatio = (Number(state.processQueue) || 0) / Math.max(1, caps.processQueueCap);
+  const captureBytesCap = Math.max(0, Number(frameSpool && frameSpool.captureQueueBytesCap) || 0);
+  const processBytesCap = Math.max(0, Number(frameSpool && frameSpool.processQueueBytesCap) || 0);
+  const writeBytesCap = Math.max(0, Number(frameSpool && frameSpool.writeQueueBytesCap) || 0);
+  const totalCap = Math.max(
+    1,
+    captureBytesCap + processBytesCap + writeBytesCap
+  );
+  const byteRatio = (Number(state.queueBytes) || 0) / totalCap;
+  if (state.safetyCapActive || writeRatio >= 0.9 || processRatio >= 0.9 || byteRatio >= 0.9) return "severe";
+  if (writeRatio >= 0.75 || processRatio >= 0.75 || byteRatio >= 0.72) return "high";
+  if (writeRatio >= 0.5 || processRatio >= 0.5 || byteRatio >= 0.45) return "moderate";
+  return "healthy";
+}
+
+function getFrameSpoolRuntimeSnapshot(queueState = null) {
+  if (frameSpool && typeof frameSpool.getRuntimeState === "function") {
+    try {
+      const runtime = frameSpool.getRuntimeState();
+      if (runtime && typeof runtime === "object") {
+        return {
+          queueDepth: Math.max(0, Number(runtime.queueDepth) || 0),
+          queueBytes: Math.max(0, Number(runtime.queueBytes) || 0),
+          droppedFrames: Math.max(0, Number(runtime.droppedFrames) || 0),
+          backpressureLevel: String(runtime.backpressureLevel || "healthy"),
+          decodeMode: String(runtime.decodeMode || "inline-safe"),
+          safetyCapActive: !!runtime.safetyCapActive,
+          queueBytesHighWater: Math.max(0, Number(runtime.queueBytesHighWater) || Number(burstPerf.queueBytesHighWater) || 0),
+          effectiveBurstFps: Number(burstPerf.effectiveBurstFps) || 0
+        };
+      }
+    } catch (_) {}
+  }
+  const state = queueState && typeof queueState === "object"
+    ? queueState
+    : getFrameSpoolQueueState();
+  const queueDepth = state
+    ? (
+      (Number(state.captureQueue) || 0)
+      + (Number(state.processQueue) || 0)
+      + (Number(state.writeQueue) || 0)
+    )
+    : 0;
+  const queueBytes = Math.max(0, Number(state && state.queueBytes) || 0);
+  const level = getFrameSpoolBackpressureLevel(state);
+  const decodeMode = state && state.decodeMode
+    ? String(state.decodeMode)
+    : "inline-safe";
+  const safetyCapActive = !!(state && state.safetyCapActive);
+  return {
+    queueDepth,
+    queueBytes,
+    droppedFrames: Number(burstPerf.droppedFrames) || 0,
+    backpressureLevel: level,
+    decodeMode,
+    safetyCapActive,
+    queueBytesHighWater: Number(burstPerf.queueBytesHighWater) || 0,
+    effectiveBurstFps: Number(burstPerf.effectiveBurstFps) || 0
+  };
+}
+
+function isFrameSpoolBackpressureActive(queueState) {
+  const level = getFrameSpoolBackpressureLevel(queueState);
+  return level === "high" || level === "severe";
+}
+
+function isFrameSpoolPressureHigh(queueState) {
+  return getFrameSpoolBackpressureLevel(queueState) === "severe";
+}
+
+function newStopFinalizationJobId() {
+  return `fin_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function setStopFinalizationState(patch = {}) {
+  const next = patch && typeof patch === "object" ? patch : {};
+  const hasDropped = Object.prototype.hasOwnProperty.call(next, "droppedBurstFrames");
+  const droppedBurstFrames = hasDropped
+    ? Math.max(0, Number(next.droppedBurstFrames) || 0)
+    : Math.max(0, Number(stopFinalizationState.droppedBurstFrames) || 0);
+  stopFinalizationState = {
+    ...stopFinalizationState,
+    ...next,
+    updatedAtMs: Date.now(),
+    droppedBurstFrames
+  };
+  return stopFinalizationState;
+}
+
+function getStopFinalizationStateSnapshot() {
+  return {
+    active: !!stopFinalizationState.active,
+    jobId: stopFinalizationState.jobId || null,
+    phase: String(stopFinalizationState.phase || "idle"),
+    startedAtMs: Number(stopFinalizationState.startedAtMs) || null,
+    updatedAtMs: Number(stopFinalizationState.updatedAtMs) || null,
+    source: stopFinalizationState.source || null,
+    lastError: stopFinalizationState.lastError || null,
+    droppedBurstFrames: Number(stopFinalizationState.droppedBurstFrames) || 0
+  };
+}
+
+function getBurstPerfSnapshot() {
+  return {
+    captureAttempts: Number(burstPerf.captureAttempts) || 0,
+    captureSuccesses: Number(burstPerf.captureSuccesses) || 0,
+    captureFailures: Number(burstPerf.captureFailures) || 0,
+    backpressurePauses: Number(burstPerf.backpressurePauses) || 0,
+    droppedFrames: Number(burstPerf.droppedFrames) || 0,
+    avgCaptureMs: Number((Number(burstPerf.avgCaptureMs) || 0).toFixed(2)),
+    avgSpoolMs: Number((Number(burstPerf.avgSpoolMs) || 0).toFixed(2)),
+    writeQueueHighWater: Number(burstPerf.writeQueueHighWater) || 0,
+    queueBytesHighWater: Number(burstPerf.queueBytesHighWater) || 0,
+    effectiveBurstFps: Number(burstPerf.effectiveBurstFps) || 0
+  };
+}
+
+function clearBurstCursorSamples(reason = "clear") {
+  if (!burstCursorSamplesByTab.size) return;
+  burstCursorSamplesByTab.clear();
+  bgLog("burst-cursor:cleared", { reason });
+}
+
+function normalizeBurstCursorSample(sampleRaw) {
+  const sample = sampleRaw && typeof sampleRaw === "object" ? sampleRaw : null;
+  if (!sample) return null;
+  const xRaw = Number(sample.x);
+  const yRaw = Number(sample.y);
+  const viewportWRaw = Number(sample.viewportW);
+  const viewportHRaw = Number(sample.viewportH);
+  if (!Number.isFinite(xRaw) || !Number.isFinite(yRaw)) return null;
+  const viewportW = Math.max(1, Number.isFinite(viewportWRaw) ? Math.round(viewportWRaw) : 1);
+  const viewportH = Math.max(1, Number.isFinite(viewportHRaw) ? Math.round(viewportHRaw) : 1);
+  const x = Math.max(0, Math.min(viewportW, Math.round(xRaw)));
+  const y = Math.max(0, Math.min(viewportH, Math.round(yRaw)));
+  return {
+    x,
+    y,
+    viewportW,
+    viewportH,
+    scrollX: Math.round(Number(sample.scrollX) || 0),
+    scrollY: Math.round(Number(sample.scrollY) || 0),
+    tsMs: Number(sample.tsMs) || Date.now()
+  };
+}
+
+function setBurstCursorSample(senderTab, sampleRaw) {
+  if (!senderTab || typeof senderTab.id !== "number") return false;
+  const normalized = normalizeBurstCursorSample(sampleRaw);
+  if (!normalized) return false;
+  burstCursorSamplesByTab.set(senderTab.id, {
+    tabId: senderTab.id,
+    windowId: typeof senderTab.windowId === "number" ? senderTab.windowId : null,
+    ...normalized,
+    updatedAtMs: Date.now()
+  });
+  return true;
+}
+
+function getBurstCursorSampleForTab(tab) {
+  if (!tab || typeof tab.id !== "number") return null;
+  const sample = burstCursorSamplesByTab.get(tab.id);
+  if (!sample || typeof sample !== "object") return null;
+  const now = Date.now();
+  if ((now - (Number(sample.updatedAtMs) || 0)) > BURST_CURSOR_SAMPLE_MAX_AGE_MS) {
+    burstCursorSamplesByTab.delete(tab.id);
+    return null;
+  }
+  const tabWindowId = typeof tab.windowId === "number" ? tab.windowId : null;
+  if (
+    sample.windowId !== null &&
+    tabWindowId !== null &&
+    sample.windowId !== tabWindowId
+  ) {
+    return null;
+  }
+  return sample;
 }
 
 async function ensureFrameSpoolReady() {
@@ -208,6 +561,20 @@ async function runFrameSpoolGc(reason, opts = {}) {
   }
 }
 
+function getActiveSessionIdsForGc(extraSessionIds = []) {
+  const all = new Set();
+  const extra = Array.isArray(extraSessionIds) ? extraSessionIds : [];
+  for (const id of extra) {
+    const normalized = String(id || "").trim();
+    if (normalized) all.add(normalized);
+  }
+  if (isRecording && sessionId) {
+    const current = String(sessionId || "").trim();
+    if (current) all.add(current);
+  }
+  return Array.from(all);
+}
+
 function scheduleFrameSpoolMaintenance(reason, delayMs = 1200) {
   if (!frameSpool) return;
   if (frameSpoolMaintenanceTimer) clearTimeout(frameSpoolMaintenanceTimer);
@@ -233,21 +600,34 @@ function buildBurstFrameRef(ref) {
 }
 
 async function storeBurstFrameInSpool(dataUrl, meta = {}) {
-  if (!dataUrl || !(await ensureFrameSpoolReady())) return null;
+  if (!dataUrl || !(await ensureFrameSpoolReady())) {
+    return { ref: null, dropped: false, reason: "spool-unavailable" };
+  }
+  const shouldDropOnPressure = !!(meta && meta.dropOnPressure);
+  const queueState = getFrameSpoolQueueState();
+  updateWriteQueueHighWater(queueState);
+  if (shouldDropOnPressure && isFrameSpoolPressureHigh(queueState)) {
+    return { ref: null, dropped: true, reason: "backpressure" };
+  }
   try {
     const enqueueMeta = {
       sessionId: String(meta.sessionId || sessionId || ""),
       createdAtMs: Number(meta.createdAtMs) || Date.now(),
+      mime: String(meta.mime || "image/png"),
+      dropOnPressure: shouldDropOnPressure,
       width: Number(meta.width) || null,
       height: Number(meta.height) || null
     };
     const ref = (typeof frameSpool.enqueueCaptureImmediate === "function")
       ? frameSpool.enqueueCaptureImmediate(enqueueMeta, dataUrl)
       : await frameSpool.enqueueCapture(enqueueMeta, dataUrl);
-    return buildBurstFrameRef(ref);
+    return { ref: buildBurstFrameRef(ref), dropped: false, reason: null };
   } catch (err) {
+    if (err && (err.uiRecorderDropped || err.code === "FRAME_SPOOL_PRESSURE_DROP")) {
+      return { ref: null, dropped: true, reason: "byte-cap" };
+    }
     bgWarn("frame-spool:enqueue-failed", { error: formatError(err) });
-    return null;
+    return { ref: null, dropped: false, reason: "enqueue-failed" };
   }
 }
 
@@ -279,6 +659,7 @@ function stateSummary() {
   return {
     isRecording,
     isPaused,
+    stopInProgress,
     eventCount: events.length,
     reportCount: reports.length,
     sessionId
@@ -322,6 +703,8 @@ function resetScreenshotState() {
   burstLastLoopPauseReason = "mode-off";
   burstLoopLastPersistAtMs = 0;
   burstLoopPersistInFlight = false;
+  burstCaptureFailureStreak = 0;
+  clearBurstCursorSamples("reset");
   if (hadPending) bgLog("resetScreenshotState:cleared-pending");
 }
 
@@ -350,6 +733,7 @@ async function refreshActiveCaptureTarget(reason) {
     activeCaptureTabUrl = String(tab.url || "");
     activeCaptureTabTitle = String(tab.title || "");
     activeCaptureUpdatedAt = Date.now();
+    rememberUsableWebTab(tab, `${reason}:refresh`);
     bgLog("active-target:set", {
       reason,
       tabId: activeCaptureTabId,
@@ -380,6 +764,453 @@ function isInjectableTabUrl(url) {
     u.startsWith("resource:") ||
     u.startsWith("view-source:")
   );
+}
+
+function newMicProxySessionId() {
+  return `mic-proxy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildMicProxyFailure(reason, error) {
+  return {
+    ok: false,
+    reason: String(reason || "proxy-failed"),
+    error: String(error || "Site microphone proxy failed.")
+  };
+}
+
+function buildMicProxyStatusPayload(session) {
+  if (!session || typeof session !== "object") {
+    return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
+  }
+  return {
+    ok: true,
+    sessionId: String(session.sessionId || ""),
+    state: normalizeMicProxyState(session.state),
+    reason: String(session.reason || ""),
+    error: String(session.error || ""),
+    tabId: typeof session.targetTabId === "number" ? session.targetTabId : null,
+    tabUrl: String(session.targetTabUrl || ""),
+    mimeType: String(session.mimeType || "audio/webm")
+  };
+}
+
+function normalizeMicProxyState(stateRaw) {
+  const state = String(stateRaw || "").trim().toLowerCase();
+  if (state === MIC_PROXY_STATE.AWAITING_USER_START) return MIC_PROXY_STATE.AWAITING_USER_START;
+  if (state === MIC_PROXY_STATE.STARTING) return MIC_PROXY_STATE.STARTING;
+  if (state === MIC_PROXY_STATE.RECORDING) return MIC_PROXY_STATE.RECORDING;
+  if (state === MIC_PROXY_STATE.STOPPING) return MIC_PROXY_STATE.STOPPING;
+  if (state === MIC_PROXY_STATE.FAILED) return MIC_PROXY_STATE.FAILED;
+  if (state === MIC_PROXY_STATE.EXPIRED) return MIC_PROXY_STATE.EXPIRED;
+  return MIC_PROXY_STATE.NONE;
+}
+
+function parseTabHost(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  try {
+    return String(new URL(raw).host || "").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+function newMicDiagId() {
+  return `mdiag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function pruneMicDiagBuffer(entriesRaw, nowMs = Date.now()) {
+  const cutoff = Math.max(0, nowMs - MIC_DIAG_TTL_MS);
+  const source = Array.isArray(entriesRaw) ? entriesRaw : [];
+  const pruned = source
+    .filter((entry) => entry && typeof entry === "object")
+    .filter((entry) => Number(entry.ts) >= cutoff)
+    .slice(-MIC_DIAG_MAX_ENTRIES);
+  return pruned;
+}
+
+function schedulePersistMicDiagBuffer() {
+  if (micDiagPersistTimer) clearTimeout(micDiagPersistTimer);
+  micDiagPersistTimer = setTimeout(async () => {
+    micDiagPersistTimer = null;
+    try {
+      micDiagBuffer = pruneMicDiagBuffer(micDiagBuffer);
+      await browser.storage.local.set({ [MIC_DIAG_STORAGE_KEY]: micDiagBuffer });
+    } catch (err) {
+      bgWarn("mic-diag:persist-failed", { error: formatError(err) });
+    }
+  }, 180);
+}
+
+function appendMicDiag(entryRaw) {
+  const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
+  const nowMs = Date.now();
+  const stored = {
+    id: String(entry.id || newMicDiagId()),
+    ts: Number(entry.ts) || nowMs,
+    source: String(entry.source || "unknown"),
+    event: String(entry.event || "unknown"),
+    sessionId: String(entry.sessionId || ""),
+    requestId: Number(entry.requestId) || 0,
+    ownerTabId: Number.isFinite(Number(entry.ownerTabId)) ? Number(entry.ownerTabId) : null,
+    targetTabId: Number.isFinite(Number(entry.targetTabId)) ? Number(entry.targetTabId) : null,
+    frameId: Number.isFinite(Number(entry.frameId)) ? Number(entry.frameId) : 0,
+    state: normalizeMicProxyState(entry.state),
+    reason: String(entry.reason || ""),
+    durationMs: Number.isFinite(Number(entry.durationMs)) ? Number(entry.durationMs) : 0,
+    deviceCount: Number.isFinite(Number(entry.deviceCount)) ? Number(entry.deviceCount) : -1,
+    consentState: String(entry.consentState || ""),
+    errorName: String(entry.errorName || ""),
+    errorCode: String(entry.errorCode || "")
+  };
+  micDiagBuffer.push(stored);
+  micDiagBuffer = pruneMicDiagBuffer(micDiagBuffer, nowMs);
+  schedulePersistMicDiagBuffer();
+  return stored;
+}
+
+function logMicDiag(source, event, details = {}) {
+  const payload = details && typeof details === "object" ? details : {};
+  appendMicDiag({
+    source: String(source || "unknown"),
+    event: String(event || "unknown"),
+    sessionId: String(payload.sessionId || ""),
+    requestId: Number(payload.requestId) || 0,
+    ownerTabId: payload.ownerTabId,
+    targetTabId: payload.targetTabId,
+    frameId: payload.frameId,
+    state: payload.state,
+    reason: payload.reason,
+    durationMs: payload.durationMs,
+    deviceCount: payload.deviceCount,
+    consentState: payload.consentState,
+    errorName: payload.errorName,
+    errorCode: payload.errorCode
+  });
+}
+
+function getMicProxySessionForOwner(ownerTabId) {
+  if (typeof ownerTabId !== "number") return null;
+  const sessionId = micProxyOwnerSessionByTabId.get(ownerTabId);
+  if (!sessionId) return null;
+  const session = micProxySessions.get(sessionId);
+  if (!session) {
+    micProxyOwnerSessionByTabId.delete(ownerTabId);
+    return null;
+  }
+  return session;
+}
+
+function clearMicProxyTimer(timerMap, sessionId) {
+  if (!timerMap || !sessionId) return;
+  if (!timerMap.has(sessionId)) return;
+  const timerId = timerMap.get(sessionId);
+  timerMap.delete(sessionId);
+  if (timerId) {
+    try { clearTimeout(timerId); } catch (_) {}
+  }
+}
+
+function setMicProxySessionState(session, nextState, details = {}) {
+  if (!session || typeof session !== "object") return null;
+  const previousState = normalizeMicProxyState(session.state);
+  const normalizedState = normalizeMicProxyState(nextState);
+  const reason = details && Object.prototype.hasOwnProperty.call(details, "reason")
+    ? String(details.reason || "")
+    : String(session.reason || "");
+  const error = details && Object.prototype.hasOwnProperty.call(details, "error")
+    ? String(details.error || "")
+    : String(session.error || "");
+  session.state = normalizedState;
+  session.reason = reason;
+  session.error = error;
+  session.updatedAtMs = Date.now();
+  if (normalizedState === MIC_PROXY_STATE.RECORDING && !session.startedAtMs) {
+    session.startedAtMs = session.updatedAtMs;
+  }
+  if (
+    normalizedState === MIC_PROXY_STATE.RECORDING ||
+    normalizedState === MIC_PROXY_STATE.STOPPING ||
+    normalizedState === MIC_PROXY_STATE.FAILED ||
+    normalizedState === MIC_PROXY_STATE.EXPIRED ||
+    normalizedState === MIC_PROXY_STATE.NONE
+  ) {
+    clearMicProxyTimer(micProxyArmTimers, String(session.sessionId || ""));
+  }
+  if (
+    normalizedState === MIC_PROXY_STATE.RECORDING ||
+    normalizedState === MIC_PROXY_STATE.STOPPING ||
+    normalizedState === MIC_PROXY_STATE.FAILED ||
+    normalizedState === MIC_PROXY_STATE.EXPIRED ||
+    normalizedState === MIC_PROXY_STATE.NONE
+  ) {
+    clearMicProxyTimer(micProxyStartConfirmTimers, String(session.sessionId || ""));
+  }
+  if (normalizedState !== previousState || reason || error) {
+    logMicDiag("background", "mic-proxy-state", {
+      sessionId: session.sessionId,
+      ownerTabId: session.ownerTabId,
+      targetTabId: session.targetTabId,
+      state: normalizedState,
+      reason,
+      errorName: error ? "state-error" : "",
+      errorCode: reason || ""
+    });
+  }
+  return session;
+}
+
+async function sendMicProxyHidePrompt(tabId, sessionId, reason) {
+  if (typeof tabId !== "number") return;
+  try {
+    await withTimeout(
+      browser.tabs.sendMessage(tabId, {
+        type: "UIR_SECTION_MIC_PROXY_HIDE_ARM",
+        sessionId: String(sessionId || ""),
+        reason: String(reason || "")
+      }, { frameId: 0 }),
+      SECTION_MIC_PROXY_DISCARD_RESPONSE_TIMEOUT_MS,
+      "Timed out hiding workflow tab microphone prompt."
+    );
+  } catch (_) {}
+}
+
+function scheduleMicProxyArmExpiry(sessionId) {
+  const key = String(sessionId || "").trim();
+  if (!key) return;
+  clearMicProxyTimer(micProxyArmTimers, key);
+  const timerId = setTimeout(async () => {
+    const session = micProxySessions.get(key);
+    if (!session) return;
+    const state = normalizeMicProxyState(session.state);
+    if (state !== MIC_PROXY_STATE.AWAITING_USER_START && state !== MIC_PROXY_STATE.STARTING) return;
+    setMicProxySessionState(session, MIC_PROXY_STATE.EXPIRED, { reason: MIC_PROXY_REASON.ARM_EXPIRED, error: "" });
+    await sendMicProxyHidePrompt(session.targetTabId, session.sessionId, MIC_PROXY_REASON.ARM_EXPIRED);
+    logMicDiag("background", "mic-proxy-arm-expired", {
+      sessionId: session.sessionId,
+      ownerTabId: session.ownerTabId,
+      targetTabId: session.targetTabId,
+      state: session.state,
+      reason: session.reason
+    });
+  }, MIC_PROXY_ARM_EXPIRY_MS);
+  micProxyArmTimers.set(key, timerId);
+}
+
+function scheduleMicProxyStartConfirmTimeout(sessionId) {
+  const key = String(sessionId || "").trim();
+  if (!key) return;
+  clearMicProxyTimer(micProxyStartConfirmTimers, key);
+  const timerId = setTimeout(async () => {
+    const session = micProxySessions.get(key);
+    if (!session) return;
+    if (normalizeMicProxyState(session.state) !== MIC_PROXY_STATE.STARTING) return;
+    setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, {
+      reason: MIC_PROXY_REASON.START_CONFIRM_TIMEOUT,
+      error: "Workflow tab microphone start confirmation timed out."
+    });
+    await sendMicProxyHidePrompt(session.targetTabId, session.sessionId, MIC_PROXY_REASON.START_CONFIRM_TIMEOUT);
+    logMicDiag("background", "mic-proxy-start-timeout", {
+      sessionId: session.sessionId,
+      ownerTabId: session.ownerTabId,
+      targetTabId: session.targetTabId,
+      state: session.state,
+      reason: session.reason
+    });
+  }, MIC_PROXY_START_CONFIRM_TIMEOUT_MS);
+  micProxyStartConfirmTimers.set(key, timerId);
+}
+
+function rememberUsableWebTab(tab, reason) {
+  if (!tab || typeof tab.id !== "number" || typeof tab.windowId !== "number") return false;
+  if (!isInjectableTabUrl(tab.url)) return false;
+  lastUsableWebTabByWindow.set(tab.windowId, {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    url: String(tab.url || ""),
+    updatedAtMs: Date.now()
+  });
+  bgLog("mic-proxy:remember-tab", { reason, tabId: tab.id, windowId: tab.windowId, url: tab.url });
+  return true;
+}
+
+async function clearMicProxySession(sessionId, reason, notifyTarget = false) {
+  const key = String(sessionId || "").trim();
+  if (!key) return false;
+  const session = micProxySessions.get(key);
+  if (!session) return false;
+  clearMicProxyTimer(micProxyArmTimers, key);
+  clearMicProxyTimer(micProxyStartConfirmTimers, key);
+  micProxySessions.delete(key);
+  if (
+    typeof session.ownerTabId === "number" &&
+    micProxyOwnerSessionByTabId.get(session.ownerTabId) === key
+  ) {
+    micProxyOwnerSessionByTabId.delete(session.ownerTabId);
+  }
+  if (notifyTarget && typeof session.targetTabId === "number") {
+    await sendMicProxyHidePrompt(session.targetTabId, key, reason || "session-clear");
+    try {
+      await withTimeout(
+        browser.tabs.sendMessage(session.targetTabId, {
+          type: "UIR_SECTION_MIC_PROXY_DISCARD",
+          sessionId: key,
+          reason: String(reason || "session-clear")
+        }, { frameId: 0 }),
+        SECTION_MIC_PROXY_DISCARD_RESPONSE_TIMEOUT_MS,
+        "Timed out notifying workflow tab to discard proxy microphone session."
+      );
+    } catch (_) {}
+  }
+  logMicDiag("background", "mic-proxy-session-cleared", {
+    sessionId: key,
+    ownerTabId: session.ownerTabId,
+    targetTabId: session.targetTabId,
+    state: session.state,
+    reason: String(reason || "")
+  });
+  bgLog("mic-proxy:session-cleared", {
+    reason,
+    sessionId: key,
+    ownerTabId: session.ownerTabId,
+    targetTabId: session.targetTabId
+  });
+  return true;
+}
+
+async function clearMicProxySessionsForOwner(ownerTabId, reason, notifyTarget = false) {
+  if (typeof ownerTabId !== "number") return 0;
+  const toClear = [];
+  micProxySessions.forEach((session, sessionId) => {
+    if (!session || typeof session !== "object") return;
+    if (session.ownerTabId !== ownerTabId) return;
+    toClear.push(String(sessionId));
+  });
+  if (!toClear.length) return 0;
+  for (const sessionId of toClear) {
+    await clearMicProxySession(sessionId, reason, notifyTarget);
+  }
+  return toClear.length;
+}
+
+function failMicProxySessionsForTargetTab(targetTabId, reason, error) {
+  if (typeof targetTabId !== "number") return 0;
+  let failed = 0;
+  micProxySessions.forEach((session) => {
+    if (!session || typeof session !== "object") return;
+    if (session.targetTabId !== targetTabId) return;
+    setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, {
+      reason: String(reason || MIC_PROXY_REASON.TAB_CONTEXT_UNAVAILABLE),
+      error: String(error || "Workflow tab context is unavailable for microphone capture.")
+    });
+    failed++;
+  });
+  return failed;
+}
+
+async function sweepMicProxySessions(reason) {
+  const now = Date.now();
+  const stale = [];
+  micProxySessions.forEach((session, sessionId) => {
+    const createdAtMs = Number(session && session.createdAtMs) || 0;
+    if (!createdAtMs || (now - createdAtMs) > MIC_PROXY_SESSION_MAX_AGE_MS) {
+      stale.push(String(sessionId));
+    }
+  });
+  if (!stale.length) return 0;
+  for (const sessionId of stale) {
+    await clearMicProxySession(sessionId, `${reason || "sweep"}:expired`, true);
+  }
+  return stale.length;
+}
+
+async function resolveMicProxyTargetTab(ownerTab) {
+  if (!ownerTab || typeof ownerTab.windowId !== "number") return null;
+  const ownerTabId = typeof ownerTab.id === "number" ? ownerTab.id : null;
+  const ownerWindowId = ownerTab.windowId;
+
+  const isEligibleCandidate = (tab, requireSameWindow = false) => {
+    if (!tab || typeof tab.id !== "number") return false;
+    if (ownerTabId !== null && tab.id === ownerTabId) return false;
+    if (requireSameWindow && tab.windowId !== ownerWindowId) return false;
+    return isInjectableTabUrl(tab.url);
+  };
+
+  const pickCandidate = (tabs, requireSameWindow = false) => {
+    const sorted = (Array.isArray(tabs) ? tabs : [])
+      .filter((tab) => isEligibleCandidate(tab, requireSameWindow))
+      .sort((a, b) => {
+        const aLast = Number(a && a.lastAccessed) || 0;
+        const bLast = Number(b && b.lastAccessed) || 0;
+        return bLast - aLast;
+      });
+    return sorted.length ? sorted[0] : null;
+  };
+
+  const tryRememberedWindowTab = async (windowId) => {
+    if (typeof windowId !== "number") return null;
+    const remembered = lastUsableWebTabByWindow.get(windowId);
+    if (!remembered || typeof remembered.tabId !== "number") return null;
+    try {
+      const tab = await browser.tabs.get(remembered.tabId);
+      if (!isEligibleCandidate(tab, windowId === ownerWindowId)) return null;
+      return tab;
+    } catch (_) {
+      lastUsableWebTabByWindow.delete(windowId);
+      return null;
+    }
+  };
+
+  const rememberedSameWindow = await tryRememberedWindowTab(ownerWindowId);
+  if (rememberedSameWindow && typeof rememberedSameWindow.id === "number") return rememberedSameWindow;
+
+  try {
+    const ownerWindowTabs = await browser.tabs.query({ windowId: ownerWindowId });
+    const sameWindowCandidate = pickCandidate(ownerWindowTabs, true);
+    if (sameWindowCandidate && typeof sameWindowCandidate.id === "number") return sameWindowCandidate;
+  } catch (err) {
+    bgWarn("mic-proxy:resolve-target-owner-window-failed", {
+      windowId: ownerWindowId,
+      error: formatError(err)
+    });
+  }
+
+  const rememberedEntries = Array.from(lastUsableWebTabByWindow.entries())
+    .filter(([windowId, entry]) => (
+      typeof windowId === "number" &&
+      windowId !== ownerWindowId &&
+      entry &&
+      typeof entry === "object" &&
+      typeof entry.updatedAtMs === "number"
+    ))
+    .sort((a, b) => {
+      const aUpdated = Number(a[1] && a[1].updatedAtMs) || 0;
+      const bUpdated = Number(b[1] && b[1].updatedAtMs) || 0;
+      return bUpdated - aUpdated;
+    });
+
+  for (const [windowId] of rememberedEntries) {
+    const rememberedTarget = await tryRememberedWindowTab(windowId);
+    if (rememberedTarget && typeof rememberedTarget.id === "number") return rememberedTarget;
+  }
+
+  try {
+    const activeTabs = await browser.tabs.query({ active: true });
+    const activeCandidate = pickCandidate(activeTabs, false);
+    if (activeCandidate && typeof activeCandidate.id === "number") return activeCandidate;
+  } catch (err) {
+    bgWarn("mic-proxy:resolve-target-active-global-failed", { error: formatError(err) });
+  }
+
+  try {
+    const allTabs = await browser.tabs.query({});
+    const globalCandidate = pickCandidate(allTabs, false);
+    if (globalCandidate && typeof globalCandidate.id === "number") return globalCandidate;
+  } catch (err) {
+    bgWarn("mic-proxy:resolve-target-global-failed", { error: formatError(err) });
+  }
+
+  return null;
 }
 
 async function ensureContentScriptInTab(tabId, reason) {
@@ -433,6 +1264,7 @@ async function notifyCaptureModeChanged(reason) {
         burstHotkeyModeActive: !!burstHotkeyModeActive,
         burstModeEpoch,
         burstRunId,
+        burstRunTargetFps,
         burstLoopActive,
         burstLastFrameAtMs,
         burstLastLoopPauseReason,
@@ -475,6 +1307,25 @@ function normalizeHotkeyBurstFps(value) {
   return HOTKEY_BURST_DEFAULT_FPS;
 }
 
+function normalizeHotkeyBurstImageFormat(value) {
+  const format = String(value || "").trim().toLowerCase();
+  if (HOTKEY_BURST_IMAGE_FORMAT_OPTIONS.has(format)) return format;
+  return HOTKEY_BURST_DEFAULT_IMAGE_FORMAT;
+}
+
+function normalizeHotkeyBurstJpegQuality(value) {
+  return Math.round(clampNumber(value, 60, 95, HOTKEY_BURST_DEFAULT_JPEG_QUALITY));
+}
+
+function normalizeBurstMaxEffectiveFps(value) {
+  return Math.round(clampNumber(
+    value,
+    HOTKEY_BURST_STABILITY_MAX_FPS_MIN,
+    HOTKEY_BURST_STABILITY_MAX_FPS_MAX,
+    HOTKEY_BURST_STABILITY_MAX_FPS_DEFAULT
+  ));
+}
+
 function normalizeSettings(base) {
   const out = { ...base };
   out.screenshotDebounceMs = Math.max(0, Number(out.screenshotDebounceMs) || 900);
@@ -492,6 +1343,10 @@ function normalizeSettings(base) {
   out.pageWatchEnabled = out.pageWatchEnabled !== false;
   out.pageWatchMs = Math.max(200, Number(out.pageWatchMs) || 500);
   out.hotkeyBurstFps = normalizeHotkeyBurstFps(out.hotkeyBurstFps);
+  out.hotkeyBurstImageFormat = normalizeHotkeyBurstImageFormat(out.hotkeyBurstImageFormat);
+  out.hotkeyBurstJpegQuality = normalizeHotkeyBurstJpegQuality(out.hotkeyBurstJpegQuality);
+  out.burstStabilityMode = out.burstStabilityMode !== false;
+  out.burstMaxEffectiveFps = normalizeBurstMaxEffectiveFps(out.burstMaxEffectiveFps);
   out.clickBurstMarkerColor = normalizeHexColor(out.clickBurstMarkerColor, "#2563eb");
   out.clickBurstMarkerStyle = normalizeMarkerStyle(out.clickBurstMarkerStyle);
   delete out.clickBurstEnabled;
@@ -522,16 +1377,35 @@ function getEffectiveSettings(base = settings) {
 }
 
 function isHotkeyBurstModeActive() {
-  return !!(isRecording && burstHotkeyModeActive);
+  return !!(isRecording && burstHotkeyModeActive && !stopInProgress);
 }
 
 function getHotkeyBurstFps() {
   const effective = getEffectiveSettings();
-  return normalizeHotkeyBurstFps(effective.hotkeyBurstFps);
+  let fps = normalizeHotkeyBurstFps(effective.hotkeyBurstFps);
+  if (effective.burstStabilityMode !== false) {
+    fps = Math.min(fps, normalizeBurstMaxEffectiveFps(effective.burstMaxEffectiveFps));
+  }
+  return fps;
 }
 
-function getHotkeyBurstFrameMs() {
-  const fps = getHotkeyBurstFps();
+function getBurstGovernorFps(baseFps, backpressureLevel, effectiveSettings = null) {
+  const settingsSnapshot = effectiveSettings && typeof effectiveSettings === "object"
+    ? effectiveSettings
+    : getEffectiveSettings();
+  let fps = Math.max(1, Math.round(Number(baseFps) || HOTKEY_BURST_DEFAULT_FPS));
+  if (settingsSnapshot.burstStabilityMode !== false) {
+    fps = Math.min(fps, normalizeBurstMaxEffectiveFps(settingsSnapshot.burstMaxEffectiveFps));
+  }
+  const level = String(backpressureLevel || "healthy").toLowerCase();
+  if (level === "severe") fps = Math.min(fps, HOTKEY_BURST_SEVERE_FPS_CAP);
+  else if (level === "high") fps = Math.min(fps, HOTKEY_BURST_HIGH_FPS_CAP);
+  else if (level === "moderate") fps = Math.min(fps, HOTKEY_BURST_MODERATE_FPS_CAP);
+  return Math.max(1, fps);
+}
+
+function getHotkeyBurstFrameMs(targetFps = null) {
+  const fps = Math.max(1, Math.round(Number(targetFps) || getHotkeyBurstFps()));
   if (isHotkeyBurstModeActive()) {
     burstRunTargetFps = fps;
   }
@@ -581,9 +1455,20 @@ async function resolveBurstCaptureTab() {
   }
 }
 
+function getBurstCaptureFailureBackoffMs(frameMs) {
+  const attempts = Math.max(0, Number(burstCaptureFailureStreak) || 0);
+  const cappedPower = Math.min(3, attempts);
+  const raw = BURST_BACKOFF_CAPTURE_FAIL_BASE_MS * Math.pow(2, cappedPower);
+  return Math.max(Math.max(0, Number(frameMs) || 0), Math.min(BURST_BACKOFF_CAPTURE_FAIL_MAX_MS, raw));
+}
+
 async function runContinuousBurstCaptureTick() {
   burstContinuousTimer = null;
-  const frameMs = getHotkeyBurstFrameMs();
+  const effectiveSettings = getEffectiveSettings();
+  const configuredFps = getHotkeyBurstFps();
+  let governedFps = configuredFps;
+  let frameMs = getHotkeyBurstFrameMs(governedFps);
+  burstPerf.effectiveBurstFps = governedFps;
   if (!isHotkeyBurstModeActive()) {
     stopContinuousBurstCaptureLoop("inactive-recording");
     return;
@@ -600,45 +1485,96 @@ async function runContinuousBurstCaptureTick() {
   }
 
   burstContinuousInFlight = true;
+  let nextDelayMs = frameMs;
+  let stopReason = "toggle-off";
+  let shouldStopLoop = false;
+  let pressureLevel = "healthy";
+  const tickStartedAt = Date.now();
   try {
     if (frameSpool) {
-      const state = frameSpool.getQueueState();
-      const writeQueueCap = Math.max(1, Number(frameSpool.writeQueueMax) || 24);
-      const backpressureActive = state.writeQueue >= writeQueueCap
-        || (
-          burstLastLoopPauseReason === "backpressure"
-          && state.writeQueue > FRAME_SPOOL_BACKPRESSURE_RESUME_THRESHOLD
-        );
-      if (backpressureActive) {
+      const state = getFrameSpoolQueueState();
+      updateWriteQueueHighWater(state);
+      pressureLevel = getFrameSpoolBackpressureLevel(state);
+      governedFps = getBurstGovernorFps(configuredFps, pressureLevel, effectiveSettings);
+      burstPerf.effectiveBurstFps = governedFps;
+      frameMs = getHotkeyBurstFrameMs(governedFps);
+      nextDelayMs = frameMs;
+
+      const safetyCapActive = !!(state && state.safetyCapActive);
+      if (pressureLevel === "severe" && safetyCapActive) {
         burstLoopActive = false;
         burstLastLoopPauseReason = "backpressure";
+        burstPerf.backpressurePauses += 1;
         bgLog("burst-loop:backpressure", state);
-        scheduleContinuousBurstCaptureTick(Math.max(frameMs, 120));
+        nextDelayMs = Math.max(frameMs, BURST_BACKOFF_BACKPRESSURE_MIN_MS);
+        burstCaptureFailureStreak = 0;
         return;
       }
+    } else {
+      burstPerf.effectiveBurstFps = governedFps;
     }
     const tab = await resolveBurstCaptureTab();
     if (!tab || !isInjectableTabUrl(tab.url || "")) {
       burstLoopActive = false;
       burstLastLoopPauseReason = "no-active-tab";
+      nextDelayMs = BURST_BACKOFF_NO_ACTIVE_TAB_MS;
       bgLog("burst-loop:skip-tab", { hasTab: !!tab, tabId: tab && tab.id, url: tab && tab.url });
       return;
     }
-    if (!isHotkeyBurstModeActive() || isPaused) return;
+    if (!isHotkeyBurstModeActive() || isPaused) {
+      shouldStopLoop = true;
+      stopReason = "toggle-off";
+      return;
+    }
 
-    const shot = await captureBurstFrameFixedRate();
+    burstPerf.captureAttempts += 1;
+    const captureStartedAt = Date.now();
+    const shot = await captureBurstFrameFixedRate(governedFps);
+    const captureDurationMs = Date.now() - captureStartedAt;
+    burstPerf.avgCaptureMs = nextEmaValue(burstPerf.avgCaptureMs, captureDurationMs);
     if (!shot.dataUrl) {
+      burstPerf.captureFailures += 1;
+      burstCaptureFailureStreak += 1;
       burstLoopActive = false;
       burstLastLoopPauseReason = "capture-failed";
+      nextDelayMs = getBurstCaptureFailureBackoffMs(frameMs);
       bgLog("burst-loop:capture-skip", { reason: shot.reason || "capture-failed" });
       return;
     }
-    if (!isHotkeyBurstModeActive() || isPaused) return;
+    burstPerf.captureSuccesses += 1;
+    burstCaptureFailureStreak = 0;
+    if (!isHotkeyBurstModeActive() || isPaused) {
+      shouldStopLoop = true;
+      stopReason = "toggle-off";
+      return;
+    }
 
-    const screenshotRef = await storeBurstFrameInSpool(shot.dataUrl, {
+    const spoolStartedAt = Date.now();
+    const spoolResult = await storeBurstFrameInSpool(shot.dataUrl, {
       sessionId,
-      createdAtMs: Date.now()
+      createdAtMs: Date.now(),
+      mime: shot.mime || "image/png",
+      dropOnPressure: true
     });
+    const spoolDurationMs = Date.now() - spoolStartedAt;
+    burstPerf.avgSpoolMs = nextEmaValue(burstPerf.avgSpoolMs, spoolDurationMs);
+    if (spoolResult && spoolResult.dropped) {
+      burstPerf.droppedFrames += 1;
+      burstLoopActive = false;
+      burstLastLoopPauseReason = "backpressure";
+      nextDelayMs = pressureLevel === "severe"
+        ? Math.max(frameMs, BURST_BACKOFF_BACKPRESSURE_MIN_MS)
+        : frameMs;
+      bgLog("burst-loop:dropped-frame", { reason: spoolResult.reason || "backpressure" });
+      return;
+    }
+    if (!isHotkeyBurstModeActive() || isPaused) {
+      shouldStopLoop = true;
+      stopReason = "toggle-off";
+      return;
+    }
+    const cursorSample = getBurstCursorSampleForTab(tab);
+    const screenshotRef = spoolResult && spoolResult.ref ? spoolResult.ref : null;
     const screenshotInline = screenshotRef ? null : shot.dataUrl;
 
     events.push({
@@ -660,6 +1596,13 @@ async function runContinuousBurstCaptureTick() {
       screenshotHash: null,
       screenshotSkipped: false,
       screenshotSkipReason: null,
+      eventX: cursorSample ? Number(cursorSample.x) : null,
+      eventY: cursorSample ? Number(cursorSample.y) : null,
+      viewportW: cursorSample ? Number(cursorSample.viewportW) : null,
+      viewportH: cursorSample ? Number(cursorSample.viewportH) : null,
+      scrollX: cursorSample ? Number(cursorSample.scrollX) : 0,
+      scrollY: cursorSample ? Number(cursorSample.scrollY) : 0,
+      cursorTracked: !!cursorSample,
       burstHotkeyMode: true,
       burstModeEpoch,
       burstRunId,
@@ -672,12 +1615,14 @@ async function runContinuousBurstCaptureTick() {
     burstLoopActive = true;
     burstLastFrameAtMs = Date.now();
     burstLastLoopPauseReason = null;
+    const tickElapsedMs = Date.now() - tickStartedAt;
+    nextDelayMs = Math.max(0, frameMs - tickElapsedMs);
   } finally {
     burstContinuousInFlight = false;
-    if (isHotkeyBurstModeActive()) {
-      scheduleContinuousBurstCaptureTick(0);
+    if (isHotkeyBurstModeActive() && !shouldStopLoop) {
+      scheduleContinuousBurstCaptureTick(nextDelayMs);
     } else {
-      stopContinuousBurstCaptureLoop("toggle-off");
+      stopContinuousBurstCaptureLoop(stopReason);
     }
   }
 }
@@ -737,28 +1682,78 @@ function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
+function createTimeoutError(message) {
+  const err = new Error(String(message || "Operation timed out."));
+  try { err.uiRecorderTimeout = true; } catch (_) {}
+  return err;
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+  const waitMs = Math.max(250, Number(timeoutMs) || 0);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timerId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(createTimeoutError(timeoutMessage || `Operation timed out after ${waitMs}ms.`));
+    }, waitMs);
+    Promise.resolve(promise).then((value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timerId);
+      resolve(value);
+    }).catch((err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timerId);
+      reject(err);
+    });
+  });
+}
+
 function enqueueBurstCapture(task) {
   const run = burstCaptureQueue.then(task, task);
   burstCaptureQueue = run.catch(() => {});
   return run;
 }
 
-async function captureBurstFrameFixedRate() {
+async function captureBurstFrameFixedRate(targetFps = null) {
   return enqueueBurstCapture(async () => {
-    const frameMs = getHotkeyBurstFrameMs();
+    const frameMs = getHotkeyBurstFrameMs(targetFps);
     const elapsed = Date.now() - burstCaptureLastTs;
     const waitMs = Math.max(0, frameMs - elapsed);
     if (waitMs > 0) await sleepMs(waitMs);
 
-    const capture = await captureVisiblePng();
+    const effective = getEffectiveSettings();
+    const format = normalizeHotkeyBurstImageFormat(effective.hotkeyBurstImageFormat);
+    let quality = normalizeHotkeyBurstJpegQuality(effective.hotkeyBurstJpegQuality);
+    if (effective.burstStabilityMode !== false) quality = Math.min(quality, 75);
+    const capture = await captureVisibleFrame({
+      activeTabOnly: !!effective.activeTabOnly,
+      windowId: effective.activeTabOnly ? activeCaptureWindowId : null,
+      format,
+      quality
+    });
     if (!capture.dataUrl) {
-      return { dataUrl: null, hash: null, reused: false, reason: capture.reason || "capture-failed" };
+      return {
+        dataUrl: null,
+        hash: null,
+        reused: false,
+        mime: formatToMime(format),
+        reason: capture.reason || "capture-failed"
+      };
     }
 
     const capturedAt = Date.now();
     burstCaptureLastTs = capturedAt;
     lastShot = { ts: capturedAt, hash: null, dataUrl: capture.dataUrl };
-    return { dataUrl: capture.dataUrl, hash: null, reused: false, reason: null };
+    return {
+      dataUrl: capture.dataUrl,
+      hash: null,
+      reused: false,
+      mime: capture.mime || formatToMime(format),
+      reason: null
+    };
   });
 }
 
@@ -795,8 +1790,26 @@ async function persistSafe(context) {
   }
 }
 
+async function persistReportsSafe(context) {
+  try {
+    await browser.storage.local.set({ reports });
+    return { ok: true };
+  } catch (e) {
+    bgWarn("persist-reports-failed", { context: context || "unknown", error: formatError(e) });
+    return { ok: false, error: e };
+  }
+}
+
 async function loadPersisted() {
-  const stored = await browser.storage.local.get(["isRecording","isPaused","events","settings","reports","sessionId"]);
+  const stored = await browser.storage.local.get([
+    "isRecording",
+    "isPaused",
+    "events",
+    "settings",
+    "reports",
+    "sessionId",
+    MIC_DIAG_STORAGE_KEY
+  ]);
   isRecording = !!stored.isRecording;
   isPaused = !!stored.isPaused;
   events = Array.isArray(stored.events) ? stored.events : [];
@@ -808,10 +1821,23 @@ async function loadPersisted() {
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
   burstRunId = 0;
-  burstRunTargetFps = normalizeHotkeyBurstFps(settings.hotkeyBurstFps);
+  burstRunTargetFps = getHotkeyBurstFps();
   burstLoopActive = false;
   burstLastFrameAtMs = 0;
   burstLastLoopPauseReason = "mode-off";
+  stopInProgress = false;
+  stopFinalizationState = {
+    active: false,
+    jobId: null,
+    phase: "idle",
+    startedAtMs: null,
+    updatedAtMs: Date.now(),
+    source: null,
+    lastError: null,
+    droppedBurstFrames: 0
+  };
+  resetBurstPerf();
+  micDiagBuffer = pruneMicDiagBuffer(stored[MIC_DIAG_STORAGE_KEY]);
   if (await ensureFrameSpoolReady()) {
     await syncFrameSpoolReportRefs("load-persisted");
     setTimeout(() => {
@@ -847,28 +1873,50 @@ function applyRedactionToText(text) {
   return out;
 }
 
-async function captureVisiblePng() {
-  const effective = getEffectiveSettings();
-  if (effective.activeTabOnly) {
-    if (activeCaptureWindowId === null) {
-      bgLog("capture:skipped-no-active-target");
-      return { dataUrl: null, reason: "no-active-target" };
-    }
-    try {
-      const dataUrl = await browser.tabs.captureVisibleTab(activeCaptureWindowId, { format: "png" });
-      return { dataUrl, reason: null };
-    } catch (e) {
-      console.warn("captureVisibleTab failed:", e);
-      return { dataUrl: null, reason: "capture-failed" };
-    }
+function formatToMime(format) {
+  return String(format || "png").toLowerCase() === "jpeg" ? "image/jpeg" : "image/png";
+}
+
+async function captureVisibleFrame(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const activeTabOnly = opts.activeTabOnly !== false;
+  const windowIdRaw = Number(opts.windowId);
+  const windowId = Number.isFinite(windowIdRaw) ? windowIdRaw : null;
+  const format = String(opts.format || "png").trim().toLowerCase() === "jpeg" ? "jpeg" : "png";
+  const captureOptions = { format };
+  if (format === "jpeg") {
+    captureOptions.quality = Math.round(clampNumber(opts.quality, 0, 100, HOTKEY_BURST_DEFAULT_JPEG_QUALITY));
+  }
+  if (activeTabOnly && windowId === null) {
+    bgLog("capture:skipped-no-active-target");
+    return { dataUrl: null, mime: formatToMime(format), reason: "no-active-target" };
   }
   try {
-    const dataUrl = await browser.tabs.captureVisibleTab(undefined, { format: "png" });
-    return { dataUrl, reason: null };
+    const dataUrl = await browser.tabs.captureVisibleTab(
+      activeTabOnly ? windowId : undefined,
+      captureOptions
+    );
+    return { dataUrl, mime: formatToMime(format), reason: null };
   } catch (e) {
     console.warn("captureVisibleTab failed:", e);
-    return { dataUrl: null, reason: "capture-failed" };
+    return { dataUrl: null, mime: formatToMime(format), reason: "capture-failed" };
   }
+}
+
+async function captureVisibleLifecyclePng(options = {}) {
+  return await captureVisibleFrame({
+    ...(options && typeof options === "object" ? options : {}),
+    format: "png"
+  });
+}
+
+async function captureVisiblePng() {
+  const effective = getEffectiveSettings();
+  return await captureVisibleFrame({
+    activeTabOnly: !!effective.activeTabOnly,
+    windowId: effective.activeTabOnly ? activeCaptureWindowId : null,
+    format: "png"
+  });
 }
 
 async function debouncedScreenshot() {
@@ -925,18 +1973,21 @@ async function maybeScreenshot(e) {
   return { screenshot: redacted, screenshotHash: redactedHash, skipped: false, reason: null };
 }
 
-async function appendLifecycleScreenshotEvent(kind, source) {
-  if (!isRecording || !sessionId) return false;
+async function appendLifecycleScreenshotEventToSession(sessionState, kind, source, options = {}) {
+  if (!sessionState || typeof sessionState !== "object") return false;
+  if (!Array.isArray(sessionState.events)) return false;
+  const targetSessionId = String(sessionState.sessionId || "").trim();
+  if (!targetSessionId) return false;
   const lifecycleKind = kind === "stop" ? "stop" : "start";
   let tab = null;
-  const effective = getEffectiveSettings();
+  const effective = normalizeSettings(sessionState.snapshotSettings || getEffectiveSettings());
+  const opts = options && typeof options === "object" ? options : {};
   try {
     if (effective.activeTabOnly) {
-      if (activeCaptureTabId === null || activeCaptureWindowId === null) {
-        await refreshActiveCaptureTarget(`lifecycle:${lifecycleKind}`);
-      }
-      if (typeof activeCaptureTabId === "number") {
-        tab = await browser.tabs.get(activeCaptureTabId);
+      const tabIdRaw = Number(opts.tabId);
+      const tabId = Number.isFinite(tabIdRaw) ? tabIdRaw : null;
+      if (tabId !== null) {
+        tab = await browser.tabs.get(tabId);
       }
     } else {
       tab = await getActiveTab();
@@ -945,15 +1996,40 @@ async function appendLifecycleScreenshotEvent(kind, source) {
     tab = null;
   }
 
-  const shot = await captureVisiblePng();
+  let shot = { dataUrl: null, reason: String(opts.skipReason || "capture-skipped") };
+  const shouldCapture = opts.capture !== false;
+  if (shouldCapture) {
+    const timeoutMsRaw = Number(opts.captureTimeoutMs);
+    const captureTimeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0
+      ? Math.max(120, timeoutMsRaw)
+      : 0;
+    const windowIdRaw = Number(opts.windowId);
+    const captureWindowId = Number.isFinite(windowIdRaw)
+      ? windowIdRaw
+      : (effective.activeTabOnly ? activeCaptureWindowId : null);
+    try {
+      const captureTask = captureVisibleLifecyclePng({
+        activeTabOnly: !!effective.activeTabOnly,
+        windowId: effective.activeTabOnly ? captureWindowId : null
+      });
+      shot = captureTimeoutMs > 0
+        ? await withTimeout(captureTask, captureTimeoutMs, "Lifecycle screenshot capture timed out.")
+        : await captureTask;
+    } catch (err) {
+      shot = {
+        dataUrl: null,
+        reason: err && err.uiRecorderTimeout ? "capture-timeout" : "capture-failed"
+      };
+    }
+  }
   const screenshot = shot && shot.dataUrl ? shot.dataUrl : null;
   const screenshotHash = screenshot ? stableHash(screenshot) : null;
-  if (screenshot) {
+  if (screenshot && opts.updateLastShot) {
     const capturedAt = Date.now();
     lastShot = { ts: capturedAt, hash: screenshotHash, dataUrl: screenshot };
   }
 
-  events.push({
+  sessionState.events.push({
     type: "outcome",
     ts: nowIso(),
     url: tab && tab.url ? tab.url : "",
@@ -962,7 +2038,7 @@ async function appendLifecycleScreenshotEvent(kind, source) {
     outcome: lifecycleKind,
     actionKind: "lifecycle",
     actionHint: lifecycleKind,
-    sessionId,
+    sessionId: targetSessionId,
     tabId: tab && typeof tab.id === "number" ? tab.id : null,
     windowId: tab && typeof tab.windowId === "number" ? tab.windowId : null,
     tabTitle: tab && tab.title ? tab.title : "",
@@ -984,13 +2060,34 @@ async function appendLifecycleScreenshotEvent(kind, source) {
   return true;
 }
 
+async function appendLifecycleScreenshotEvent(kind, source) {
+  if (!isRecording || !sessionId) return false;
+  return await appendLifecycleScreenshotEventToSession(
+    {
+      sessionId,
+      events,
+      snapshotSettings: getEffectiveSettings()
+    },
+    kind,
+    source,
+    {
+      capture: true,
+      captureTimeoutMs: 0,
+      tabId: activeCaptureTabId,
+      windowId: activeCaptureWindowId,
+      updateLastShot: true
+    }
+  );
+}
+
 function normalizeFieldKey(ev) {
   const key = (ev.human || ev.label || ev.id || ev.name || ev.tag || "").toLowerCase();
   return key.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
-function pruneInputSteps(list) {
-  if (!settings.pruneInputs) return list;
+function pruneInputSteps(list, settingsOverride = settings) {
+  const effectiveSettings = normalizeSettings(settingsOverride || settings);
+  if (!effectiveSettings.pruneInputs) return list;
   const out = [];
   const lastByKey = new Map();
   for (const ev of list) {
@@ -1004,7 +2101,7 @@ function pruneInputSteps(list) {
     if (prevIdx !== undefined) {
       const prev = out[prevIdx];
       const prevTs = Date.parse(prev.ts || "") || ts;
-      if (ts - prevTs <= (settings.pruneWindowMs || 1200)) {
+      if (ts - prevTs <= (effectiveSettings.pruneWindowMs || 1200)) {
         const merged = { ...ev };
         merged.prunedCount = (prev.prunedCount || 1) + 1;
         out[prevIdx] = merged;
@@ -1017,16 +2114,21 @@ function pruneInputSteps(list) {
   return out;
 }
 
-async function saveReportSnapshot(snapshotSettings) {
-  if (!events || !events.length) return false;
-  const eventCountBefore = events.length;
-  const resolvedSettings = normalizeSettings(snapshotSettings || getEffectiveSettings());
+async function saveReportSnapshotDetached(snapshot, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const sourceEvents = snapshot && Array.isArray(snapshot.events) ? snapshot.events : [];
+  if (!sourceEvents.length) {
+    return { saved: false, reportId: null, prunedEventCount: 0 };
+  }
+  const resolvedSettings = normalizeSettings((snapshot && snapshot.snapshotSettings) || getEffectiveSettings());
+  const targetSessionId = String((snapshot && snapshot.sessionId) || "").trim();
+  const eventCountBefore = sourceEvents.length;
   const report = {
     id: `rpt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     createdAt: nowIso(),
-    sessionId,
+    sessionId: targetSessionId || null,
     settings: { ...resolvedSettings },
-    events: pruneInputSteps(events.slice(0))
+    events: pruneInputSteps(sourceEvents.slice(0), resolvedSettings)
   };
   reports.unshift(report);
   const droppedReports = reports.slice(3);
@@ -1034,11 +2136,14 @@ async function saveReportSnapshot(snapshotSettings) {
 
   if (await ensureFrameSpoolReady()) {
     try {
-      await syncFrameSpoolReportRefs("snapshot");
-      if (sessionId) {
-        await frameSpool.removeSessionRefs(sessionId);
+      if (typeof opts.onPhase === "function") opts.onPhase("sync-refs");
+      await syncFrameSpoolReportRefs(opts.reason || "snapshot");
+      if (targetSessionId) {
+        await frameSpool.removeSessionRefs(targetSessionId);
       }
-      await runFrameSpoolGc("snapshot", { activeSessionIds: [] });
+      await runFrameSpoolGc(opts.reason || "snapshot", {
+        activeSessionIds: getActiveSessionIdsForGc()
+      });
       if (droppedReports.length) {
         bgLog("frame-spool:reports-dropped", {
           count: droppedReports.length,
@@ -1050,8 +2155,134 @@ async function saveReportSnapshot(snapshotSettings) {
     }
   }
 
-  bgLog("saveReportSnapshot", { sessionId, eventCountBefore, prunedEventCount: report.events.length, reportCount: reports.length });
-  return true;
+  bgLog("saveReportSnapshot", {
+    sessionId: targetSessionId || null,
+    eventCountBefore,
+    prunedEventCount: report.events.length,
+    reportCount: reports.length
+  });
+  return { saved: true, reportId: report.id, prunedEventCount: report.events.length };
+}
+
+async function saveReportSnapshot(snapshotSettings) {
+  const result = await saveReportSnapshotDetached({
+    sessionId,
+    events: events.slice(0),
+    snapshotSettings: snapshotSettings || getEffectiveSettings()
+  }, { reason: "snapshot" });
+  return !!result.saved;
+}
+
+function queueStopFinalizationJob(job) {
+  const run = stopFinalizationQueue.then(
+    () => runStopFinalizationJob(job),
+    () => runStopFinalizationJob(job)
+  );
+  stopFinalizationQueue = run.catch((err) => {
+    bgWarn("stop-finalization:queue-error", {
+      jobId: job && job.jobId,
+      error: formatError(err)
+    });
+  });
+  return run;
+}
+
+async function runStopFinalizationJob(job) {
+  if (!job || typeof job !== "object") return { ok: false, saved: false, persisted: false, ignored: true };
+  const jobId = String(job.jobId || newStopFinalizationJobId());
+  setStopFinalizationState({
+    active: true,
+    jobId,
+    phase: "queued",
+    startedAtMs: Date.now(),
+    source: String(job.source || ""),
+    lastError: null
+  });
+  try {
+    setStopFinalizationState({ phase: "draining" });
+    if (await ensureFrameSpoolReady()) {
+      try {
+        const queueState = getFrameSpoolQueueState();
+        const drained = !!queueState
+          ? (
+            (Number(queueState.captureQueue) || 0) === 0
+            && (Number(queueState.processQueue) || 0) === 0
+            && (Number(queueState.writeQueue) || 0) === 0
+          )
+          : true;
+        updateWriteQueueHighWater(queueState);
+        bgLog("frame-spool:stop-drain", { jobId, drained, queueState });
+      } catch (err) {
+        bgWarn("frame-spool:stop-drain-failed", { jobId, error: formatError(err) });
+      }
+    }
+
+    setStopFinalizationState({ phase: "snapshot" });
+    const stopCapture = job.stopCapture && typeof job.stopCapture === "object" ? job.stopCapture : {};
+    await appendLifecycleScreenshotEventToSession(
+      {
+        sessionId: job.sessionId,
+        events: Array.isArray(job.events) ? job.events : [],
+        snapshotSettings: job.snapshotSettings || getEffectiveSettings()
+      },
+      "stop",
+      job.source,
+      {
+        capture: stopCapture.capture !== false,
+        skipReason: stopCapture.skipReason || "capture-skipped",
+        captureTimeoutMs: Number(stopCapture.captureTimeoutMs) || STOP_LIFECYCLE_CAPTURE_TIMEOUT_MS,
+        tabId: stopCapture.tabId,
+        windowId: stopCapture.windowId,
+        updateLastShot: false
+      }
+    );
+
+    const snapshotResult = await saveReportSnapshotDetached({
+      sessionId: job.sessionId,
+      events: Array.isArray(job.events) ? job.events : [],
+      snapshotSettings: job.snapshotSettings || getEffectiveSettings()
+    }, {
+      reason: `stop-finalization:${jobId}`,
+      onPhase: (phase) => setStopFinalizationState({ phase })
+    });
+
+    setStopFinalizationState({ phase: "persist" });
+    const persisted = await persistReportsSafe(`stop-finalization:${jobId}`);
+    setStopFinalizationState({
+      active: false,
+      phase: "done",
+      source: String(job.source || ""),
+      lastError: null
+    });
+    bgLog("stop-finalization:done", {
+      jobId,
+      saved: !!snapshotResult.saved,
+      persisted: persisted.ok
+    });
+    return {
+      ok: true,
+      saved: !!snapshotResult.saved,
+      persisted: persisted.ok,
+      finalizationJobId: jobId
+    };
+  } catch (err) {
+    const message = formatError(err);
+    bgWarn("stop-finalization:error", { jobId, error: message });
+    setStopFinalizationState({
+      active: false,
+      phase: "error",
+      source: String(job.source || ""),
+      lastError: message
+    });
+    await persistReportsSafe(`stop-finalization:error:${jobId}`);
+    return {
+      ok: false,
+      saved: false,
+      persisted: false,
+      finalizationJobId: jobId,
+      error: message
+    };
+  }
 }
 
 async function getActiveTab() {
@@ -1191,10 +2422,12 @@ async function startRecordingInternal(source) {
     return { ok: true, ignored: true, reason: "already-recording" };
   }
   clearPendingHotkeyStop("start-recording");
+  stopInProgress = false;
+  resetBurstPerf();
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
   burstRunId = 0;
-  burstRunTargetFps = normalizeHotkeyBurstFps(settings.hotkeyBurstFps);
+  burstRunTargetFps = getHotkeyBurstFps();
   burstLoopActive = false;
   burstLastFrameAtMs = 0;
   burstLastLoopPauseReason = "mode-off";
@@ -1223,52 +2456,133 @@ async function startRecordingInternal(source) {
 async function stopRecordingInternal(source) {
   if (!isRecording) {
     bgLog("stop-recording:ignored", { source, reason: "not-recording", eventCount: events.length, sessionId });
-    return { ok: true, saved: false, ignored: true, persisted: true };
+    return {
+      ok: true,
+      saved: false,
+      ignored: true,
+      persisted: true,
+      finalizing: !!stopFinalizationState.active,
+      finalizationJobId: stopFinalizationState.jobId || null
+    };
   }
   clearPendingHotkeyStop("stop-recording");
-  bgLog("stop-recording:begin", { source, activeRecordEvents, ...stateSummary() });
-  const snapshotSettings = getEffectiveSettings();
-  const hadBurstHotkeyMode = burstHotkeyModeActive;
-  stopContinuousBurstCaptureLoop("stop-recording");
-  await appendLifecycleScreenshotEvent("stop", source);
-  isRecording = false;
-  isPaused = false;
-  if (await ensureFrameSpoolReady()) {
-    try {
-      let drained = true;
-      if (frameSpool && typeof frameSpool.waitUntilIdle === "function") {
-        drained = await frameSpool.waitUntilIdle({ timeoutMs: 2000, pollMs: 50 });
-      }
-      const queueState = frameSpool && typeof frameSpool.getQueueState === "function"
-        ? frameSpool.getQueueState()
-        : null;
-      bgLog("frame-spool:stop-drain", { drained, queueState });
-    } catch (err) {
-      bgWarn("frame-spool:stop-drain-failed", { error: formatError(err) });
+  stopInProgress = true;
+  try {
+    bgLog("stop-recording:begin", { source, activeRecordEvents, ...stateSummary() });
+    const snapshotSettings = getEffectiveSettings();
+    const hadBurstHotkeyMode = burstHotkeyModeActive;
+    const detachedSessionId = String(sessionId || "").trim();
+    const detachedEvents = Array.isArray(events) ? events : [];
+    const queueStateAtStop = getFrameSpoolQueueState();
+    updateWriteQueueHighWater(queueStateAtStop);
+    const queuePressureLevelAtStop = getFrameSpoolBackpressureLevel(queueStateAtStop);
+    const skipStopCapture = hadBurstHotkeyMode || queuePressureLevelAtStop !== "healthy";
+    const stopCapture = {
+      capture: !skipStopCapture,
+      skipReason: hadBurstHotkeyMode ? "capture-skipped-burst-mode" : "capture-skipped-backpressure",
+      captureTimeoutMs: STOP_LIFECYCLE_CAPTURE_TIMEOUT_MS,
+      tabId: activeCaptureTabId,
+      windowId: activeCaptureWindowId
+    };
+
+    stopContinuousBurstCaptureLoop("stop-recording");
+    isRecording = false;
+    isPaused = false;
+    events = [];
+    sessionId = null;
+    recordingStartedAtMs = 0;
+    burstHotkeyModeActive = false;
+    burstModeEpoch = 0;
+    burstRunId = 0;
+    burstRunTargetFps = getHotkeyBurstFps();
+    burstLoopActive = false;
+    burstLastFrameAtMs = 0;
+    burstLastLoopPauseReason = "mode-off";
+    burstCaptureFailureStreak = 0;
+    if (hadBurstHotkeyMode) {
+      notifyCaptureModeChanged("stop-recording").catch((err) => {
+        bgWarn("capture-mode:notify-stop-failed", { error: formatError(err) });
+      });
     }
+    clearActiveCaptureTarget("stop");
+    resetScreenshotState();
+    setBadge("").catch(() => {});
+    persistSafe("stop-recording:phase-a")
+      .then((persistResult) => {
+        if (!persistResult || !persistResult.ok) {
+          bgWarn("stop-recording:phase-a-persist-failed", {
+            source,
+            sessionId: detachedSessionId
+          });
+        }
+      })
+      .catch((err) => {
+        bgWarn("stop-recording:phase-a-persist-error", {
+          source,
+          sessionId: detachedSessionId,
+          error: formatError(err)
+        });
+      });
+
+    let finalizing = false;
+    let finalizationJobId = null;
+    let saved = false;
+    if (detachedSessionId || detachedEvents.length) {
+      finalizing = true;
+      saved = true;
+      finalizationJobId = newStopFinalizationJobId();
+      setStopFinalizationState({
+        active: true,
+        jobId: finalizationJobId,
+        phase: "queued",
+        startedAtMs: Date.now(),
+        source: String(source || ""),
+        lastError: null,
+        droppedBurstFrames: Number(burstPerf.droppedFrames) || 0
+      });
+      queueStopFinalizationJob({
+        jobId: finalizationJobId,
+        source: String(source || ""),
+        sessionId: detachedSessionId,
+        events: detachedEvents,
+        snapshotSettings,
+        stopCapture
+      }).catch((err) => {
+        bgWarn("stop-finalization:enqueue-failed", {
+          jobId: finalizationJobId,
+          error: formatError(err)
+        });
+      });
+    } else {
+      setStopFinalizationState({
+        active: false,
+        jobId: null,
+        phase: "done",
+        startedAtMs: null,
+        source: String(source || ""),
+        lastError: null,
+        droppedBurstFrames: Number(burstPerf.droppedFrames) || 0
+      });
+    }
+    bgLog("stop-recording:done", {
+      source,
+      saved,
+      persisted: true,
+      finalizing,
+      finalizationJobId,
+      activeRecordEvents,
+      ...stateSummary()
+    });
+    return {
+      ok: true,
+      saved,
+      persisted: true,
+      finalizing,
+      finalizationJobId
+    };
+  } finally {
+    stopInProgress = false;
   }
-  const saved = await saveReportSnapshot(snapshotSettings);
-  // Report snapshots already include the completed session.
-  // Clear active buffer to avoid doubling storage footprint on stop.
-  events = [];
-  sessionId = null;
-  recordingStartedAtMs = 0;
-  burstHotkeyModeActive = false;
-  burstModeEpoch = 0;
-  burstRunId = 0;
-  burstRunTargetFps = normalizeHotkeyBurstFps(settings.hotkeyBurstFps);
-  burstLoopActive = false;
-  burstLastFrameAtMs = 0;
-  burstLastLoopPauseReason = "mode-off";
-  if (hadBurstHotkeyMode) {
-    await notifyCaptureModeChanged("stop-recording");
-  }
-  clearActiveCaptureTarget("stop");
-  resetScreenshotState();
-  const persisted = await persistSafe("stop-recording");
-  await setBadge("");
-  bgLog("stop-recording:done", { source, saved, persisted: persisted.ok, activeRecordEvents, ...stateSummary() });
-  return { ok: true, saved, persisted: persisted.ok };
 }
 
 browser.runtime.onInstalled.addListener(async () => {
@@ -1318,6 +2632,16 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     bgLog("onMessage:start", { requestId, msgType, senderTabId, isRecording, isPaused, eventCount: events.length, activeRecordEvents, sessionId });
   }
 
+  if (typeof msgType === "string" && msgType.startsWith("SECTION_MIC_")) {
+    if (msgType.startsWith("SECTION_MIC_PROXY_") && msgType !== "SECTION_MIC_PROXY_STATUS") {
+      await sweepMicProxySessions("runtime:mic-capture-removed");
+    }
+    return buildMicProxyFailure(
+      "mic-capture-removed",
+      "Live microphone capture has been removed from this extension build. Use audio-file transcription in the report editor."
+    );
+  }
+
   try {
     if (msgType === "GET_STATE") {
       const effectiveSettings = getEffectiveSettings();
@@ -1325,7 +2649,10 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       const isActiveCaptureTab = effectiveSettings.activeTabOnly
         ? (hasSenderTab ? isEventFromActiveTarget(sender.tab) : true)
         : true;
-      const frameSpoolState = frameSpool ? frameSpool.getQueueState() : null;
+      const frameSpoolState = getFrameSpoolQueueState();
+      updateWriteQueueHighWater(frameSpoolState);
+      const spoolRuntime = getFrameSpoolRuntimeSnapshot(frameSpoolState);
+      const spoolWorkers = getFrameSpoolWorkerSnapshot();
       return {
         isRecording,
         isPaused,
@@ -1341,7 +2668,11 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         burstLastLoopPauseReason,
         frameSpoolQueueState: frameSpoolState,
         pendingHotkeyStop: hasPendingHotkeyStop(),
-        pendingHotkeyStopUntilMs: hasPendingHotkeyStop() ? pendingHotkeyStopUntilMs : null
+        pendingHotkeyStopUntilMs: hasPendingHotkeyStop() ? pendingHotkeyStopUntilMs : null,
+        stopFinalization: getStopFinalizationStateSnapshot(),
+        burstPerf: getBurstPerfSnapshot(),
+        spoolRuntime,
+        spoolWorkers
       };
     }
 
@@ -1366,6 +2697,24 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       const effectiveSettings = getEffectiveSettings();
       if (!persisted.ok) return { ok: false, settings: effectiveSettings, persisted: false, burstHotkeyModeActive };
       return { ok: true, settings: effectiveSettings, burstHotkeyModeActive };
+    }
+
+    if (msgType === "CURSOR_SAMPLE") {
+      const effectiveSettings = getEffectiveSettings();
+      const senderTab = sender && sender.tab ? sender.tab : null;
+      if (!isRecording || !isHotkeyBurstModeActive()) {
+        return { ok: false, ignored: true, reason: "burst-inactive" };
+      }
+      if (!senderTab || typeof senderTab.id !== "number") {
+        return { ok: false, ignored: true, reason: "no-sender-tab" };
+      }
+      if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
+        return { ok: false, ignored: true, reason: "non-active-tab" };
+      }
+      const accepted = setBurstCursorSample(senderTab, msg.sample);
+      return accepted
+        ? { ok: true }
+        : { ok: false, ignored: true, reason: "invalid-sample" };
     }
 
     if (msgType === "START_RECORDING") {
@@ -1410,6 +2759,376 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     if (msgType === "OPEN_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?idx=0" }); return { ok: true }; }
     if (msgType === "OPEN_DOCS") { await browser.tabs.create({ url: browser.runtime.getURL("docs.html") }); return { ok: true }; }
     if (msgType === "OPEN_PRINTABLE_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?print=1&idx=0" }); return { ok: true }; }
+
+    if (msgType === "SECTION_MIC_PROXY_PREPARE" || msgType === "SECTION_MIC_PROXY_START") {
+      await sweepMicProxySessions("runtime:prepare");
+      const ownerTab = sender && sender.tab ? sender.tab : null;
+      if (!ownerTab || typeof ownerTab.id !== "number") {
+        return buildMicProxyFailure("no-owner-tab", "Site microphone proxy requires an extension report tab context.");
+      }
+      await clearMicProxySessionsForOwner(ownerTab.id, "runtime:prepare:replace", true);
+      const targetTab = await resolveMicProxyTargetTab(ownerTab);
+      if (!targetTab || typeof targetTab.id !== "number") {
+        return buildMicProxyFailure(
+          MIC_PROXY_REASON.NO_ELIGIBLE_TAB,
+          "No eligible workflow tab was found in Firefox. Activate a website workflow tab, then retry."
+        );
+      }
+      let injected = false;
+      try {
+        injected = await withTimeout(
+          ensureContentScriptInTab(targetTab.id, "section-mic-proxy-prepare"),
+          SECTION_MIC_PROXY_INJECT_TIMEOUT_MS,
+          "Timed out while preparing the workflow tab for site microphone capture."
+        );
+      } catch (err) {
+        return buildMicProxyFailure(
+          MIC_PROXY_REASON.PREPARE_TIMEOUT,
+          String((err && err.message) || "Timed out while preparing workflow tab microphone capture.")
+        );
+      }
+      if (!injected) {
+        return buildMicProxyFailure(
+          MIC_PROXY_REASON.TARGET_NOT_INJECTABLE,
+          "Unable to access the selected workflow tab for site microphone capture."
+        );
+      }
+      const sessionId = newMicProxySessionId();
+      const session = {
+        sessionId,
+        ownerTabId: ownerTab.id,
+        ownerWindowId: typeof ownerTab.windowId === "number" ? ownerTab.windowId : null,
+        targetTabId: targetTab.id,
+        targetWindowId: typeof targetTab.windowId === "number" ? targetTab.windowId : null,
+        targetTabUrl: String(targetTab.url || ""),
+        mimeType: "audio/webm",
+        state: MIC_PROXY_STATE.AWAITING_USER_START,
+        reason: "",
+        error: "",
+        createdAtMs: Date.now(),
+        updatedAtMs: Date.now(),
+        startedAtMs: 0
+      };
+      micProxySessions.set(sessionId, session);
+      micProxyOwnerSessionByTabId.set(ownerTab.id, sessionId);
+      rememberUsableWebTab(targetTab, "runtime:prepare");
+      logMicDiag("background", "mic-proxy-prepared", {
+        sessionId,
+        requestId,
+        ownerTabId: session.ownerTabId,
+        targetTabId: session.targetTabId,
+        state: session.state
+      });
+      let armResponse = null;
+      try {
+        armResponse = await withTimeout(
+          browser.tabs.sendMessage(targetTab.id, {
+            type: "UIR_SECTION_MIC_PROXY_SHOW_ARM",
+            sessionId,
+            maxDurationMs: SECTION_MIC_PROXY_MAX_DURATION_MS,
+            maxBytes: SECTION_MIC_PROXY_MAX_BYTES,
+            armExpiresInMs: MIC_PROXY_ARM_EXPIRY_MS,
+            requestId
+          }, { frameId: 0 }),
+          MIC_PROXY_PREPARE_TIMEOUT_MS,
+          "Timed out while waiting for workflow tab microphone arm prompt."
+        );
+      } catch (err) {
+        const reason = err && err.uiRecorderTimeout ? MIC_PROXY_REASON.PREPARE_TIMEOUT : MIC_PROXY_REASON.PROXY_START_FAILED;
+        const error = String((err && err.message) || "Failed to arm workflow tab microphone capture.");
+        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
+        await clearMicProxySession(sessionId, "runtime:prepare:arm-error", false);
+        return buildMicProxyFailure(reason, error);
+      }
+      if (armResponse && armResponse.ok === false) {
+        const reason = String(armResponse.reason || MIC_PROXY_REASON.PROXY_START_FAILED);
+        const error = String(armResponse.error || "Workflow tab rejected microphone arm request.");
+        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
+        await clearMicProxySession(sessionId, "runtime:prepare:arm-rejected", false);
+        return buildMicProxyFailure(reason, error);
+      }
+      scheduleMicProxyArmExpiry(sessionId);
+      return buildMicProxyStatusPayload(session);
+    }
+
+    if (msgType === "SECTION_MIC_PROXY_STATUS") {
+      await sweepMicProxySessions("runtime:status");
+      const ownerTab = sender && sender.tab ? sender.tab : null;
+      if (!ownerTab || typeof ownerTab.id !== "number") {
+        return buildMicProxyFailure("no-owner-tab", "Site microphone proxy status requires a report tab context.");
+      }
+      const requestedSessionId = String(msg.sessionId || "").trim();
+      const session = requestedSessionId
+        ? micProxySessions.get(requestedSessionId)
+        : getMicProxySessionForOwner(ownerTab.id);
+      if (!session) {
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
+      }
+      if (session.ownerTabId !== ownerTab.id) {
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Site microphone session belongs to a different report tab.");
+      }
+      return buildMicProxyStatusPayload(session);
+    }
+
+    if (msgType === "SECTION_MIC_PROXY_START_CONFIRM") {
+      const sessionId = String(msg.sessionId || "").trim();
+      if (!sessionId) {
+        return buildMicProxyFailure("session-id-required", "Missing site microphone session id.");
+      }
+      const session = micProxySessions.get(sessionId);
+      if (!session) {
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
+      }
+      const senderTab = sender && sender.tab ? sender.tab : null;
+      if (!senderTab || typeof senderTab.id !== "number" || senderTab.id !== session.targetTabId) {
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Mic start confirmation came from an unexpected workflow tab.");
+      }
+      const currentState = normalizeMicProxyState(session.state);
+      if (currentState === MIC_PROXY_STATE.RECORDING) {
+        return buildMicProxyStatusPayload(session);
+      }
+      if (currentState !== MIC_PROXY_STATE.AWAITING_USER_START && currentState !== MIC_PROXY_STATE.STARTING) {
+        return buildMicProxyFailure(
+          MIC_PROXY_REASON.SESSION_STATE_INVALID,
+          "Site microphone session is not awaiting a workflow-tab start click."
+        );
+      }
+      setMicProxySessionState(session, MIC_PROXY_STATE.STARTING, { reason: "", error: "" });
+      scheduleMicProxyStartConfirmTimeout(sessionId);
+      return buildMicProxyStatusPayload(session);
+    }
+
+    if (msgType === "SECTION_MIC_PROXY_TAB_EVENT") {
+      const eventType = String(msg.event || "").trim().toLowerCase();
+      const sessionId = String(msg.sessionId || "").trim();
+      if (!sessionId) {
+        return buildMicProxyFailure("session-id-required", "Missing site microphone session id.");
+      }
+      const session = micProxySessions.get(sessionId);
+      if (!session) {
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
+      }
+      const senderTab = sender && sender.tab ? sender.tab : null;
+      if (!senderTab || typeof senderTab.id !== "number" || senderTab.id !== session.targetTabId) {
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Mic proxy tab event came from an unexpected workflow tab.");
+      }
+      if (senderTab && senderTab.url) {
+        session.targetTabUrl = String(senderTab.url || session.targetTabUrl || "");
+      }
+      const eventReason = String(msg.reason || "");
+      const eventError = String(msg.error || "");
+      const eventBackend = String(msg.backend || "");
+      const eventStage = String(msg.stage || "");
+      logMicDiag("content", `mic-proxy-tab-event:${eventType || "unknown"}`, {
+        sessionId,
+        ownerTabId: session.ownerTabId,
+        targetTabId: session.targetTabId,
+        state: session.state,
+        reason: eventReason,
+        durationMs: Number(msg.durationMs) || 0,
+        deviceCount: Number(msg.deviceCount),
+        errorName: String(msg.errorName || eventBackend || ""),
+        errorCode: String(msg.errorCode || eventStage || "")
+      });
+      if (eventType === "arm-shown") {
+        if (normalizeMicProxyState(session.state) === MIC_PROXY_STATE.NONE) {
+          setMicProxySessionState(session, MIC_PROXY_STATE.AWAITING_USER_START, { reason: "", error: "" });
+        }
+        return buildMicProxyStatusPayload(session);
+      }
+      if (eventType === "start-clicked") {
+        setMicProxySessionState(session, MIC_PROXY_STATE.STARTING, { reason: "", error: "" });
+        scheduleMicProxyStartConfirmTimeout(sessionId);
+        return buildMicProxyStatusPayload(session);
+      }
+      if (eventType === "recording-started") {
+        session.mimeType = String(msg.mimeType || session.mimeType || "audio/webm");
+        setMicProxySessionState(session, MIC_PROXY_STATE.RECORDING, { reason: "", error: "" });
+        await sendMicProxyHidePrompt(session.targetTabId, sessionId, "recording-started");
+        return buildMicProxyStatusPayload(session);
+      }
+      if (eventType === "recording-failed") {
+        const failureReason = eventReason || MIC_PROXY_REASON.PROXY_START_FAILED;
+        const failureError = eventError || "Workflow tab microphone capture failed.";
+        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, {
+          reason: failureReason,
+          error: failureError
+        });
+        await sendMicProxyHidePrompt(session.targetTabId, sessionId, failureReason);
+        return buildMicProxyStatusPayload(session);
+      }
+      if (eventType === "stopped") {
+        setMicProxySessionState(session, MIC_PROXY_STATE.STOPPING, { reason: "", error: "" });
+        return buildMicProxyStatusPayload(session);
+      }
+      if (eventType === "discarded") {
+        setMicProxySessionState(session, MIC_PROXY_STATE.NONE, {
+          reason: eventReason || "discarded",
+          error: ""
+        });
+        await sendMicProxyHidePrompt(session.targetTabId, sessionId, eventReason || "discarded");
+        return buildMicProxyStatusPayload(session);
+      }
+      if (eventType === "expired") {
+        setMicProxySessionState(session, MIC_PROXY_STATE.EXPIRED, {
+          reason: eventReason || MIC_PROXY_REASON.ARM_EXPIRED,
+          error: eventError || "Workflow tab microphone start prompt expired."
+        });
+        await sendMicProxyHidePrompt(session.targetTabId, sessionId, eventReason || MIC_PROXY_REASON.ARM_EXPIRED);
+        return buildMicProxyStatusPayload(session);
+      }
+      return buildMicProxyStatusPayload(session);
+    }
+
+    if (msgType === "SECTION_MIC_PROXY_STOP") {
+      await sweepMicProxySessions("runtime:stop");
+      const ownerTab = sender && sender.tab ? sender.tab : null;
+      const requestedSessionId = String(msg.sessionId || "").trim();
+      if (!requestedSessionId) {
+        return buildMicProxyFailure("session-id-required", "Missing site microphone session id.");
+      }
+      const session = micProxySessions.get(requestedSessionId);
+      if (!session) {
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
+      }
+      if (!ownerTab || typeof ownerTab.id !== "number" || session.ownerTabId !== ownerTab.id) {
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Site microphone session belongs to a different report tab.");
+      }
+      const currentState = normalizeMicProxyState(session.state);
+      if (currentState === MIC_PROXY_STATE.FAILED || currentState === MIC_PROXY_STATE.EXPIRED) {
+        return buildMicProxyFailure(
+          session.reason || MIC_PROXY_REASON.PROXY_STOP_FAILED,
+          session.error || "Site microphone session is not in a stoppable state."
+        );
+      }
+      if (currentState !== MIC_PROXY_STATE.RECORDING && currentState !== MIC_PROXY_STATE.STOPPING) {
+        return buildMicProxyFailure(
+          MIC_PROXY_REASON.SESSION_STATE_INVALID,
+          "Site microphone session is not recording."
+        );
+      }
+      setMicProxySessionState(session, MIC_PROXY_STATE.STOPPING, { reason: "", error: "" });
+      let stopResponse = null;
+      try {
+        stopResponse = await withTimeout(
+          browser.tabs.sendMessage(session.targetTabId, {
+            type: "UIR_SECTION_MIC_PROXY_STOP",
+            sessionId: requestedSessionId
+          }, { frameId: 0 }),
+          SECTION_MIC_PROXY_STOP_RESPONSE_TIMEOUT_MS,
+          "Timed out while waiting for workflow tab microphone stop response."
+        );
+      } catch (err) {
+        const reason = err && err.uiRecorderTimeout ? "proxy-stop-timeout" : MIC_PROXY_REASON.PROXY_STOP_FAILED;
+        const error = String((err && err.message) || "Site microphone stop failed.");
+        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
+        return buildMicProxyFailure(reason, error);
+      }
+      if (!stopResponse || !stopResponse.ok) {
+        const reason = String((stopResponse && stopResponse.reason) || MIC_PROXY_REASON.PROXY_STOP_FAILED);
+        const error = String((stopResponse && stopResponse.error) || "Site microphone stop failed.");
+        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
+        return buildMicProxyFailure(reason, error);
+      }
+      await clearMicProxySession(requestedSessionId, "runtime:stop:done", false);
+      return {
+        ok: true,
+        bytes: stopResponse.bytes,
+        mimeType: String(stopResponse.mimeType || "audio/webm"),
+        durationMs: Number(stopResponse.durationMs) || 0,
+        byteLength: Number(stopResponse.byteLength) || 0
+      };
+    }
+
+    if (msgType === "SECTION_MIC_PROXY_DISCARD") {
+      await sweepMicProxySessions("runtime:discard");
+      const ownerTab = sender && sender.tab ? sender.tab : null;
+      const requestedSessionId = String(msg.sessionId || "").trim();
+      const session = requestedSessionId
+        ? micProxySessions.get(requestedSessionId)
+        : (ownerTab && typeof ownerTab.id === "number" ? getMicProxySessionForOwner(ownerTab.id) : null);
+      if (!session) return { ok: true };
+      if (!ownerTab || typeof ownerTab.id !== "number" || session.ownerTabId !== ownerTab.id) {
+        await clearMicProxySession(session.sessionId, "runtime:discard:mismatch", false);
+        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Site microphone session belongs to a different report tab.");
+      }
+      setMicProxySessionState(session, MIC_PROXY_STATE.STOPPING, { reason: "", error: "" });
+      let discardResponse = null;
+      try {
+        discardResponse = await withTimeout(
+          browser.tabs.sendMessage(session.targetTabId, {
+            type: "UIR_SECTION_MIC_PROXY_DISCARD",
+            sessionId: session.sessionId
+          }, { frameId: 0 }),
+          SECTION_MIC_PROXY_DISCARD_RESPONSE_TIMEOUT_MS,
+          "Timed out while waiting for workflow tab microphone discard response."
+        );
+      } catch (err) {
+        const reason = err && err.uiRecorderTimeout ? "proxy-discard-timeout" : MIC_PROXY_REASON.PROXY_DISCARD_FAILED;
+        const error = String((err && err.message) || "Site microphone discard failed.");
+        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
+        await clearMicProxySession(session.sessionId, "runtime:discard:error", true);
+        return buildMicProxyFailure(reason, error);
+      }
+      await clearMicProxySession(session.sessionId, "runtime:discard:done", false);
+      if (discardResponse && discardResponse.ok) return { ok: true };
+      return buildMicProxyFailure(
+        discardResponse && discardResponse.reason ? discardResponse.reason : MIC_PROXY_REASON.PROXY_DISCARD_FAILED,
+        discardResponse && discardResponse.error ? discardResponse.error : "Site microphone discard failed."
+      );
+    }
+
+    if (msgType === "SECTION_MIC_DIAG_LOG") {
+      const action = String(msg.action || "get").trim().toLowerCase();
+      if (action === "clear") {
+        micDiagBuffer = [];
+        if (micDiagPersistTimer) {
+          clearTimeout(micDiagPersistTimer);
+          micDiagPersistTimer = null;
+        }
+        await browser.storage.local.set({ [MIC_DIAG_STORAGE_KEY]: [] });
+        return { ok: true, cleared: true, count: 0 };
+      }
+      if (action === "append") {
+        appendMicDiag({
+          source: String(msg.source || "report"),
+          event: String(msg.event || "custom"),
+          sessionId: String(msg.sessionId || ""),
+          requestId: Number(msg.requestId) || requestId,
+          ownerTabId: msg.ownerTabId,
+          targetTabId: msg.targetTabId,
+          frameId: msg.frameId,
+          state: msg.state,
+          reason: msg.reason,
+          durationMs: msg.durationMs,
+          deviceCount: msg.deviceCount,
+          consentState: msg.consentState,
+          errorName: msg.errorName,
+          errorCode: msg.errorCode
+        });
+        return { ok: true };
+      }
+      const rawLimit = Number(msg.limit);
+      const limit = Number.isFinite(rawLimit)
+        ? Math.max(1, Math.min(MIC_DIAG_MAX_ENTRIES, Math.round(rawLimit)))
+        : Math.min(120, MIC_DIAG_MAX_ENTRIES);
+      const filterSessionId = String(msg.sessionId || "").trim();
+      const filterSource = String(msg.source || "").trim().toLowerCase();
+      micDiagBuffer = pruneMicDiagBuffer(micDiagBuffer);
+      let entries = micDiagBuffer;
+      if (filterSessionId) {
+        entries = entries.filter((entry) => String(entry && entry.sessionId || "") === filterSessionId);
+      }
+      if (filterSource) {
+        entries = entries.filter((entry) => String(entry && entry.source || "").toLowerCase() === filterSource);
+      }
+      const resultEntries = entries.slice(-limit);
+      return {
+        ok: true,
+        count: resultEntries.length,
+        entries: resultEntries
+      };
+    }
 
     if (msgType === "RECORD_EVENT") {
       activeRecordEvents++;
@@ -1573,7 +3292,57 @@ browser.storage.onChanged.addListener(async (changes, areaName) => {
   }
 });
 
-browser.tabs.onActivated.addListener(async () => {
+browser.tabs.onRemoved.addListener(async (tabId) => {
+  if (typeof tabId !== "number") return;
+  const sessionsToClear = [];
+  micProxySessions.forEach((session, sessionId) => {
+    if (!session || typeof session !== "object") return;
+    if (session.ownerTabId === tabId) {
+      sessionsToClear.push(String(sessionId));
+      return;
+    }
+    if (session.targetTabId === tabId) {
+      setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, {
+        reason: MIC_PROXY_REASON.TAB_CONTEXT_UNAVAILABLE,
+        error: "Workflow tab closed during microphone capture."
+      });
+    }
+  });
+  for (const sessionId of sessionsToClear) {
+    await clearMicProxySession(sessionId, "tabs:onRemoved:owner", false);
+  }
+  const windowsToDelete = [];
+  lastUsableWebTabByWindow.forEach((entry, windowId) => {
+    if (!entry || typeof entry !== "object") return;
+    if (entry.tabId === tabId) windowsToDelete.push(windowId);
+  });
+  windowsToDelete.forEach((windowId) => lastUsableWebTabByWindow.delete(windowId));
+});
+
+browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (tab && tab.active) rememberUsableWebTab(tab, "tabs:onUpdated");
+  const targetUnavailable = !!(
+    changeInfo &&
+    (
+      (typeof changeInfo.url === "string" && !isInjectableTabUrl(changeInfo.url))
+      || changeInfo.status === "loading"
+    )
+  );
+  if (!targetUnavailable) return;
+  failMicProxySessionsForTargetTab(
+    tabId,
+    MIC_PROXY_REASON.TAB_CONTEXT_UNAVAILABLE,
+    "Workflow tab navigated or reloaded during microphone capture."
+  );
+});
+
+browser.tabs.onActivated.addListener(async (activeInfo) => {
+  if (activeInfo && typeof activeInfo.tabId === "number") {
+    try {
+      const tab = await browser.tabs.get(activeInfo.tabId);
+      rememberUsableWebTab(tab, "tabs:onActivated");
+    } catch (_) {}
+  }
   bgLog("tabs:onActivated", { resumeOnFocus: !!settings.resumeOnFocus, isRecording, isPaused });
   if (isRecording && settings.activeTabOnly) {
     await refreshActiveCaptureTarget("tab-activated");
@@ -1592,6 +3361,11 @@ browser.windows.onFocusChanged.addListener(async (windowId) => {
     if (isRecording && settings.activeTabOnly) clearActiveCaptureTarget("focus:none");
     return;
   }
+  try {
+    const tabs = await browser.tabs.query({ active: true, windowId });
+    const tab = tabs && tabs[0] ? tabs[0] : null;
+    if (tab) rememberUsableWebTab(tab, "windows:onFocusChanged");
+  } catch (_) {}
   if (isRecording && settings.activeTabOnly) {
     await refreshActiveCaptureTarget("focus-changed");
     if (activeCaptureTabId !== null) {
@@ -1628,7 +3402,7 @@ browser.commands.onCommand.addListener(async (command) => {
     burstRunTargetFps = getHotkeyBurstFps();
     burstLastLoopPauseReason = null;
   } else {
-    burstRunTargetFps = normalizeHotkeyBurstFps(settings.hotkeyBurstFps);
+    burstRunTargetFps = getHotkeyBurstFps();
   }
   const persisted = await persistSafe("toggle-burst-capture");
   const effective = getEffectiveSettings();

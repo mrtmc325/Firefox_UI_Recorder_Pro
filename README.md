@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.15.3
+# UI Workflow Recorder Pro (Firefox) v1.16.0
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.15.3`
+- Version: `1.16.0`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -15,19 +15,30 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Replay uses measured burst source FPS as the `1.0x` base so timing matches recorded pace.
   - Keyboard-controlled during recording: `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default).
   - While burst mode is on, page-watch is temporarily disabled; turning burst mode off restores tuned page-watch behavior.
-  - Hotkey burst mode is unconditional for workflow-driving events and uses a dedicated capture lane at the selected 5/10/15 FPS target cadence.
+  - Hotkey burst mode is unconditional for workflow-driving events and uses a dedicated capture lane at the selected cadence with stability governor controls.
   - Hotkey burst mode bypasses click UI probe delays, diff dedupe, and normal screenshot debounce/min-interval gates.
   - Hotkey burst mode keeps one continuous burst for the active run across UI route/page updates, splitting only on GIF toggle OFF/ON or recording end.
   - Synthetic pre-burst source frames are condensed from the visible step list while replay cards stay inline in chronology.
   - Loop-owned placeholder rows (`gif-loop-owned`) are suppressed from Workflow Steps, TOC, Replay Hints, Timeline, and exported HTML.
+  - Hotkey GIF replay now renders a cursor trail path over time (without numbered marker badges) when cursor samples are available.
+  - Exported burst playback now uses stable contain-fit canvas rendering, preventing frame-to-frame media alignment jitter in carousel view.
+  - Exported burst autoplay now resumes on slide re-entry unless explicitly paused by the user.
+  - Cursor trails now segment cleanly at tab/page/viewport boundaries to avoid cross-tab connector lines during multi-tab bursts.
   - GIF mode remains hotkey-only; popup allows lightweight pre-record tuning for capture FPS (5/10/15).
   - Popup includes GIF loop diagnostics (`burstLoopActive`, last frame time, pause reason) to prove whether capture is actively running.
-  - Burst frame bytes are now spooled to IndexedDB (`uir-frame-spool-v1`) with a triple-collector queue, so local storage only keeps lightweight `screenshotRef` metadata.
-  - Burst-mode backpressure pauses capture scheduling when spool write queues are saturated, then resumes automatically after drain.
-  - Burst spool queues now release transient `dataUrl`/blob payloads immediately after conversion/write to cut peak memory.
-  - Burst spool queue depths and resume thresholds are tuned for lower idle heap churn on long captures.
+  - Burst frame bytes are spooled to IndexedDB (`uir-frame-spool-v1`) with strict byte budgets per queue stage (capture/process/write), so local storage only keeps lightweight `screenshotRef` metadata.
+  - Burst capture defaults to JPEG in burst mode with stability-first quality tuning to reduce payload pressure.
+  - Burst scheduler now applies pressure-tier FPS governance:
+    - healthy: configured target (capped to 10 FPS when stability mode is on)
+    - moderate: 8 FPS
+    - high: 6 FPS
+    - severe: 4 FPS with newest burst-frame drops first
+  - Decode path now runs inline-safe by default (single cooperative lane) to avoid worker fanout memory spikes.
   - Report playback now retries pending frame refs and can recover frames that are still being flushed to disk.
-  - On stop, recorder briefly drains pending spool writes before snapshot so burst refs are resolvable immediately after recording.
+  - Stop now returns control immediately and runs snapshot/spool finalization in an asynchronous background job.
+  - Stop finalization state is exposed through `GET_STATE` and popup diagnostics (`queued`, `draining`, `snapshot`, `sync-refs`, `persist`, `done`, `error`).
+  - Under sustained spool pressure, newest burst synthetic frames are dropped to protect browser responsiveness.
+  - Burst loop scheduling now uses explicit backoff and avoids forced `0ms` reschedule spin while under load.
   - Burst player prefetch/decode limits are intentionally conservative to keep idle report-builder memory stable on large sessions.
   - Ref-backed burst frames no longer retain long-lived in-card data URLs after load/eviction.
 - Hotkey stop grace:
@@ -36,7 +47,8 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Popup/API stop remains immediate.
 - Automatic lifecycle screenshots:
   - Recorder attempts a screenshot-backed step when recording starts.
-  - Recorder attempts a screenshot-backed step when recording stops.
+  - Recorder attempts a screenshot-backed step when recording stops when queue pressure is healthy.
+  - Under non-healthy queue pressure, stop lifecycle screenshot capture is skipped with explicit reason metadata.
 - Canonical submit capture with dedupe (click + Enter + native submit).
 - Dynamic UI watch with memory-safe observer lifecycle.
 - Dynamic UI screenshot forcing interval:
@@ -78,6 +90,8 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Text payloads are stored in IndexedDB spool with lightweight refs in report events.
   - Section text now includes read-aloud controls in the builder: play/pause, restart, timeline scrub, tempo, narration source (Browser/OS or OpenAI cloud), and voice selection.
   - OpenAI cloud narration uses your API key stored in local browser storage on the builder device.
+  - Speech-to-text in the section editor now uses upload-only transcription (`Transcribe audio file`) for Firefox stability.
+  - All live microphone capture paths (report tab, workflow tab proxy, and popup capture) are removed from this build.
   - Generated OpenAI narration is baked into section audio refs for export so report viewers can play audio without API keys or provider setup.
   - Scrub seeks by text position (character timeline) because browser speech engines do not expose true audio timecode.
 - Annotation improvements:
@@ -182,7 +196,7 @@ Expected behavior:
   - `manifest.json`
   - `report.json`
   - `frame-manifest.json`
-  - `frames/*.png`
+  - `frames/*` (PNG/JPEG depending on frame MIME)
   - `text-manifest.json`
   - `texts/*`
   - `audio-manifest.json`
@@ -197,10 +211,17 @@ Expected behavior:
 - Reorder before export using step controls and timeline drag/drop.
 - Export presets apply to generated HTML bundles.
 
+## Audio STT (Upload)
+- In each section text panel, click `Transcribe audio file` and select an audio file (`.mp3`, `.wav`, `.m4a`, `.ogg`, `.webm`, `.mp4`).
+- The extension uploads the selected file to OpenAI STT only after API key + Firefox website content consent are granted.
+- Transcript text is inserted into the section editor for manual review and save.
+- Live microphone recording is intentionally disabled in this release.
+
 ## Privacy
 - Data remains local in browser storage.
 - No external API/network service calls are required for core capture/export features.
 - OpenAI cloud narration is optional and only used when selected in the builder with an API key and granted Firefox website content permission.
+- OpenAI speech-to-text is optional and uses the same API key/permission gate with manual audio-file upload from the section editor.
 - Redaction applies to report text fields; screenshots are not masked automatically.
 
 ## Publishing to AMO

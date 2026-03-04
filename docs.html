@@ -8,9 +8,9 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.15.3. This release refines the exported carousel viewer and section editing: Workflow Queue naming is now consistent, exported section headers are cleaner (no URL/timestamp metadata), and subsection descriptions are now editable with a strict 200-character cap.</p>
+    <p>Version 1.16.0. This release focuses on burst-playback stability and stop-path reliability: exported burst media now renders with stable contain-fit alignment, autoplay resume is deterministic across carousel slide changes, and cursor trails are context-aware across multi-tab/page bursts.</p>
 
-    <h2>Version Notes (v1.15.3)</h2>
+    <h2>Version Notes (v1.16.0)</h2>
     <ul>
       <li>Exported carousel right rail now uses <strong>Workflow Queue</strong> naming consistently.</li>
       <li>Exported top section title bar no longer includes numeric prefixes.</li>
@@ -18,7 +18,20 @@
       <li>Section subtitle reveal in export is collapsible (hover/focus/click) for cleaner default presentation.</li>
       <li>Builder step cards now include a dedicated subsection description textarea with a strict 200-character limit.</li>
       <li>Subsection descriptions support standard ASCII punctuation/symbols and wrap naturally.</li>
+      <li>Section speech-to-text now uses upload-only transcription via <strong>Transcribe audio file</strong> for Firefox stability.</li>
+      <li>Live microphone capture paths (report tab, workflow tab proxy, popup capture) were removed in this release.</li>
       <li>Report/docs references were updated to remove deprecated section-URL metadata language.</li>
+      <li>Burst stabilization mode is now reliability-first: effective burst FPS is pressure-governed (healthy target capped at 10 FPS, then 8/6/4 tiers under load).</li>
+      <li>Burst spool now enforces strict byte budgets per queue stage (capture/process/write) and drops newest burst frames first under severe pressure.</li>
+      <li>Decode runtime defaults to inline-safe cooperative processing (single lane) to avoid worker fanout lockups on large data-URL payloads.</li>
+      <li>Hotkey burst replay now includes a cursor path trail overlay sourced from throttled cursor samples during recording (still no numbered click markers in hotkey mode).</li>
+      <li>Exported burst replay now uses a stable contain-fit canvas size per burst, eliminating frame-dimension jitter and carousel misalignment.</li>
+      <li>Exported burst autoplay now preserves user intent and resumes on slide re-entry unless manually paused.</li>
+      <li>Cursor trails now segment by tab/page/viewport context so multi-tab runs do not draw connector lines across context boundaries.</li>
+      <li>Stop now returns control immediately and completes snapshot/finalization in a background job with non-blocking spool drain probing.</li>
+      <li>Stop lifecycle screenshot capture is adaptive: skipped whenever queue pressure is not healthy.</li>
+      <li>Popup GIF diagnostics now include stop-finalization phase, effective FPS, queue-byte pressure, decode mode, and safety-cap state.</li>
+      <li>No network behavior changed for capture: screenshots remain local-only and no new remote transfer paths were introduced.</li>
     </ul>
 
     <h2>Prior Notes (v1.14.0 and earlier)</h2>
@@ -42,7 +55,7 @@
       <li>Hotkey GIF burst continuity now stays in one run across route/page navigation and only splits on GIF toggle boundaries or recording end.</li>
       <li>Popup now exposes live GIF loop diagnostics: active/inactive state, last frame timestamp, and pause reason.</li>
       <li>Burst playback now retries pending frame references and recovers frames that are still flushing to disk.</li>
-      <li>On stop, recorder waits briefly for spool queues to drain before snapshot to reduce immediate post-stop frame misses.</li>
+      <li>Stop processing now runs through a serialized background finalization queue instead of blocking the stop action path.</li>
       <li>Documentation wording now matches live behavior for hotkey burst split boundaries (epoch/toggle-based), with selectable capture cadence (5/10/15 FPS) and tunable replay speed.</li>
       <li>Each workflow step and interaction burst section now supports embedded text (manual entry or <code>.txt</code>/<code>.md</code>/<code>.json</code> import) with a strict 2MB cap per section.</li>
       <li>Embedded section text is stored as IndexedDB refs and shown in builder/export as collapsible caption-style panels.</li>
@@ -180,6 +193,24 @@
       <li>Use the theme icon toggle (sun/moon preview) to switch light/dark while editing.</li>
       <li>Use the subsection description textarea per step to add concise context (max 200 characters, ASCII supported).</li>
       <li>Use section read-aloud controls to narrate embedded text for guided walkthroughs.</li>
+      <li>Use <strong>Transcribe audio file</strong> in each section text panel for OpenAI speech-to-text.</li>
+      <li>Live microphone capture is disabled in this release.</li>
+    </ul>
+
+    <h2>Audio STT Flow</h2>
+    <ul>
+      <li>Click <strong>Transcribe audio file</strong> and pick a local audio file.</li>
+      <li>Grant Firefox website content consent if prompted.</li>
+      <li>Wait for upload/transcription to complete.</li>
+      <li>Review inserted text in section editor and click <strong>Save text</strong>.</li>
+    </ul>
+
+    <h2>Audio STT Troubleshooting</h2>
+    <ul>
+      <li><strong>permission-denied</strong>: Firefox website content permission is required for OpenAI upload.</li>
+      <li><strong>oversize-audio</strong>: selected file exceeds upload size limit.</li>
+      <li><strong>api-failure</strong>: OpenAI returned an error; check API key and retry.</li>
+      <li><strong>empty-audio</strong>: selected file has no readable audio payload.</li>
     </ul>
 
     <h2>Report Export / Import</h2>
@@ -207,7 +238,7 @@
     </ul>
 
     <h2>Privacy</h2>
-    <p>All core capture/report data remains in local browser storage. Optional OpenAI cloud narration sends section text only when explicitly selected in the builder with a provided API key and granted Firefox website content permission. Screenshots are unmodified; redaction applies to report text fields.</p>
+    <p>All core capture/report data remains in local browser storage. Optional OpenAI cloud narration sends section text only when explicitly selected in the builder with a provided API key and granted Firefox website content permission. Optional OpenAI speech-to-text uploads user-selected audio files only after the same explicit key/permission flow. Screenshots are unmodified; redaction applies to report text fields.</p>
   </main>
 </body>
 </html>

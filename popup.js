@@ -57,22 +57,82 @@ async function refresh() {
   try { st = await getState(); } catch (_) {}
   if (!st || typeof st !== "object" || !st.settings) {
     popupLog("refresh:fallback-state");
-    st = { isRecording: false, isPaused: false, count: 0, settings: {}, burstHotkeyModeActive: false };
+    st = {
+      isRecording: false,
+      isPaused: false,
+      count: 0,
+      settings: {},
+      burstHotkeyModeActive: false,
+      stopFinalization: { active: false, phase: "idle", droppedBurstFrames: 0 },
+      burstPerf: {
+        captureAttempts: 0,
+        captureSuccesses: 0,
+        captureFailures: 0,
+        backpressurePauses: 0,
+        droppedFrames: 0,
+        avgCaptureMs: 0,
+        avgSpoolMs: 0,
+        writeQueueHighWater: 0,
+        queueBytesHighWater: 0,
+        effectiveBurstFps: 0
+      },
+      spoolRuntime: {
+        queueDepth: 0,
+        queueBytes: 0,
+        droppedFrames: 0,
+        backpressureLevel: "healthy",
+        decodeMode: "inline-safe",
+        safetyCapActive: false,
+        queueBytesHighWater: 0,
+        effectiveBurstFps: 0
+      }
+    };
   }
   popupLog("refresh:state", { isRecording: !!st.isRecording, isPaused: !!st.isPaused, count: st.count || 0 });
   const burstMode = !!st.burstHotkeyModeActive;
+  const stopFinalization = st.stopFinalization && typeof st.stopFinalization === "object"
+    ? st.stopFinalization
+    : { active: false, phase: "idle", droppedBurstFrames: 0 };
+  const burstPerf = st.burstPerf && typeof st.burstPerf === "object"
+    ? st.burstPerf
+    : {
+      captureAttempts: 0,
+      captureSuccesses: 0,
+      captureFailures: 0,
+      backpressurePauses: 0,
+      droppedFrames: 0,
+      avgCaptureMs: 0,
+      avgSpoolMs: 0,
+      writeQueueHighWater: 0,
+      queueBytesHighWater: 0,
+      effectiveBurstFps: 0
+    };
+  const spoolRuntime = st.spoolRuntime && typeof st.spoolRuntime === "object"
+    ? st.spoolRuntime
+    : {
+      queueDepth: 0,
+      queueBytes: 0,
+      droppedFrames: 0,
+      backpressureLevel: "healthy",
+      decodeMode: "inline-safe",
+      safetyCapActive: false,
+      queueBytesHighWater: 0,
+      effectiveBurstFps: 0
+    };
   const pendingStopUntilMs = Number(st.pendingHotkeyStopUntilMs);
   const pendingStop = !!st.pendingHotkeyStop && Number.isFinite(pendingStopUntilMs) && pendingStopUntilMs > Date.now();
   const pendingSeconds = pendingStop
     ? Math.max(0.1, Math.ceil((pendingStopUntilMs - Date.now()) / 100) / 10)
     : 0;
+  const isFinalizing = !!stopFinalization.active;
+  const finalizationPhase = String(stopFinalization.phase || "idle");
   const statusText = st.isRecording
     ? (
       pendingStop
         ? `Stopping in ${pendingSeconds.toFixed(1)}s...`
         : (st.isPaused ? "Paused" : (burstMode ? "Recording... (GIF Capture)" : "Recording..."))
     )
-    : "Idle";
+    : (isFinalizing ? `Finalizing... (${finalizationPhase})` : "Idle");
   document.getElementById("status").textContent = statusText;
   document.getElementById("count").textContent = `Steps captured: ${st.count || 0}`;
   const burstChip = document.getElementById("burst-mode-chip");
@@ -101,6 +161,42 @@ async function refresh() {
     if (burstMode && !burstLoopActive) parts.push(`Paused: ${burstPauseReasonLabel(st.burstLastLoopPauseReason)}.`);
     if (Number.isFinite(frameAgeSec)) parts.push(`Last frame ${frameAgeSec.toFixed(1)}s ago.`);
     burstLoopReason.textContent = parts.join(" ") || "Loop state updates while recording.";
+  }
+  const stopFinalizationEl = document.getElementById("stop-finalization");
+  if (stopFinalizationEl) {
+    if (isFinalizing) {
+      const jobId = stopFinalization.jobId ? ` #${String(stopFinalization.jobId).slice(-6)}` : "";
+      stopFinalizationEl.textContent = `Stop finalization: ${finalizationPhase}${jobId}`;
+    } else if (stopFinalization.phase === "error") {
+      const message = String(stopFinalization.lastError || "unknown error");
+      stopFinalizationEl.textContent = `Stop finalization error: ${message}`;
+    } else {
+      stopFinalizationEl.textContent = "Stop finalization: idle";
+    }
+  }
+  const burstPerfEl = document.getElementById("burst-perf");
+  if (burstPerfEl) {
+    const perfParts = [
+      `Capture ok/fail: ${Number(burstPerf.captureSuccesses) || 0}/${Number(burstPerf.captureFailures) || 0}`,
+      `Dropped: ${Number(burstPerf.droppedFrames) || 0}`,
+      `Backpressure pauses: ${Number(burstPerf.backpressurePauses) || 0}`,
+      `Avg cap/spool: ${(Number(burstPerf.avgCaptureMs) || 0).toFixed(1)}ms/${(Number(burstPerf.avgSpoolMs) || 0).toFixed(1)}ms`,
+      `Effective FPS: ${Number(burstPerf.effectiveBurstFps) || 0}`,
+      `Queue high-water: ${Number(burstPerf.writeQueueHighWater) || 0}`,
+      `Queue bytes high-water: ${(Math.max(0, Number(burstPerf.queueBytesHighWater) || 0) / (1024 * 1024)).toFixed(2)}MB`
+    ];
+    burstPerfEl.textContent = perfParts.join(" | ");
+  }
+  const spoolRuntimeEl = document.getElementById("spool-runtime");
+  if (spoolRuntimeEl) {
+    spoolRuntimeEl.textContent = [
+      `Spool: depth ${Number(spoolRuntime.queueDepth) || 0}`,
+      `bytes ${(Math.max(0, Number(spoolRuntime.queueBytes) || 0) / (1024 * 1024)).toFixed(2)}MB`,
+      `pressure ${String(spoolRuntime.backpressureLevel || "healthy")}`,
+      `mode ${String(spoolRuntime.decodeMode || "inline-safe")}`,
+      `safety cap ${spoolRuntime.safetyCapActive ? "on" : "off"}`,
+      `dropped ${Number(spoolRuntime.droppedFrames) || 0}`
+    ].join(" | ");
   }
 
   document.getElementById("debounce").value = st.settings?.screenshotDebounceMs ?? 900;
@@ -201,4 +297,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     await refresh();
   });
   await refresh();
+  setInterval(() => {
+    refresh().catch(() => {});
+  }, 1200);
 });

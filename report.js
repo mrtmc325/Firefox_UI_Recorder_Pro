@@ -63,6 +63,7 @@ const CLICK_BURST_DEFAULTS = Object.freeze({
 });
 const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
 const CLICK_BURST_RENDER_MARKER_CAP = 10;
+const CLICK_BURST_CURSOR_TRAIL_CAP = 18;
 const CLICK_BURST_MARKER_SCALE = 3;
 const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -84,6 +85,8 @@ const SECTION_NARRATION_CHUNK_TARGET = 900;
 const SECTION_NARRATION_PROVIDER_DEFAULT = "browser";
 const SECTION_NARRATION_PROVIDER_OPTIONS = Object.freeze(["browser", "openai"]);
 const SECTION_NARRATION_OPENAI_MODEL = "gpt-4o-mini-tts";
+const SECTION_TRANSCRIPTION_OPENAI_MODEL = "whisper-1";
+const SECTION_TRANSCRIPTION_OPENAI_MAX_BYTES = 24 * 1024 * 1024;
 const SECTION_NARRATION_OPENAI_MAX_CHARS = 12000;
 const SECTION_NARRATION_OPENAI_API_KEY_STORAGE = "__uiRecorderNarrationOpenAiApiKey";
 const SECTION_DESCRIPTION_MAX_CHARS = 200;
@@ -114,6 +117,8 @@ const WEBSITE_CONTENT_DATA_COLLECTION_KEY = "websiteContent";
 const WEBSITE_CONTENT_CONSENT_REQUIRED_MESSAGE = "Cloud narration needs website content permission before text can be sent to OpenAI. Press Play and choose Allow.";
 const WEBSITE_CONTENT_CONSENT_DENIED_MESSAGE = "Cloud narration permission is not granted. Press Play and choose Allow, or enable Website content in about:addons > UI Workflow Recorder Pro > Permissions.";
 const WEBSITE_CONTENT_CONSENT_UNAVAILABLE_MESSAGE = "Cloud narration permission controls are unavailable in this Firefox context. Use Browser / OS voice, or update to a Firefox build that supports extension data collection permissions.";
+const WEBSITE_CONTENT_TRANSCRIPTION_REQUIRED_MESSAGE = "Speech-to-text needs website content permission before audio can be sent to OpenAI. Upload an audio file and choose Allow.";
+const WEBSITE_CONTENT_TRANSCRIPTION_DENIED_MESSAGE = "Speech-to-text permission is not granted. Upload an audio file and choose Allow, or enable Website content in about:addons > UI Workflow Recorder Pro > Permissions.";
 
 const frameSpoolClient = (
   typeof self !== "undefined" &&
@@ -601,6 +606,65 @@ function detectAudioExtension(mime, fallback = "mp3") {
   if (safeMime.includes("aac")) return "aac";
   if (safeMime.includes("m4a") || safeMime.includes("mp4")) return "m4a";
   return String(fallback || "mp3").toLowerCase();
+}
+
+async function extractOpenAiTranscriptionText(response) {
+  if (!response) return "";
+  const contentType = String(response.headers && response.headers.get("content-type") || "").toLowerCase();
+  if (contentType.includes("application/json")) {
+    const payload = await response.json();
+    if (payload && typeof payload === "object") {
+      if (typeof payload.text === "string") return payload.text;
+      if (typeof payload.transcript === "string") return payload.transcript;
+    }
+    return typeof payload === "string" ? payload : "";
+  }
+  return await response.text();
+}
+
+async function requestOpenAiSpeechToTextTranscription(audioBlob, options = {}) {
+  const opts = isPlainObject(options) ? options : {};
+  const apiKey = String(opts.apiKey || "").trim();
+  if (!apiKey) {
+    throw new Error("Set an OpenAI API key to transcribe audio.");
+  }
+  const blob = audioBlob instanceof Blob
+    ? audioBlob
+    : new Blob([audioBlob || new Uint8Array()], { type: "audio/webm" });
+  if (!(blob.size > 0)) {
+    throw new Error("Selected audio is empty.");
+  }
+  if (blob.size > SECTION_TRANSCRIPTION_OPENAI_MAX_BYTES) {
+    throw new Error(
+      `Audio exceeds ${formatByteCount(SECTION_TRANSCRIPTION_OPENAI_MAX_BYTES)} upload limit.`
+    );
+  }
+  const model = String(opts.model || SECTION_TRANSCRIPTION_OPENAI_MODEL).trim() || SECTION_TRANSCRIPTION_OPENAI_MODEL;
+  const mime = String(blob.type || "audio/webm").trim() || "audio/webm";
+  const fileExt = detectAudioExtension(mime, "webm");
+  const fileName = String(opts.fileName || `section-transcription.${fileExt}`).trim() || `section-transcription.${fileExt}`;
+  const form = new FormData();
+  form.append("model", model);
+  form.append("response_format", "json");
+  form.append("file", blob, fileName);
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: form
+  });
+  if (!response.ok) {
+    let detail = "";
+    try { detail = await response.text(); } catch (_) {}
+    throw new Error(`OpenAI speech-to-text request failed (${response.status}). ${String(detail || "").slice(0, 220)}`.trim());
+  }
+  const text = await extractOpenAiTranscriptionText(response);
+  const normalized = String(text || "").replace(/\r\n?/g, "\n").trim();
+  if (!normalized) {
+    throw new Error("OpenAI did not return transcription text for this audio file.");
+  }
+  return normalized;
 }
 
 function collectScreenshotRefsFromEvents(events) {
@@ -2086,6 +2150,24 @@ function sameClickBurstContext(a, b) {
   return a.tabId === b.tabId && a.pageKey === b.pageKey;
 }
 
+function normalizeBurstViewportDimension(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.max(1, Math.round(parsed));
+}
+
+function clickBurstFrameContextKey(ev, viewportW = null, viewportH = null) {
+  const context = clickBurstContext(ev);
+  const tabId = context && context.tabId !== undefined && context.tabId !== null
+    ? String(context.tabId)
+    : "na";
+  const pageKeyRaw = context && context.pageKey ? String(context.pageKey) : "";
+  const pageKey = pageKeyRaw ? encodeURIComponent(pageKeyRaw) : "na";
+  const vw = normalizeBurstViewportDimension(viewportW !== null ? viewportW : (ev && ev.viewportW));
+  const vh = normalizeBurstViewportDimension(viewportH !== null ? viewportH : (ev && ev.viewportH));
+  return `tab:${tabId}|page:${pageKey}|vw:${vw === null ? "na" : vw}|vh:${vh === null ? "na" : vh}`;
+}
+
 function burstDisplayTitle(burst, fallbackIndex = 0) {
   const customTitle = String(burst && burst.customTitle || "").trim();
   if (customTitle) return customTitle;
@@ -2097,8 +2179,10 @@ function burstDisplayTitle(burst, fallbackIndex = 0) {
 }
 
 function frameFromEvent(ev, fallbackStepId) {
-  const viewportW = Math.max(1, Number(ev && ev.viewportW) || 1);
-  const viewportH = Math.max(1, Number(ev && ev.viewportH) || 1);
+  const viewportWRaw = normalizeBurstViewportDimension(ev && ev.viewportW);
+  const viewportHRaw = normalizeBurstViewportDimension(ev && ev.viewportH);
+  const viewportW = Math.max(1, viewportWRaw || 1);
+  const viewportH = Math.max(1, viewportHRaw || 1);
   const clickX = Number(ev && ev.clickX);
   const clickY = Number(ev && ev.clickY);
   const eventX = Number(ev && ev.eventX);
@@ -2117,12 +2201,16 @@ function frameFromEvent(ev, fallbackStepId) {
   const nx = Number.isFinite(markerX) ? Math.max(0, Math.min(1, markerX / viewportW)) : null;
   const ny = Number.isFinite(markerY) ? Math.max(0, Math.min(1, markerY / viewportH)) : null;
   const screenshotRef = cloneScreenshotRef(ev && ev.screenshotRef);
+  const contextKey = clickBurstFrameContextKey(ev, viewportWRaw, viewportHRaw);
   return {
     event: ev,
     stepId: (ev && ev.stepId) || fallbackStepId || "",
     screenshot: String(ev && ev.screenshot || ""),
     screenshotRef,
     marker: (nx !== null && ny !== null) ? { x: nx, y: ny } : null,
+    viewportW: viewportWRaw,
+    viewportH: viewportHRaw,
+    contextKey,
     tsMs: eventTsMs(ev, Date.now()),
     kind: ev && ev.type ? String(ev.type) : "event"
   };
@@ -2544,6 +2632,7 @@ function createClickBurstPlayer(card, burst, options) {
     : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
   const baseFrameDurationMs = Math.max(16, Math.round(1000 / sourceFps));
   const showMarkers = !!(options && options.showMarkers);
+  const showCursorTrail = !!(options && options.showCursorTrail);
   const markerColor = normalizeHexColor(
     options && options.markerColor,
     CLICK_BURST_DEFAULTS.clickBurstMarkerColor
@@ -2616,6 +2705,9 @@ function createClickBurstPlayer(card, burst, options) {
         src: ref ? "" : src,
         ref,
         marker: frame && frame.marker ? frame.marker : null,
+        contextKey: frame && typeof frame.contextKey === "string" ? String(frame.contextKey).trim() : "",
+        viewportW: normalizeBurstViewportDimension(frame && frame.viewportW),
+        viewportH: normalizeBurstViewportDimension(frame && frame.viewportH),
         stepId: frame && frame.stepId ? String(frame.stepId) : "",
         img: null,
         pending: null,
@@ -2830,6 +2922,51 @@ function createClickBurstPlayer(card, burst, options) {
     ctx.fillText(text, Math.round(canvas.width / 2), Math.round(canvas.height / 2));
   };
 
+  const drawCursorTrail = (index) => {
+    const activeFrame = frames[index];
+    if (!activeFrame) return;
+    const activeContextKey = String(activeFrame.contextKey || "").trim();
+    const points = [];
+    for (let i = index; i >= 0 && points.length < CLICK_BURST_CURSOR_TRAIL_CAP; i--) {
+      const entry = frames[i];
+      if (!entry) continue;
+      if (activeContextKey) {
+        const entryContextKey = String(entry.contextKey || "").trim();
+        if (!entryContextKey || entryContextKey !== activeContextKey) break;
+      }
+      const point = entry.marker;
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+      points.unshift({
+        x: Math.round(point.x * canvas.width),
+        y: Math.round(point.y * canvas.height)
+      });
+    }
+    if (!points.length) return;
+    if (points.length >= 2) {
+      for (let i = 1; i < points.length; i++) {
+        const prev = points[i - 1];
+        const next = points[i];
+        const ratio = points.length <= 1 ? 1 : (i / (points.length - 1));
+        ctx.beginPath();
+        ctx.moveTo(prev.x, prev.y);
+        ctx.lineTo(next.x, next.y);
+        ctx.strokeStyle = hexToRgba(markerColor, 0.18 + (ratio * 0.5));
+        ctx.lineWidth = 2 + (ratio * 2.5);
+        ctx.lineCap = "round";
+        ctx.stroke();
+      }
+    }
+    const head = points[points.length - 1];
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, Math.round(4.5 * CLICK_BURST_MARKER_SCALE), 0, Math.PI * 2);
+    ctx.fillStyle = hexToRgba(markerColor, 0.35);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, Math.round(2.4 * CLICK_BURST_MARKER_SCALE), 0, Math.PI * 2);
+    ctx.fillStyle = markerColor;
+    ctx.fill();
+  };
+
   const drawFrame = (index) => {
     if (destroyed) return;
     const frame = frames[index];
@@ -2865,6 +3002,8 @@ function createClickBurstPlayer(card, burst, options) {
         const y = Math.round(point.y * canvas.height);
         drawBurstMarker(ctx, x, y, i + 1, markerColor, markerStyle);
       }
+    } else if (showCursorTrail) {
+      drawCursorTrail(index);
     }
 
     progress.textContent = `Frame ${index + 1}/${frames.length}`;
@@ -3092,6 +3231,7 @@ function renderClickBursts(target, bursts, options) {
 
     const player = createClickBurstPlayer(card, burst, {
       showMarkers: !burst.hotkeyMode,
+      showCursorTrail: !!burst.hotkeyMode,
       markerColor: options && options.markerColor,
       markerStyle: options && options.markerStyle,
       speedMultiplier: options && options.speedMultiplier,
@@ -4027,6 +4167,7 @@ function buildExportHtml(report, options = {}) {
       targetFps: Number.isFinite(Number(burst.targetFps)) ? Math.round(Number(burst.targetFps)) : null,
       contextChips,
       showMarkers: !burst.hotkeyMode,
+      showCursorTrail: !!burst.hotkeyMode,
       frames: (burst.frames || []).map((frame) => ({
         stepId: frame.stepId || "",
         screenshot: safeDataImageUrl(
@@ -4040,6 +4181,9 @@ function buildExportHtml(report, options = {}) {
           ""
         ),
         screenshotRef: cloneScreenshotRef(frame && frame.screenshotRef),
+        contextKey: frame && typeof frame.contextKey === "string" ? String(frame.contextKey).trim() : "",
+        viewportW: normalizeBurstViewportDimension(frame && frame.viewportW),
+        viewportH: normalizeBurstViewportDimension(frame && frame.viewportH),
         marker: frame.marker && Number.isFinite(frame.marker.x) && Number.isFinite(frame.marker.y)
           ? { x: frame.marker.x, y: frame.marker.y }
           : null
@@ -4851,8 +4995,20 @@ body{
 .viewer-stage:-webkit-full-screen .viewer-media-content{
   padding:2px;
 }
-.click-burst-export-slot{width:100%}
+.click-burst-export-slot{
+  width:100%;
+  height:100%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
 .click-burst-export-card{
+  width:min(100%, 1480px);
+  max-height:100%;
+  display:flex;
+  flex-direction:column;
+  box-sizing:border-box;
+  margin:0 auto;
   border:1px solid var(--edge);
   border-left:4px solid var(--accent);
   border-radius:10px;
@@ -4890,6 +5046,8 @@ body{
 }
 .click-burst-export-canvas{
   width:100%;
+  height:auto;
+  display:block;
   border:1px solid var(--edge);
   border-radius:8px;
   background:#000;
@@ -5478,6 +5636,7 @@ ${quickPreviewNotice}
   var speedRaw = Number(payload && payload.playbackSpeed);
   var defaultSpeedMultiplier = Number.isFinite(speedRaw) ? Math.max(0.25, Math.min(3, speedRaw)) : ${CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed};
   var markerCap = ${CLICK_BURST_RENDER_MARKER_CAP};
+  var cursorTrailCap = ${CLICK_BURST_CURSOR_TRAIL_CAP};
   var markerScale = ${CLICK_BURST_MARKER_SCALE};
 
   function hexToRgba(hex, alpha) {
@@ -5519,6 +5678,72 @@ ${quickPreviewNotice}
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(String(n), x, y);
+  }
+
+  function frameContextKey(frame) {
+    if (!frame || typeof frame.contextKey !== "string") return "";
+    return String(frame.contextKey).trim();
+  }
+
+  function containRect(imgW, imgH, width, height) {
+    var sourceW = Math.max(1, Number(imgW) || 1);
+    var sourceH = Math.max(1, Number(imgH) || 1);
+    var targetW = Math.max(1, Number(width) || 1);
+    var targetH = Math.max(1, Number(height) || 1);
+    var scale = Math.min(targetW / sourceW, targetH / sourceH);
+    var drawW = Math.max(1, Math.round(sourceW * scale));
+    var drawH = Math.max(1, Math.round(sourceH * scale));
+    return {
+      x: Math.round((targetW - drawW) / 2),
+      y: Math.round((targetH - drawH) / 2),
+      w: drawW,
+      h: drawH
+    };
+  }
+
+  function drawCursorTrail(ctx, loaded, frameIndex, drawRect) {
+    var activeFrame = loaded[frameIndex];
+    if (!activeFrame) return;
+    var activeContext = frameContextKey(activeFrame);
+    var points = [];
+    for (var i = frameIndex; i >= 0 && points.length < cursorTrailCap; i--) {
+      var entry = loaded[i];
+      if (!entry) continue;
+      if (activeContext) {
+        var entryContext = frameContextKey(entry);
+        if (!entryContext || entryContext !== activeContext) break;
+      }
+      var point = entry.marker;
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+      points.unshift({
+        x: Math.round(drawRect.x + (point.x * drawRect.w)),
+        y: Math.round(drawRect.y + (point.y * drawRect.h))
+      });
+    }
+    if (!points.length) return;
+    if (points.length >= 2) {
+      for (var j = 1; j < points.length; j++) {
+        var prev = points[j - 1];
+        var next = points[j];
+        var ratio = points.length <= 1 ? 1 : (j / (points.length - 1));
+        ctx.beginPath();
+        ctx.moveTo(prev.x, prev.y);
+        ctx.lineTo(next.x, next.y);
+        ctx.strokeStyle = hexToRgba(markerColor, 0.18 + (ratio * 0.5));
+        ctx.lineWidth = 2 + (ratio * 2.5);
+        ctx.lineCap = "round";
+        ctx.stroke();
+      }
+    }
+    var head = points[points.length - 1];
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, Math.round(4.5 * markerScale), 0, Math.PI * 2);
+    ctx.fillStyle = hexToRgba(markerColor, 0.35);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, Math.round(2.4 * markerScale), 0, Math.PI * 2);
+    ctx.fillStyle = markerColor;
+    ctx.fill();
   }
 
   slots.forEach(function (slot) {
@@ -5622,7 +5847,11 @@ ${quickPreviewNotice}
         }
         var img = new Image();
         img.onload = function () {
-          resolve({ img: img, marker: frame && frame.marker ? frame.marker : null });
+          resolve({
+            img: img,
+            marker: frame && frame.marker ? frame.marker : null,
+            contextKey: frame && typeof frame.contextKey === "string" ? String(frame.contextKey).trim() : ""
+          });
         };
         img.onerror = function () { resolve(null); };
         img.src = src;
@@ -5638,7 +5867,13 @@ ${quickPreviewNotice}
         toggle.disabled = true;
         return;
       }
+      var stableWidth = Math.max(1, Number(loaded[0] && loaded[0].img && loaded[0].img.width) || 640);
+      var stableHeight = Math.max(1, Number(loaded[0] && loaded[0].img && loaded[0].img.height) || 360);
+      canvas.width = stableWidth;
+      canvas.height = stableHeight;
+      canvas.style.aspectRatio = stableWidth + " / " + stableHeight;
       var frameIndex = 0;
+      var userWantsPlay = !!autoPlay;
       var isPlaying = false;
       var timer = null;
       var speedMultiplier = defaultSpeedMultiplier;
@@ -5650,20 +5885,27 @@ ${quickPreviewNotice}
       function drawFrame(i) {
         var frame = loaded[i];
         if (!frame) return;
-        if (canvas.width !== frame.img.width || canvas.height !== frame.img.height) {
-          canvas.width = frame.img.width;
-          canvas.height = frame.img.height;
-        }
+        var drawRect = containRect(frame.img.width, frame.img.height, canvas.width, canvas.height);
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(frame.img, 0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(frame.img, drawRect.x, drawRect.y, drawRect.w, drawRect.h);
         var showMarkers = !burst || burst.showMarkers !== false;
+        var showCursorTrail = !!(burst && burst.showCursorTrail);
         if (showMarkers) {
           var limit = Math.min(markerCap, i + 1);
           for (var m = 0; m < limit; m++) {
             var point = loaded[m] && loaded[m].marker ? loaded[m].marker : null;
             if (!point) continue;
-            drawMarker(ctx, Math.round(point.x * canvas.width), Math.round(point.y * canvas.height), m + 1);
+            drawMarker(
+              ctx,
+              Math.round(drawRect.x + (point.x * drawRect.w)),
+              Math.round(drawRect.y + (point.y * drawRect.h)),
+              m + 1
+            );
           }
+        } else if (showCursorTrail) {
+          drawCursorTrail(ctx, loaded, i, drawRect);
         }
         progress.textContent = "Frame " + (i + 1) + "/" + loaded.length;
       }
@@ -5687,15 +5929,15 @@ ${quickPreviewNotice}
         }, frameDurationMs);
       }
 
-      function setPlaying(next) {
-        var shouldPlay = !!next && isActiveSlide();
-        isPlaying = shouldPlay;
-        toggle.textContent = isPlaying ? "Pause" : "Play";
+      function syncPlayback() {
+        isPlaying = !!userWantsPlay && isActiveSlide();
+        toggle.textContent = userWantsPlay ? "Pause" : "Play";
         startLoop();
       }
 
       toggle.addEventListener("click", function () {
-        setPlaying(!isPlaying);
+        userWantsPlay = !userWantsPlay;
+        syncPlayback();
       });
       speedInput.addEventListener("input", function () {
         var next = Number(speedInput.value);
@@ -5704,13 +5946,11 @@ ${quickPreviewNotice}
         if (isPlaying) startLoop();
       });
       window.addEventListener("viewer:slidechange", function () {
-        if (!isActiveSlide()) {
-          setPlaying(false);
-        }
+        syncPlayback();
       });
 
       drawFrame(frameIndex);
-      setPlaying(autoPlay && isActiveSlide());
+      syncPlayback();
     });
     slot.appendChild(card);
   });
@@ -7632,6 +7872,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     audioVoiceSelect.className = "section-text-audio-select";
     audioVoiceWrap.appendChild(audioVoiceSelect);
     const audioCloudKeyBtn = el("button", "btn subtle btn-small", "Set API key");
+    const audioTranscribeBtn = el("button", "btn ghost btn-small", "Transcribe audio file");
+    audioTranscribeBtn.setAttribute("title", "Upload an audio file and transcribe it into section text");
+    audioTranscribeBtn.setAttribute("aria-label", "Upload an audio file and transcribe it into section text");
     const audioScrubWrap = el("label", "section-text-audio-control");
     audioScrubWrap.appendChild(el("span", "section-text-audio-label", "Timeline"));
     const audioScrub = document.createElement("input");
@@ -7663,6 +7906,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     audioControls.appendChild(audioProviderWrap);
     audioControls.appendChild(audioVoiceWrap);
     audioControls.appendChild(audioCloudKeyBtn);
+    audioControls.appendChild(audioTranscribeBtn);
     audioControls.appendChild(audioScrubWrap);
     audioControls.appendChild(audioSpeedWrap);
     audioPanel.appendChild(audioControls);
@@ -7675,6 +7919,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     fileInput.accept = ".txt,.md,.json,text/plain,text/markdown,application/json";
     fileInput.style.display = "none";
     body.appendChild(fileInput);
+    const audioTranscriptionInput = document.createElement("input");
+    audioTranscriptionInput.type = "file";
+    audioTranscriptionInput.accept = ".mp3,.wav,.m4a,.ogg,.webm,.mp4,audio/*";
+    audioTranscriptionInput.style.display = "none";
+    body.appendChild(audioTranscriptionInput);
 
     panel.appendChild(body);
 
@@ -7693,10 +7942,112 @@ document.addEventListener("DOMContentLoaded", async () => {
     let unsubscribeVoiceUpdates = null;
     let voiceOptionsSignature = "";
     let providerOptionsBound = false;
+    const supportsAudioFileTranscription = (
+      typeof window !== "undefined" &&
+      typeof window.fetch === "function" &&
+      typeof window.FileReader === "function"
+    );
+    let transcriptionInFlight = false;
 
     const setStatus = (message, isError = false) => {
       status.textContent = String(message || "");
       status.classList.toggle("error", !!isError);
+    };
+
+    const mapTranscriptionConsentMessage = (consentRaw) => {
+      const consent = isPlainObject(consentRaw) ? consentRaw : {};
+      const reason = String(consent.reason || "");
+      const detail = String(consent.detail || "").trim();
+      if (reason === "consent-denied") {
+        return WEBSITE_CONTENT_TRANSCRIPTION_DENIED_MESSAGE;
+      }
+      if (reason.startsWith("permissions-api")) {
+        if (!detail) return WEBSITE_CONTENT_CONSENT_UNAVAILABLE_MESSAGE;
+        return `${WEBSITE_CONTENT_CONSENT_UNAVAILABLE_MESSAGE} (${detail.slice(0, 180)})`;
+      }
+      return WEBSITE_CONTENT_TRANSCRIPTION_REQUIRED_MESSAGE;
+    };
+
+    const refreshTranscriptionControls = () => {
+      if (transcriptionInFlight) {
+        audioTranscribeBtn.disabled = true;
+        audioTranscribeBtn.textContent = "Transcribing...";
+        return;
+      }
+      if (!supportsAudioFileTranscription) {
+        audioTranscribeBtn.disabled = true;
+        audioTranscribeBtn.textContent = "STT unavailable";
+        return;
+      }
+      audioTranscribeBtn.disabled = false;
+      audioTranscribeBtn.textContent = "Transcribe audio file";
+    };
+
+    const insertTranscriptionIntoEditor = (transcript) => {
+      const existing = String(editor.value || "");
+      const normalizedTranscript = String(transcript || "").replace(/\r\n?/g, "\n").trim();
+      if (!normalizedTranscript) return false;
+      const prefix = existing.trim() ? `${existing.replace(/\s*$/, "")}\n\n` : "";
+      const nextText = `${prefix}${normalizedTranscript}`;
+      const nextBytes = encodeText(nextText);
+      if (nextBytes.length > SECTION_TEXT_MAX_BYTES) {
+        throw new Error("Transcription result would exceed the 2MB section text limit.");
+      }
+      editor.value = nextText;
+      isTextDirty = true;
+      refreshCounter();
+      refreshPreview();
+      return true;
+    };
+
+    const transcribeAudioBlob = async (audioBlob, fileNameHint = "") => {
+      transcriptionInFlight = true;
+      refreshTranscriptionControls();
+      try {
+        const apiKey = getSectionNarrationOpenAiApiKey();
+        if (!apiKey) {
+          throw new Error("Set an OpenAI API key before transcribing audio.");
+        }
+        const preflightConsent = await ensureWebsiteContentConsent({ interactive: true });
+        if (!preflightConsent || !preflightConsent.ok) {
+          throw new Error(mapTranscriptionConsentMessage(preflightConsent));
+        }
+        const fallbackName = `${defaultBaseName}-speech.${detectAudioExtension(audioBlob && audioBlob.type, "webm")}`;
+        const transcript = await requestOpenAiSpeechToTextTranscription(audioBlob, {
+          apiKey,
+          model: SECTION_TRANSCRIPTION_OPENAI_MODEL,
+          fileName: String(fileNameHint || fallbackName)
+        });
+        const inserted = insertTranscriptionIntoEditor(transcript);
+        if (inserted) {
+          setStatus("Audio transcription inserted. Review text, then click Save text to persist.");
+        } else {
+          setStatus("No transcription text was inserted.", true);
+        }
+      } catch (err) {
+        setStatus((err && err.message) || "Audio transcription failed.", true);
+      } finally {
+        transcriptionInFlight = false;
+        refreshTranscriptionControls();
+      }
+    };
+
+    const transcribeAudioFile = async (file) => {
+      if (!file) return;
+      if (!(file.size > 0)) {
+        setStatus("Selected audio is empty.", true);
+        return;
+      }
+      if (file.size > SECTION_TRANSCRIPTION_OPENAI_MAX_BYTES) {
+        setStatus(
+          `Audio exceeds ${formatByteCount(SECTION_TRANSCRIPTION_OPENAI_MAX_BYTES)} upload limit.`,
+          true
+        );
+        return;
+      }
+      const fileName = String(file.name || "").trim() || `${defaultBaseName}-speech.${detectAudioExtension(file.type, "webm")}`;
+      setStatus(`Uploading ${fileName} for transcription...`);
+      await transcribeAudioBlob(file, fileName);
     };
 
     const refreshCounter = () => {
@@ -7870,10 +8221,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       audioSpeed.disabled = !supported;
       audioProviderSelect.disabled = !supported && narrationProvider === "browser";
       audioVoiceSelect.disabled = !supported;
-      audioCloudKeyBtn.style.display = narrationProvider === "openai" ? "" : "none";
-      if (narrationProvider === "openai") {
-        audioCloudKeyBtn.textContent = getSectionNarrationOpenAiApiKey() ? "Update API key" : "Set API key";
-      }
+      audioCloudKeyBtn.style.display = "";
+      audioCloudKeyBtn.textContent = getSectionNarrationOpenAiApiKey() ? "Update API key" : "Set API key";
       if (!supported) {
         audioStatus.textContent = narrationProvider === "openai"
           ? "Cloud narration is unavailable in this browser context."
@@ -8193,13 +8542,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     audioCloudKeyBtn.addEventListener("click", () => {
       const existing = getSectionNarrationOpenAiApiKey();
       const next = prompt(
-        "Enter OpenAI API key for cloud narration (leave empty to clear):",
+        "Enter OpenAI API key for cloud narration and audio transcription (leave empty to clear):",
         existing
       );
       if (next === null) return;
       const saved = setSectionNarrationOpenAiApiKey(next);
-      if (saved) setStatus("Cloud API key saved in local browser storage.");
-      else setStatus("Cloud API key cleared.");
+      if (saved) setStatus("OpenAI API key saved in local browser storage.");
+      else setStatus("OpenAI API key cleared.");
+    });
+
+    audioTranscribeBtn.addEventListener("click", () => {
+      if (transcriptionInFlight || !supportsAudioFileTranscription) return;
+      audioTranscriptionInput.click();
+    });
+
+    audioTranscriptionInput.addEventListener("change", () => {
+      const file = audioTranscriptionInput.files && audioTranscriptionInput.files[0];
+      audioTranscriptionInput.value = "";
+      if (!file) return;
+      void transcribeAudioFile(file);
     });
 
     Promise.resolve(getState()).then((state) => {
@@ -8234,6 +8595,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const selectedVoice = narrationProvider === "openai" ? narrationOpenAiVoice : narrationVoiceUri;
       refreshVoiceOptions(getSectionNarrationVoices(), selectedVoice);
     });
+
+    refreshTranscriptionControls();
 
     return panel;
   }
