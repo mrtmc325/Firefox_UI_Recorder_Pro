@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.16.1 - 2026-03-04
+
+### Changed
+- Bumped extension version to `1.16.1` in `manifest.json`.
+
+### Fixed
+- Popup header version badge now resolves at runtime from `browser.runtime.getManifest().version` instead of a hardcoded string.
+
 ## v1.16.0 - 2026-03-04
 
 ### Added

@@ -24,6 +24,20 @@ function burstPauseReasonLabel(reason) {
   return key.replace(/-/g, " ");
 }
 
+function syncPopupVersionLabel() {
+  const node = document.getElementById("app-version");
+  if (!node) return;
+  try {
+    const manifest = browser && browser.runtime && typeof browser.runtime.getManifest === "function"
+      ? browser.runtime.getManifest()
+      : null;
+    const version = manifest && manifest.version ? String(manifest.version).trim() : "";
+    node.textContent = version ? `v${version}` : "v?";
+  } catch (_) {
+    node.textContent = "v?";
+  }
+}
+
 async function writeControlSignal() {
   const now = Date.now();
   const payload = { __uiRecorderStopRequestTs: now, __uiRecorderStopSource: "popup" };
@@ -216,6 +230,7 @@ async function refresh() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   popupLog("DOMContentLoaded");
+  syncPopupVersionLabel();
   Array.from(document.querySelectorAll(".settings-card .settings-group")).forEach((group) => {
     if (group && typeof group.open === "boolean") group.open = false;
   });

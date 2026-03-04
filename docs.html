@@ -8,10 +8,11 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.16.0. This release focuses on burst-playback stability and stop-path reliability: exported burst media now renders with stable contain-fit alignment, autoplay resume is deterministic across carousel slide changes, and cursor trails are context-aware across multi-tab/page bursts.</p>
+    <p>Version 1.16.1. This patch release aligns popup version display with manifest metadata and retains the burst-playback stability work from v1.16.0 (stable contain-fit export rendering, deterministic autoplay resume, and context-aware multi-tab cursor trails).</p>
 
-    <h2>Version Notes (v1.16.0)</h2>
+    <h2>Version Notes (v1.16.1)</h2>
     <ul>
+      <li>Popup header version badge now resolves directly from extension manifest version to prevent stale hardcoded values after releases.</li>
       <li>Exported carousel right rail now uses <strong>Workflow Queue</strong> naming consistently.</li>
       <li>Exported top section title bar no longer includes numeric prefixes.</li>
       <li>Exported section subtitle metadata no longer shows URL/time details.</li>
