@@ -2104,6 +2104,11 @@ body.report.report-dense .annot-tools {
   height: auto;
 }
 
+.click-burst-override-media {
+  object-fit: contain;
+  background: #000;
+}
+
 .click-burst-controls {
   margin-top: 8px;
   display: flex;

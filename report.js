@@ -24,6 +24,28 @@ function safeDataImageUrl(value) {
   return s;
 }
 
+const SECTION_MEDIA_ALLOWED_IMAGE_MIME = Object.freeze(new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/bmp"
+]));
+
+function normalizeSectionMediaImageMime(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  if (raw === "image/jpg") return "image/jpeg";
+  if (!SECTION_MEDIA_ALLOWED_IMAGE_MIME.has(raw)) return "";
+  return raw;
+}
+
+function detectSectionMediaImageMimeFromDataUrl(value) {
+  const match = /^data:([^;,]+)(;base64)?,/i.exec(String(value || "").trim());
+  if (!match) return "";
+  return normalizeSectionMediaImageMime(match[1] || "");
+}
+
 function safeDataAudioUrl(value) {
   const s = String(value || "").trim();
   if (!s) return "";
@@ -70,6 +92,7 @@ const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TEXT_SPOOL_BYTE_CAP = 256 * 1024 * 1024;
 const AUDIO_SPOOL_BYTE_CAP = 512 * 1024 * 1024;
 const SECTION_TEXT_MAX_BYTES = 2 * 1024 * 1024;
+const SECTION_MEDIA_UPLOAD_MAX_BYTES = 24 * 1024 * 1024;
 const SECTION_TEXT_ALLOWED_EXTENSIONS = Object.freeze(["txt", "md", "json"]);
 const SECTION_TEXT_ALLOWED_MIME = Object.freeze({
   txt: "text/plain",
@@ -523,6 +546,21 @@ function cloneScreenshotRef(raw) {
     createdAtMs: Number(raw.createdAtMs) || Date.now(),
     width: Number(raw.width) || null,
     height: Number(raw.height) || null
+  };
+}
+
+function cloneBurstMediaOverride(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const dataUrl = safeDataImageUrl(raw.dataUrl || raw.url || raw.src || "");
+  if (!dataUrl) return null;
+  const detectedMime = detectSectionMediaImageMimeFromDataUrl(dataUrl);
+  const mime = normalizeSectionMediaImageMime(raw.mime || detectedMime || "image/gif");
+  if (!mime) return null;
+  return {
+    dataUrl,
+    mime,
+    fileName: String(raw.fileName || "").trim(),
+    updatedAtMs: Number(raw.updatedAtMs) || Date.now()
   };
 }
 
@@ -1592,6 +1630,9 @@ function normalizeImportedReport(rawReport) {
     const burstAudioMeta = cloneSectionAudioMeta(ev.burstAudioMeta);
     if (burstAudioMeta) ev.burstAudioMeta = burstAudioMeta;
     else delete ev.burstAudioMeta;
+    const burstMediaOverride = cloneBurstMediaOverride(ev.burstMediaOverride);
+    if (burstMediaOverride) ev.burstMediaOverride = burstMediaOverride;
+    else delete ev.burstMediaOverride;
   });
   return imported;
 }
@@ -2260,6 +2301,7 @@ function deriveClickBursts(events, rawSettings) {
         burstTextMeta: cloneSectionTextMeta(activeBurst.burstTextMeta),
         burstAudioRef: cloneSectionAudioRef(activeBurst.burstAudioRef),
         burstAudioMeta: cloneSectionAudioMeta(activeBurst.burstAudioMeta),
+        mediaOverride: cloneBurstMediaOverride(activeBurst.mediaOverride),
         pageKey: activeBurst.context.pageKey,
         url: activeBurst.url || (first && first.event ? first.event.url : ""),
         startMs,
@@ -2309,6 +2351,7 @@ function deriveClickBursts(events, rawSettings) {
   const candidateBurstTextMeta = (ev) => cloneSectionTextMeta(ev && ev.burstTextMeta);
   const candidateBurstAudioRef = (ev) => cloneSectionAudioRef(ev && ev.burstAudioRef);
   const candidateBurstAudioMeta = (ev) => cloneSectionAudioMeta(ev && ev.burstAudioMeta);
+  const candidateBurstMediaOverride = (ev) => cloneBurstMediaOverride(ev && ev.burstMediaOverride);
 
   const startHotkeyBurst = (candidate) => {
     activeBurst = {
@@ -2328,6 +2371,7 @@ function deriveClickBursts(events, rawSettings) {
       burstTextMeta: cloneSectionTextMeta(candidate.burstTextMeta),
       burstAudioRef: cloneSectionAudioRef(candidate.burstAudioRef),
       burstAudioMeta: cloneSectionAudioMeta(candidate.burstAudioMeta),
+      mediaOverride: cloneBurstMediaOverride(candidate.mediaOverride),
       pageShiftCount: 0,
       tabShiftCount: 0
     };
@@ -2365,7 +2409,8 @@ function deriveClickBursts(events, rawSettings) {
       burstTextRef: candidateBurstTextRef(ev),
       burstTextMeta: candidateBurstTextMeta(ev),
       burstAudioRef: candidateBurstAudioRef(ev),
-      burstAudioMeta: candidateBurstAudioMeta(ev)
+      burstAudioMeta: candidateBurstAudioMeta(ev),
+      mediaOverride: candidateBurstMediaOverride(ev)
     };
 
     if (activeBurst) {
@@ -2404,6 +2449,9 @@ function deriveClickBursts(events, rawSettings) {
           activeBurst.burstAudioMeta = cloneSectionAudioMeta(candidate.burstAudioMeta);
         } else if (!activeBurst.burstAudioMeta && candidate.burstAudioMeta) {
           activeBurst.burstAudioMeta = cloneSectionAudioMeta(candidate.burstAudioMeta);
+        }
+        if (!activeBurst.mediaOverride && candidate.mediaOverride) {
+          activeBurst.mediaOverride = cloneBurstMediaOverride(candidate.mediaOverride);
         }
         activeBurst.lastMs = candidate.tsMs;
         activeBurst.lastContext = candidate.context;
@@ -2648,6 +2696,7 @@ function createClickBurstPlayer(card, burst, options) {
   const onJump = options && typeof options.onJump === "function" ? options.onJump : null;
   const onSpeedCommit = options && typeof options.onSpeedCommit === "function" ? options.onSpeedCommit : null;
   const onDestroy = options && typeof options.onDestroy === "function" ? options.onDestroy : null;
+  const mediaOverride = cloneBurstMediaOverride(burst && burst.mediaOverride);
 
   const media = el("div", "click-burst-media");
   const canvas = document.createElement("canvas");
@@ -2694,6 +2743,46 @@ function createClickBurstPlayer(card, burst, options) {
     jumpFirst.disabled = true;
     jumpLast.disabled = true;
     return { destroy: () => {} };
+  }
+
+  if (mediaOverride) {
+    const overrideImg = document.createElement("img");
+    overrideImg.className = "click-burst-canvas click-burst-override-media";
+    overrideImg.alt = "Burst media override";
+    overrideImg.src = mediaOverride.dataUrl;
+    media.replaceChildren(overrideImg);
+    playPause.disabled = true;
+    speedInput.disabled = true;
+    const hasJumpTargets = !!(
+      burst &&
+      Array.isArray(burst.frames) &&
+      burst.frames.length &&
+      burst.frames[0] &&
+      burst.frames[0].stepId
+    );
+    jumpFirst.disabled = !hasJumpTargets;
+    jumpLast.disabled = !hasJumpTargets;
+    frameStatus.textContent = `Override media • ${mediaOverride.mime}`;
+    progress.textContent = "Custom section media";
+    const onJumpFirstClick = () => {
+      const stepId = burst && burst.frames && burst.frames[0] ? burst.frames[0].stepId : "";
+      if (stepId && onJump) onJump(stepId);
+    };
+    const onJumpLastClick = () => {
+      const last = burst && burst.frames ? burst.frames[burst.frames.length - 1] : null;
+      const stepId = last && last.stepId ? last.stepId : "";
+      if (stepId && onJump) onJump(stepId);
+    };
+    jumpFirst.addEventListener("click", onJumpFirstClick);
+    jumpLast.addEventListener("click", onJumpLastClick);
+    return {
+      destroy() {
+        jumpFirst.removeEventListener("click", onJumpFirstClick);
+        jumpLast.removeEventListener("click", onJumpLastClick);
+        overrideImg.src = "";
+        if (onDestroy) onDestroy();
+      }
+    };
   }
 
   const frames = (burst && Array.isArray(burst.frames) ? burst.frames : [])
@@ -3167,12 +3256,17 @@ function renderClickBursts(target, bursts, options) {
   const onMoveBurst = options && typeof options.onMoveBurst === "function" ? options.onMoveBurst : null;
   const canMoveBurst = options && typeof options.canMoveBurst === "function" ? options.canMoveBurst : null;
   const onRenameBurst = options && typeof options.onRenameBurst === "function" ? options.onRenameBurst : null;
+  const onExportBurstGif = options && typeof options.onExportBurstGif === "function" ? options.onExportBurstGif : null;
+  const onReplaceBurstMedia = options && typeof options.onReplaceBurstMedia === "function" ? options.onReplaceBurstMedia : null;
+  const onClearBurstMedia = options && typeof options.onClearBurstMedia === "function" ? options.onClearBurstMedia : null;
   const onRenderCard = options && typeof options.onRenderCard === "function" ? options.onRenderCard : null;
 
   const players = [];
   burstEntries.forEach((entry, index) => {
     const burst = entry && entry.burst ? entry.burst : null;
-    if (!burst || !Array.isArray(burst.frames) || burst.frames.length < 2) return;
+    const mediaOverride = cloneBurstMediaOverride(burst && burst.mediaOverride);
+    if (!burst) return;
+    if (!mediaOverride && (!Array.isArray(burst.frames) || burst.frames.length < 2)) return;
     const card = el("article", "click-burst-card");
     const head = el("div", "click-burst-head");
     const burstTitle = burstDisplayTitle(burst, index);
@@ -3207,6 +3301,9 @@ function renderClickBursts(target, bursts, options) {
       ? `Source: ${sourceFps} FPS • Target: ${targetFps} FPS`
       : `Source: ${sourceFps} FPS`;
     head.appendChild(el("div", "click-burst-fps-note", fpsNote));
+    if (mediaOverride) {
+      head.appendChild(el("div", "click-burst-fps-note", `Custom media override active (${mediaOverride.mime}).`));
+    }
     if (Array.isArray(burst.contextChips) && burst.contextChips.length) {
       const chipRow = el("div", "click-burst-chips");
       burst.contextChips.forEach((chip) => chipRow.appendChild(el("span", "chip", String(chip))));
@@ -3227,6 +3324,76 @@ function renderClickBursts(target, bursts, options) {
     });
     actions.appendChild(moveUp);
     actions.appendChild(moveDown);
+    if (onReplaceBurstMedia) {
+      const replaceInput = document.createElement("input");
+      replaceInput.type = "file";
+      replaceInput.accept = "image/png,image/jpeg,image/webp,image/gif,image/bmp";
+      replaceInput.className = "file-input";
+      const replaceBtn = el("button", "btn", "Replace media");
+      replaceBtn.type = "button";
+      replaceBtn.addEventListener("click", () => replaceInput.click());
+      replaceInput.addEventListener("change", async () => {
+        const file = replaceInput.files && replaceInput.files[0];
+        replaceInput.value = "";
+        if (!file) return;
+        if (replaceBtn.disabled) return;
+        const label = replaceBtn.textContent;
+        replaceBtn.disabled = true;
+        replaceBtn.textContent = "Replacing...";
+        try {
+          await onReplaceBurstMedia(
+            burst,
+            Number.isFinite(Number(entry && entry.burstIndex)) ? Number(entry.burstIndex) : index,
+            file
+          );
+        } finally {
+          replaceBtn.disabled = false;
+          replaceBtn.textContent = label;
+        }
+      });
+      actions.appendChild(replaceBtn);
+      actions.appendChild(replaceInput);
+    }
+    if (onClearBurstMedia) {
+      const clearMedia = el("button", "btn ghost", "Clear media");
+      clearMedia.type = "button";
+      clearMedia.disabled = !cloneBurstMediaOverride(burst && burst.mediaOverride);
+      clearMedia.addEventListener("click", async () => {
+        if (clearMedia.disabled) return;
+        const label = clearMedia.textContent;
+        clearMedia.disabled = true;
+        clearMedia.textContent = "Clearing...";
+        try {
+          await onClearBurstMedia(
+            burst,
+            Number.isFinite(Number(entry && entry.burstIndex)) ? Number(entry.burstIndex) : index
+          );
+        } finally {
+          clearMedia.disabled = false;
+          clearMedia.textContent = label;
+        }
+      });
+      actions.appendChild(clearMedia);
+    }
+    if (onExportBurstGif) {
+      const exportGif = el("button", "btn", "Export GIF");
+      exportGif.addEventListener("click", async () => {
+        if (exportGif.disabled) return;
+        const label = exportGif.textContent;
+        exportGif.disabled = true;
+        exportGif.textContent = "Exporting...";
+        try {
+          await onExportBurstGif(
+            burst,
+            Number.isFinite(Number(entry && entry.burstIndex)) ? Number(entry.burstIndex) : index
+          );
+        } finally {
+          exportGif.disabled = false;
+          exportGif.textContent = label;
+        }
+      });
+      actions.appendChild(exportGif);
+    }
     card.appendChild(actions);
 
     const player = createClickBurstPlayer(card, burst, {
@@ -4168,6 +4335,7 @@ function buildExportHtml(report, options = {}) {
       contextChips,
       showMarkers: !burst.hotkeyMode,
       showCursorTrail: !!burst.hotkeyMode,
+      mediaOverride: cloneBurstMediaOverride(burst && burst.mediaOverride),
       frames: (burst.frames || []).map((frame) => ({
         stepId: frame.stepId || "",
         screenshot: safeDataImageUrl(
@@ -5076,6 +5244,9 @@ body{
   border-radius:8px;
   background:#000;
 }
+.click-burst-export-override-media{
+  object-fit:contain;
+}
 .click-burst-export-controls{
   display:flex;
   align-items:center;
@@ -5780,8 +5951,14 @@ ${quickPreviewNotice}
       return;
     }
     var parentSlide = slot.closest(".carousel-slide");
+    var mediaOverride = burst && burst.mediaOverride && typeof burst.mediaOverride.dataUrl === "string"
+      ? burst.mediaOverride.dataUrl
+      : "";
+    var mediaOverrideMime = burst && burst.mediaOverride && typeof burst.mediaOverride.mime === "string"
+      ? String(burst.mediaOverride.mime)
+      : "";
     var frames = Array.isArray(burst && burst.frames) ? burst.frames : [];
-    if (frames.length < 2) {
+    if (!mediaOverride && frames.length < 2) {
       slot.remove();
       return;
     }
@@ -5818,6 +5995,21 @@ ${quickPreviewNotice}
         chipsRow.appendChild(node);
       });
       if (chipsRow.children.length) card.appendChild(chipsRow);
+    }
+    if (mediaOverride) {
+      var overrideImg = document.createElement("img");
+      overrideImg.className = "click-burst-export-canvas click-burst-export-override-media";
+      overrideImg.alt = "Burst media override";
+      overrideImg.src = mediaOverride;
+      card.appendChild(overrideImg);
+      var overrideProgress = document.createElement("div");
+      overrideProgress.className = "click-burst-export-progress";
+      overrideProgress.textContent = mediaOverrideMime
+        ? ("Custom media override • " + mediaOverrideMime)
+        : "Custom media override";
+      card.appendChild(overrideProgress);
+      slot.appendChild(card);
+      return;
     }
 
     var canvas = document.createElement("canvas");
@@ -6385,6 +6577,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const exportPreviewRefresh = document.getElementById("export-preview-refresh");
   const exportPreviewHide = document.getElementById("export-preview-hide");
   const rawBundleBtn = document.getElementById("bundle-raw");
+  const mediaBundleBtn = document.getElementById("bundle-media");
   const importMode = document.getElementById("import-mode");
   const importBtn = document.getElementById("bundle-import");
   const importFile = document.getElementById("bundle-import-file");
@@ -6861,6 +7054,646 @@ document.addEventListener("DOMContentLoaded", async () => {
     const url = URL.createObjectURL(blob);
     await browser.downloads.download({ url, filename, saveAs: true });
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
+
+  function sanitizeMediaFileToken(value, fallback = "section") {
+    const raw = String(value || "").trim();
+    const normalized = raw
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^[-_.]+|[-_.]+$/g, "");
+    const clipped = normalized.slice(0, 64);
+    if (clipped) return clipped;
+    return String(fallback || "section");
+  }
+
+  function detectImageMimeFromDataUrl(dataUrl) {
+    const detected = detectSectionMediaImageMimeFromDataUrl(dataUrl);
+    return detected || "image/png";
+  }
+
+  function extensionForImageMime(mimeRaw) {
+    const mime = String(mimeRaw || "").trim().toLowerCase();
+    if (mime === "image/jpeg" || mime === "image/jpg") return "jpg";
+    if (mime === "image/webp") return "webp";
+    if (mime === "image/gif") return "gif";
+    if (mime === "image/bmp") return "bmp";
+    return "png";
+  }
+
+  function ensureUniqueExportFileName(fileNameRaw, usedNames) {
+    const fileName = String(fileNameRaw || "").trim() || "asset.bin";
+    if (!(usedNames instanceof Set)) return fileName;
+    const dot = fileName.lastIndexOf(".");
+    const base = dot > 0 ? fileName.slice(0, dot) : fileName;
+    const ext = dot > 0 ? fileName.slice(dot) : "";
+    let next = fileName;
+    let suffix = 2;
+    while (usedNames.has(next.toLowerCase())) {
+      next = `${base}-${suffix}${ext}`;
+      suffix += 1;
+    }
+    usedNames.add(next.toLowerCase());
+    return next;
+  }
+
+  function writeGifWord(target, value) {
+    const v = Math.max(0, Number(value) || 0) & 0xffff;
+    target.push(v & 0xff, (v >> 8) & 0xff);
+  }
+
+  function appendGifSubBlocks(target, bytes) {
+    const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    let offset = 0;
+    while (offset < input.length) {
+      const blockLen = Math.min(255, input.length - offset);
+      target.push(blockLen);
+      for (let i = 0; i < blockLen; i++) target.push(input[offset + i]);
+      offset += blockLen;
+    }
+    target.push(0x00);
+  }
+
+  function buildGif332Palette() {
+    const palette = new Uint8Array(256 * 3);
+    for (let index = 0; index < 256; index++) {
+      const r = (index >> 5) & 0x07;
+      const g = (index >> 2) & 0x07;
+      const b = index & 0x03;
+      palette[(index * 3) + 0] = Math.round((r * 255) / 7);
+      palette[(index * 3) + 1] = Math.round((g * 255) / 7);
+      palette[(index * 3) + 2] = Math.round((b * 255) / 3);
+    }
+    return palette;
+  }
+
+  const GIF_332_PALETTE = buildGif332Palette();
+
+  function quantizeRgb332(r, g, b) {
+    const rr = (Math.max(0, Math.min(255, Number(r) || 0)) >> 5) & 0x07;
+    const gg = (Math.max(0, Math.min(255, Number(g) || 0)) >> 5) & 0x07;
+    const bb = (Math.max(0, Math.min(255, Number(b) || 0)) >> 6) & 0x03;
+    return (rr << 5) | (gg << 2) | bb;
+  }
+
+  function lzwEncodeGifIndices(indicesRaw, minCodeSize = 8) {
+    const indices = indicesRaw instanceof Uint8Array ? indicesRaw : new Uint8Array(indicesRaw || []);
+    if (!indices.length) return new Uint8Array(0);
+    const clearCode = 1 << minCodeSize;
+    const endCode = clearCode + 1;
+    const dict = new Map();
+    const out = [];
+    let nextCode = endCode + 1;
+    let codeSize = minCodeSize + 1;
+    let bitBuffer = 0;
+    let bitCount = 0;
+
+    const resetDictionary = () => {
+      dict.clear();
+      nextCode = endCode + 1;
+      codeSize = minCodeSize + 1;
+    };
+
+    const writeCode = (code) => {
+      bitBuffer |= (code << bitCount);
+      bitCount += codeSize;
+      while (bitCount >= 8) {
+        out.push(bitBuffer & 0xff);
+        bitBuffer >>= 8;
+        bitCount -= 8;
+      }
+    };
+
+    resetDictionary();
+    writeCode(clearCode);
+    let prefix = indices[0];
+    for (let i = 1; i < indices.length; i++) {
+      const next = indices[i];
+      const key = (prefix << 8) | next;
+      if (dict.has(key)) {
+        prefix = dict.get(key);
+        continue;
+      }
+      writeCode(prefix);
+      if (nextCode < 4096) {
+        dict.set(key, nextCode++);
+        if (nextCode === (1 << codeSize) && codeSize < 12) codeSize += 1;
+      } else {
+        writeCode(clearCode);
+        resetDictionary();
+      }
+      prefix = next;
+    }
+    writeCode(prefix);
+    writeCode(endCode);
+    if (bitCount > 0) out.push(bitBuffer & 0xff);
+    return new Uint8Array(out);
+  }
+
+  function containRectForMediaExport(imgW, imgH, targetW, targetH) {
+    const sourceW = Math.max(1, Number(imgW) || 1);
+    const sourceH = Math.max(1, Number(imgH) || 1);
+    const width = Math.max(1, Number(targetW) || 1);
+    const height = Math.max(1, Number(targetH) || 1);
+    const scale = Math.min(width / sourceW, height / sourceH);
+    const drawW = Math.max(1, Math.round(sourceW * scale));
+    const drawH = Math.max(1, Math.round(sourceH * scale));
+    return {
+      x: Math.round((width - drawW) / 2),
+      y: Math.round((height - drawH) / 2),
+      w: drawW,
+      h: drawH
+    };
+  }
+
+  function normalizeGifExportSize(widthRaw, heightRaw) {
+    const width = Math.max(1, Math.round(Number(widthRaw) || 1));
+    const height = Math.max(1, Math.round(Number(heightRaw) || 1));
+    const maxSide = 960;
+    const largest = Math.max(width, height);
+    if (largest <= maxSide) return { width, height };
+    const scale = maxSide / largest;
+    return {
+      width: Math.max(1, Math.round(width * scale)),
+      height: Math.max(1, Math.round(height * scale))
+    };
+  }
+
+  async function loadImageFromDataUrlForExport(dataUrl) {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Image decode failed."));
+      img.src = dataUrl;
+    });
+  }
+
+  function detectImageMimeFromFileName(fileName) {
+    const name = String(fileName || "").trim().toLowerCase();
+    if (!name) return "";
+    const dot = name.lastIndexOf(".");
+    if (dot < 0) return "";
+    const ext = name.slice(dot + 1);
+    if (ext === "png") return "image/png";
+    if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+    if (ext === "webp") return "image/webp";
+    if (ext === "gif") return "image/gif";
+    if (ext === "bmp") return "image/bmp";
+    return "";
+  }
+
+  async function readUploadedSectionMediaFile(file) {
+    const input = file && typeof file === "object" ? file : null;
+    if (!input) throw new Error("No media file selected.");
+    const name = String(input.name || "").trim() || "section-media";
+    const rawMime = normalizeSectionMediaImageMime(input.type || "");
+    const inferredMime = detectImageMimeFromFileName(name);
+    const mime = rawMime || inferredMime;
+    if (!mime) {
+      throw new Error("Unsupported media format. Use PNG, JPG, WEBP, GIF, or BMP.");
+    }
+    const byteLength = Number(input.size) || 0;
+    if (!byteLength) throw new Error("Selected media file is empty.");
+    if (byteLength > SECTION_MEDIA_UPLOAD_MAX_BYTES) {
+      throw new Error(`Media file is too large. Max ${Math.round(SECTION_MEDIA_UPLOAD_MAX_BYTES / (1024 * 1024))} MB.`);
+    }
+    const arrayBuffer = await input.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    if (!bytes.length) throw new Error("Unable to read media bytes.");
+    const dataUrl = bytesToDataUrl(bytes, mime);
+    const safeDataUrl = safeDataImageUrl(dataUrl);
+    if (!safeDataUrl) throw new Error("Media conversion failed.");
+    const image = await loadImageFromDataUrlForExport(safeDataUrl);
+    const width = Math.max(1, Number(image.naturalWidth || image.width) || 1);
+    const height = Math.max(1, Number(image.naturalHeight || image.height) || 1);
+    image.src = "";
+    return {
+      fileName: name,
+      mime,
+      byteLength: bytes.length,
+      bytes,
+      dataUrl: safeDataUrl,
+      width,
+      height
+    };
+  }
+
+  async function persistStepScreenshotAsset(ev, asset) {
+    const existingRef = cloneScreenshotRef(ev && ev.screenshotRef);
+    if (
+      await ensureFrameSpoolClientReady() &&
+      frameSpoolClient &&
+      typeof frameSpoolClient.putFrameFromBytes === "function"
+    ) {
+      try {
+        const ref = await frameSpoolClient.putFrameFromBytes({
+          frameId: existingRef && existingRef.frameId ? existingRef.frameId : undefined,
+          sessionId: existingRef && existingRef.sessionId ? existingRef.sessionId : String((report && report.sessionId) || ""),
+          mime: asset.mime,
+          createdAtMs: existingRef && existingRef.createdAtMs ? existingRef.createdAtMs : Date.now(),
+          width: asset.width,
+          height: asset.height
+        }, asset.bytes);
+        const normalizedRef = cloneScreenshotRef(ref);
+        if (normalizedRef && normalizedRef.frameId) {
+          writeFrameDataUrlCache(normalizedRef.frameId, asset.dataUrl);
+          ev.screenshot = "";
+          ev.screenshotRef = normalizedRef;
+          return { storedInSpool: true, ref: normalizedRef };
+        }
+      } catch (_) {}
+    }
+    ev.screenshot = asset.dataUrl;
+    ev.screenshotRef = null;
+    return { storedInSpool: false, ref: null };
+  }
+
+  async function resolveEventScreenshotDataUrlForExport(ev) {
+    const inline = safeDataImageUrl(ev && ev.screenshot || "");
+    if (inline) return inline;
+    const ref = cloneScreenshotRef(ev && ev.screenshotRef);
+    if (!ref) return "";
+    return String(await resolveFrameDataUrlFromRef(ref, {
+      retries: FRAME_REF_RESOLVE_RETRIES_DEFAULT,
+      retryMs: FRAME_REF_RESOLVE_RETRY_MS_DEFAULT,
+      requireExistence: true
+    }) || "");
+  }
+
+  async function buildStepImageAssetForEvent(ev, options) {
+    if (!ev) throw new Error("Section event is unavailable.");
+    const opts = isPlainObject(options) ? options : {};
+    const dataUrl = await resolveEventScreenshotDataUrlForExport(ev);
+    if (!dataUrl) throw new Error("Section screenshot is unavailable.");
+    const bytes = dataUrlToBytes(dataUrl);
+    if (!(bytes && bytes.length)) throw new Error("Section screenshot payload is empty.");
+    const mime = detectImageMimeFromDataUrl(dataUrl);
+    const ext = extensionForImageMime(mime);
+    const stepToken = sanitizeMediaFileToken(ev.stepId || "step", "step");
+    const titleToken = sanitizeMediaFileToken(titleFor(ev) || ev.stepId || "section", "section");
+    const prefix = String(opts.fileNamePrefix || "").trim();
+    const baseName = prefix
+      ? `${prefix}-${stepToken}-${titleToken}`
+      : `${stepToken}-${titleToken}`;
+    const requestedName = `${baseName}.${ext}`;
+    const filename = ensureUniqueExportFileName(requestedName, opts.usedNames);
+    return {
+      filename,
+      mime,
+      bytes,
+      stepId: String(ev.stepId || ""),
+      title: String(titleFor(ev) || "")
+    };
+  }
+
+  async function exportStepImageForEvent(ev) {
+    const asset = await buildStepImageAssetForEvent(ev);
+    await downloadBlob(new Blob([asset.bytes], { type: asset.mime }), asset.filename);
+    return asset.filename;
+  }
+
+  async function replaceStepMediaForEvent(ev, file) {
+    if (!ev) throw new Error("Section event is unavailable.");
+    const asset = await readUploadedSectionMediaFile(file);
+    await persistStepScreenshotAsset(ev, asset);
+    ev.screenshotSkipped = false;
+    delete ev.screenshotSkipReason;
+    return {
+      fileName: asset.fileName,
+      mime: asset.mime,
+      byteLength: asset.byteLength,
+      width: asset.width,
+      height: asset.height
+    };
+  }
+
+  async function resolveBurstFrameImagesForGif(burst) {
+    const sourceFrames = Array.isArray(burst && burst.frames) ? burst.frames : [];
+    const loaded = [];
+    for (const frame of sourceFrames) {
+      let dataUrl = safeDataImageUrl(frame && frame.screenshot || "");
+      if (!dataUrl) {
+        const ref = cloneScreenshotRef(frame && frame.screenshotRef);
+        if (ref) {
+          dataUrl = String(await resolveFrameDataUrlFromRef(ref, {
+            retries: FRAME_REF_RESOLVE_RETRIES_DEFAULT,
+            retryMs: FRAME_REF_RESOLVE_RETRY_MS_DEFAULT,
+            requireExistence: true
+          }) || "");
+        }
+      }
+      if (!dataUrl) continue;
+      try {
+        const image = await loadImageFromDataUrlForExport(dataUrl);
+        loaded.push({ image });
+      } catch (_) {}
+    }
+    return loaded;
+  }
+
+  function buildBurstGifExportFileName(burst, burstIndex = 0, options) {
+    const opts = isPlainObject(options) ? options : {};
+    const normalizedIndex = Number.isFinite(Number(burstIndex)) ? Number(burstIndex) : 0;
+    const reportToken = sanitizeMediaFileToken(
+      (hasReport && report && report.name) ? report.name : "ui-report",
+      "ui-report"
+    );
+    const burstToken = sanitizeMediaFileToken(
+      burstDisplayTitle(burst, normalizedIndex),
+      `burst-${normalizedIndex + 1}`
+    );
+    const prefix = String(opts.fileNamePrefix || "").trim();
+    const includeReportName = opts.includeReportName !== false;
+    const includeTimestamp = opts.includeTimestamp !== false;
+    const baseToken = includeReportName
+      ? `${reportToken}-${burstToken}`
+      : burstToken;
+    const prefixedBase = prefix ? `${prefix}-${baseToken}` : baseToken;
+    const timestamp = includeTimestamp
+      ? `-${new Date().toISOString().replace(/[:.]/g, "-")}`
+      : "";
+    const requestedName = `${prefixedBase}${timestamp}.gif`;
+    return ensureUniqueExportFileName(requestedName, opts.usedNames);
+  }
+
+  async function buildBurstGifAssetForSection(burst, burstIndex = 0, options) {
+    const mediaOverride = cloneBurstMediaOverride(burst && burst.mediaOverride);
+    if (mediaOverride && mediaOverride.mime === "image/gif") {
+      const overrideBytes = dataUrlToBytes(mediaOverride.dataUrl);
+      if (overrideBytes && overrideBytes.length) {
+        let width = null;
+        let height = null;
+        try {
+          const img = await loadImageFromDataUrlForExport(mediaOverride.dataUrl);
+          width = Math.max(1, Number(img.naturalWidth || img.width) || 1);
+          height = Math.max(1, Number(img.naturalHeight || img.height) || 1);
+          img.src = "";
+        } catch (_) {}
+        const sourceFpsRaw = Number(burst && burst.sourceFps);
+        const sourceFps = Number.isFinite(sourceFpsRaw)
+          ? Number(clampNumber(sourceFpsRaw, 0.25, 60, CLICK_BURST_DEFAULTS.clickBurstPlaybackFps).toFixed(2))
+          : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
+        const filename = buildBurstGifExportFileName(burst, burstIndex, options);
+        return {
+          filename,
+          mime: "image/gif",
+          bytes: overrideBytes,
+          frameCount: 1,
+          width,
+          height,
+          sourceFps
+        };
+      }
+    }
+
+    let loadedFrames = [];
+    let overrideImage = null;
+    if (mediaOverride && mediaOverride.mime) {
+      try {
+        overrideImage = await loadImageFromDataUrlForExport(mediaOverride.dataUrl);
+      } catch (_) {
+        overrideImage = null;
+      }
+    }
+    if (overrideImage) {
+      loadedFrames = [{ image: overrideImage }, { image: overrideImage }];
+    } else {
+      loadedFrames = await resolveBurstFrameImagesForGif(burst);
+    }
+    if (loadedFrames.length < 2) throw new Error("Need at least 2 burst frames to export GIF.");
+
+    const sourceWidth = Math.max(1, Number(loadedFrames[0].image.naturalWidth || loadedFrames[0].image.width) || 1);
+    const sourceHeight = Math.max(1, Number(loadedFrames[0].image.naturalHeight || loadedFrames[0].image.height) || 1);
+    const { width, height } = normalizeGifExportSize(sourceWidth, sourceHeight);
+    const sourceFps = Number(clampNumber(
+      burst && burst.sourceFps,
+      0.25,
+      60,
+      CLICK_BURST_DEFAULTS.clickBurstPlaybackFps
+    ));
+    const delayCs = Math.max(2, Math.round((1000 / sourceFps) / 10));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new Error("Canvas context unavailable for GIF export.");
+
+    const bytes = [];
+    bytes.push(0x47, 0x49, 0x46, 0x38, 0x39, 0x61); // GIF89a
+    writeGifWord(bytes, width);
+    writeGifWord(bytes, height);
+    bytes.push(0xF7, 0x00, 0x00); // global color table (256)
+    for (let i = 0; i < GIF_332_PALETTE.length; i++) bytes.push(GIF_332_PALETTE[i]);
+    bytes.push(
+      0x21, 0xFF, 0x0B,
+      0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2E, 0x30,
+      0x03, 0x01, 0x00, 0x00, 0x00 // infinite loop
+    );
+
+    for (const frame of loadedFrames) {
+      const img = frame.image;
+      const drawRect = containRectForMediaExport(
+        img.naturalWidth || img.width,
+        img.naturalHeight || img.height,
+        width,
+        height
+      );
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, drawRect.x, drawRect.y, drawRect.w, drawRect.h);
+
+      const rgba = ctx.getImageData(0, 0, width, height).data;
+      const indexed = new Uint8Array(width * height);
+      for (let p = 0, j = 0; p < rgba.length; p += 4, j += 1) {
+        const alpha = rgba[p + 3];
+        indexed[j] = alpha < 16
+          ? 0
+          : quantizeRgb332(rgba[p], rgba[p + 1], rgba[p + 2]);
+      }
+      const lzwData = lzwEncodeGifIndices(indexed, 8);
+
+      bytes.push(0x21, 0xF9, 0x04, 0x04);
+      writeGifWord(bytes, delayCs);
+      bytes.push(0x00, 0x00);
+
+      bytes.push(0x2C);
+      writeGifWord(bytes, 0);
+      writeGifWord(bytes, 0);
+      writeGifWord(bytes, width);
+      writeGifWord(bytes, height);
+      bytes.push(0x00);
+      bytes.push(0x08);
+      appendGifSubBlocks(bytes, lzwData);
+    }
+
+    bytes.push(0x3B); // trailer
+    canvas.width = 1;
+    canvas.height = 1;
+    if (overrideImage) overrideImage.src = "";
+
+    const outputBytes = new Uint8Array(bytes);
+    const filename = buildBurstGifExportFileName(burst, burstIndex, options);
+    return {
+      filename,
+      mime: "image/gif",
+      bytes: outputBytes,
+      frameCount: loadedFrames.length,
+      width,
+      height,
+      sourceFps
+    };
+  }
+
+  async function exportBurstGifForSection(burst, burstIndex = 0) {
+    const asset = await buildBurstGifAssetForSection(burst, burstIndex);
+    await downloadBlob(new Blob([asset.bytes], { type: asset.mime }), asset.filename);
+    return asset.filename;
+  }
+
+  async function replaceBurstMediaForSection(burst, file) {
+    const asset = await readUploadedSectionMediaFile(file);
+    const touched = applyBurstMediaOverrideState(burst, {
+      dataUrl: asset.dataUrl,
+      mime: asset.mime,
+      fileName: asset.fileName,
+      updatedAtMs: Date.now()
+    });
+    if (!touched) throw new Error("Unable to update interaction media.");
+    return {
+      touched,
+      fileName: asset.fileName,
+      mime: asset.mime,
+      byteLength: asset.byteLength,
+      width: asset.width,
+      height: asset.height
+    };
+  }
+
+  async function exportAllSectionMediaZip() {
+    if (!hasReport) throw new Error("No report available to export.");
+    if (!Array.isArray(report.events) || !report.events.length) {
+      throw new Error("No section events available.");
+    }
+
+    const sourceEvents = cloneJson(report.events);
+    const view = buildVisibleViewModel(sourceEvents);
+    const events = Array.isArray(view && view.displayEvents) ? view.displayEvents : [];
+    const bursts = Array.isArray(view && view.bursts) ? view.bursts : [];
+    const exportedAt = new Date().toISOString();
+
+    const zipEntries = [];
+    const imagesManifest = [];
+    const gifsManifest = [];
+    const usedImageNames = new Set();
+    const usedGifNames = new Set();
+    let skippedImages = 0;
+    let skippedGifs = 0;
+
+    for (const ev of events) {
+      const hasImage = !!safeDataImageUrl(ev && ev.screenshot || "") || !!cloneScreenshotRef(ev && ev.screenshotRef);
+      if (!hasImage) continue;
+      try {
+        const indexToken = String(imagesManifest.length + 1).padStart(3, "0");
+        const asset = await buildStepImageAssetForEvent(ev, {
+          fileNamePrefix: indexToken,
+          usedNames: usedImageNames
+        });
+        const filePath = `images/${asset.filename}`;
+        zipEntries.push({ name: filePath, data: asset.bytes, updatedAt: exportedAt });
+        imagesManifest.push({
+          stepId: ev && ev.stepId ? String(ev.stepId) : "",
+          title: String(titleFor(ev) || ""),
+          file: filePath,
+          mime: asset.mime,
+          byteLength: asset.bytes.length,
+          ts: Number(ev && ev.ts) || 0
+        });
+      } catch (_) {
+        skippedImages += 1;
+      }
+    }
+
+    for (let i = 0; i < bursts.length; i++) {
+      const burst = bursts[i];
+      if (!(burst && Array.isArray(burst.frames) && burst.frames.length >= 2)) continue;
+      try {
+        const indexToken = String(gifsManifest.length + 1).padStart(3, "0");
+        const asset = await buildBurstGifAssetForSection(burst, i, {
+          includeReportName: false,
+          includeTimestamp: false,
+          fileNamePrefix: indexToken,
+          usedNames: usedGifNames
+        });
+        const filePath = `gifs/${asset.filename}`;
+        zipEntries.push({ name: filePath, data: asset.bytes, updatedAt: exportedAt });
+        gifsManifest.push({
+          burstIndex: i + 1,
+          title: burstDisplayTitle(burst, i),
+          file: filePath,
+          frameCount: asset.frameCount,
+          sourceFps: Number(asset.sourceFps) || CLICK_BURST_DEFAULTS.clickBurstPlaybackFps,
+          width: asset.width,
+          height: asset.height,
+          byteLength: asset.bytes.length,
+          startMs: Number(burst && burst.startMs) || null,
+          endMs: Number(burst && burst.endMs) || null
+        });
+      } catch (_) {
+        skippedGifs += 1;
+      }
+    }
+
+    if (!zipEntries.length) {
+      throw new Error("No exportable section images or GIFs were found.");
+    }
+
+    const manifest = {
+      format: "uir-report-media",
+      version: 1,
+      exportedAt,
+      source: "UI Workflow Recorder Pro",
+      reportId: report.id || null,
+      reportName: report.name || null,
+      images: imagesManifest.length,
+      gifs: gifsManifest.length,
+      skippedImages,
+      skippedGifs
+    };
+
+    const readme = [
+      "UI Recorder Pro section media bundle",
+      "",
+      "Files:",
+      "- manifest.json      : bundle metadata",
+      "- images-manifest.json : per-section still image metadata",
+      "- gifs-manifest.json : per-burst GIF metadata",
+      "- images/*           : exported per-section screenshots",
+      "- gifs/*             : exported burst GIFs",
+      "",
+      "This bundle is read-only media output for external sharing."
+    ].join("\n");
+
+    const packageEntries = [
+      { name: "manifest.json", data: encodeText(JSON.stringify(manifest, null, 2)), updatedAt: exportedAt },
+      { name: "images-manifest.json", data: encodeText(JSON.stringify({ images: imagesManifest }, null, 2)), updatedAt: exportedAt },
+      { name: "gifs-manifest.json", data: encodeText(JSON.stringify({ gifs: gifsManifest }, null, 2)), updatedAt: exportedAt },
+      { name: "README.txt", data: encodeText(readme), updatedAt: exportedAt },
+      ...zipEntries
+    ];
+
+    const reportToken = sanitizeMediaFileToken(report && report.name ? report.name : "ui-report", "ui-report");
+    const filename = `${reportToken}-section-media-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
+    const zipBytes = buildStoredZip(packageEntries);
+    await downloadBlob(new Blob([zipBytes], { type: "application/zip" }), filename);
+    return {
+      filename,
+      imageCount: imagesManifest.length,
+      gifCount: gifsManifest.length,
+      skippedImages,
+      skippedGifs
+    };
   }
 
   function assignStepIds(events) {
@@ -7814,6 +8647,26 @@ document.addEventListener("DOMContentLoaded", async () => {
       else delete burst.burstAudioRef;
       if (normalizedMeta) burst.burstAudioMeta = cloneSectionAudioMeta(normalizedMeta);
       else delete burst.burstAudioMeta;
+    }
+    return touched;
+  }
+
+  function applyBurstMediaOverrideState(burst, override) {
+    if (!hasReport || !Array.isArray(report.events)) return 0;
+    const stepIds = burstStepIdSet(burst);
+    if (!stepIds.size) return 0;
+    const normalized = cloneBurstMediaOverride(override);
+    let touched = 0;
+    report.events.forEach((ev) => {
+      const stepId = String(ev && ev.stepId || "").trim();
+      if (!stepIds.has(stepId)) return;
+      if (normalized) ev.burstMediaOverride = cloneBurstMediaOverride(normalized);
+      else delete ev.burstMediaOverride;
+      touched += 1;
+    });
+    if (burst && typeof burst === "object") {
+      if (normalized) burst.mediaOverride = cloneBurstMediaOverride(normalized);
+      else delete burst.mediaOverride;
     }
     return touched;
   }
@@ -9175,7 +10028,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       entries.forEach((entry, localIndex) => {
         const burst = entry && entry.burst ? entry.burst : null;
         const burstIndex = Number(entry && entry.burstIndex);
-        if (!burst || !Array.isArray(burst.frames) || burst.frames.length < 2) return;
+        const mediaOverride = cloneBurstMediaOverride(burst && burst.mediaOverride);
+        if (!burst) return;
+        if (!mediaOverride && (!Array.isArray(burst.frames) || burst.frames.length < 2)) return;
 
         const stepWrap = el("div", "step step-burst");
         stepWrap.id = burstDomId(burst, Number.isFinite(burstIndex) ? burstIndex : localIndex);
@@ -9199,6 +10054,44 @@ document.addEventListener("DOMContentLoaded", async () => {
             canMoveBurst: (targetBurst, delta) => canMoveBurstByOffset(targetBurst, delta),
             onMoveBurst: (targetBurst, delta) => { moveBurstAndRefresh(targetBurst, delta); },
             onRenameBurst: (targetBurst, title) => { renameBurstAndRefresh(targetBurst, title); },
+            onExportBurstGif: async (targetBurst, targetBurstIndex) => {
+              try {
+                const fileName = await exportBurstGifForSection(targetBurst, targetBurstIndex);
+                setImportStatus(`Exported burst GIF: ${fileName}`, false);
+              } catch (err) {
+                const message = String((err && err.message) || err || "Burst GIF export failed.");
+                setImportStatus(message, true);
+              }
+            },
+            onReplaceBurstMedia: async (targetBurst, _targetBurstIndex, file) => {
+              try {
+                const result = await replaceBurstMediaForSection(targetBurst, file);
+                await saveReports(reports);
+                render();
+                setImportStatus(
+                  `Updated interaction media: ${result.fileName} (${result.mime}, ${result.width}x${result.height}).`,
+                  false
+                );
+              } catch (err) {
+                const message = String((err && err.message) || err || "Interaction media replacement failed.");
+                setImportStatus(message, true);
+              }
+            },
+            onClearBurstMedia: async (targetBurst) => {
+              try {
+                const touched = applyBurstMediaOverrideState(targetBurst, null);
+                if (!touched) {
+                  setImportStatus("No interaction media override to clear.", true);
+                  return;
+                }
+                await saveReports(reports);
+                render();
+                setImportStatus("Cleared interaction media override.", false);
+              } catch (err) {
+                const message = String((err && err.message) || err || "Failed to clear interaction media override.");
+                setImportStatus(message, true);
+              }
+            },
             onJump: (stepId) => {
               if (!stepId) return;
               if (stepsPanel && typeof stepsPanel.open === "boolean") stepsPanel.open = true;
@@ -9367,9 +10260,62 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
       actions.appendChild(deleteStep);
 
+      const replaceShotInput = document.createElement("input");
+      replaceShotInput.type = "file";
+      replaceShotInput.accept = "image/png,image/jpeg,image/webp,image/gif,image/bmp";
+      replaceShotInput.className = "file-input";
+      const replaceShot = el("button", "btn", "Replace media");
+      replaceShot.type = "button";
+      replaceShot.addEventListener("click", () => replaceShotInput.click());
+      replaceShotInput.addEventListener("change", async () => {
+        const file = replaceShotInput.files && replaceShotInput.files[0];
+        replaceShotInput.value = "";
+        if (!file) return;
+        if (replaceShot.disabled) return;
+        const label = replaceShot.textContent;
+        replaceShot.disabled = true;
+        replaceShot.textContent = "Replacing...";
+        try {
+          const result = await replaceStepMediaForEvent(ev, file);
+          await saveReports(reports);
+          render();
+          setImportStatus(
+            `Updated section media: ${result.fileName} (${result.mime}, ${result.width}x${result.height}).`,
+            false
+          );
+        } catch (err) {
+          const message = String((err && err.message) || err || "Section media replacement failed.");
+          setImportStatus(message, true);
+        } finally {
+          replaceShot.disabled = false;
+          replaceShot.textContent = label;
+        }
+      });
+      actions.appendChild(replaceShot);
+      actions.appendChild(replaceShotInput);
+
       const screenshotRef = cloneScreenshotRef(ev.screenshotRef);
       const hasScreenshotAsset = !!ev.screenshot || !!screenshotRef;
       if (hasScreenshotAsset) {
+        const exportShot = el("button", "btn", "Export image");
+        exportShot.addEventListener("click", async () => {
+          if (exportShot.disabled) return;
+          const label = exportShot.textContent;
+          exportShot.disabled = true;
+          exportShot.textContent = "Exporting...";
+          try {
+            const fileName = await exportStepImageForEvent(ev);
+            setImportStatus(`Exported section image: ${fileName}`, false);
+          } catch (err) {
+            const message = String((err && err.message) || err || "Section image export failed.");
+            setImportStatus(message, true);
+          } finally {
+            exportShot.disabled = false;
+            exportShot.textContent = label;
+          }
+        });
+        actions.appendChild(exportShot);
+
         const removeShot = el("button", "btn", "Remove screenshot");
         removeShot.addEventListener("click", async () => {
           ev.screenshot = null;
@@ -10029,7 +10975,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const bytes = dataUrlToBytes(dataUrl);
         if (!bytes || !bytes.length) continue;
         const mime = String(ref.mime || "image/png");
-        const ext = mime.toLowerCase().includes("jpeg") ? "jpg" : "png";
+        const ext = extensionForImageMime(mime);
         const filePath = `frames/${frameId}.${ext}`;
         frameManifest.push({
           frameId,
@@ -10101,7 +11047,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         "- manifest.json : bundle format and version metadata",
         "- report.json   : full editable report payload",
         "- frame-manifest.json : frame reference metadata (bundle v2)",
-        "- frames/*.png  : burst frame images referenced by screenshotRef",
+        "- frames/*      : screenshot frame images referenced by screenshotRef",
         "- text-manifest.json  : section text metadata (bundle v3)",
         "- texts/*       : per-section embedded text payloads",
         "- audio-manifest.json : section narration audio metadata (bundle v4)",
@@ -10142,6 +11088,35 @@ document.addEventListener("DOMContentLoaded", async () => {
       const filename = `ui-report-raw-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
       await downloadBlob(new Blob([zipBytes], { type: "application/zip" }), filename);
       setImportStatus(`Exported raw ZIP bundle: ${filename}`, false);
+    });
+  }
+
+  if (mediaBundleBtn) {
+    mediaBundleBtn.addEventListener("click", async () => {
+      if (!hasReport) {
+        setImportStatus("No report available to export.", true);
+        return;
+      }
+      const defaultLabel = String(mediaBundleBtn.textContent || "Export section media ZIP");
+      mediaBundleBtn.disabled = true;
+      mediaBundleBtn.textContent = "Exporting...";
+      setImportStatus("Building section media ZIP...", false);
+      try {
+        const result = await exportAllSectionMediaZip();
+        const skipped = [];
+        if (result.skippedImages > 0) skipped.push(`${result.skippedImages} image${result.skippedImages === 1 ? "" : "s"} skipped`);
+        if (result.skippedGifs > 0) skipped.push(`${result.skippedGifs} GIF${result.skippedGifs === 1 ? "" : "s"} skipped`);
+        const skippedNote = skipped.length ? `, ${skipped.join(", ")}` : "";
+        setImportStatus(
+          `Exported section media ZIP: ${result.filename} (${result.imageCount} images, ${result.gifCount} GIFs${skippedNote}).`,
+          false
+        );
+      } catch (err) {
+        setImportStatus(`Section media export failed: ${(err && err.message) || String(err)}`, true);
+      } finally {
+        mediaBundleBtn.disabled = false;
+        mediaBundleBtn.textContent = defaultLabel;
+      }
     });
   }
 
