@@ -4264,8 +4264,8 @@ function buildExportHtml(report, options = {}) {
     pushSlide({
       id: burstId,
       titleText: String((burst && burst.title) || "Interaction burst"),
-      subtitleText: String((burst && burst.meta) || "Interaction burst"),
-      metaText: String((burst && burst.meta) || "Interaction burst"),
+      subtitleText: "",
+      metaText: "",
       mediaHtml: burstMedia,
       ccHtml: burstTextPanel,
       isBurst: true
@@ -4443,6 +4443,9 @@ body{
   pointer-events:none;
   visibility:hidden;
 }
+.carousel-slide.carousel-slide-burst{
+  padding:10px;
+}
 .carousel-slide.is-active{
   opacity:1;
   transform:translateX(0);
@@ -4558,6 +4561,10 @@ body{
   background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 90%, transparent), color-mix(in srgb, var(--paper) 90%, transparent));
   backdrop-filter:blur(3px);
   box-shadow:0 10px 18px rgba(2, 6, 23, 0.2);
+}
+.viewer-overlay.is-hidden{
+  opacity:0;
+  pointer-events:none;
 }
 .viewer-overlay-copy{
   display:flex;
@@ -4987,6 +4994,10 @@ body{
 .viewer-stage:-webkit-full-screen .carousel-slide{
   padding:76px 10px 8px;
 }
+.viewer-stage:fullscreen .carousel-slide.carousel-slide-burst,
+.viewer-stage:-webkit-full-screen .carousel-slide.carousel-slide-burst{
+  padding:8px;
+}
 .viewer-stage:fullscreen .viewer-media-shell,
 .viewer-stage:-webkit-full-screen .viewer-media-shell{
   min-height:0;
@@ -5014,6 +5025,19 @@ body{
   border-radius:10px;
   padding:8px;
   background:linear-gradient(180deg,var(--panel),var(--paper));
+}
+.carousel-slide-burst .click-burst-export-card{
+  width:100%;
+  border:0;
+  border-radius:0;
+  padding:0;
+  background:transparent;
+}
+.carousel-slide-burst .click-burst-export-title,
+.carousel-slide-burst .click-burst-export-meta,
+.carousel-slide-burst .click-burst-export-fps-note,
+.carousel-slide-burst .click-burst-export-chips{
+  display:none;
 }
 .click-burst-export-title{
   font-size:calc(var(--section-text-size) + 1px);
@@ -5331,12 +5355,14 @@ ${quickPreviewNotice}
   function updateOverlay(index) {
     var slide = slides[index];
     if (!slide) return;
+    var isBurstSlide = !!(slide.classList && slide.classList.contains("carousel-slide-burst"));
     if (overlayTitle) overlayTitle.textContent = String(slide.getAttribute("data-slide-title") || "Section");
     if (overlaySubtitle) {
       var subtitle = String(slide.getAttribute("data-slide-subtitle") || "").trim();
       overlaySubtitle.textContent = subtitle;
       if (overlay) {
-        overlay.classList.toggle("has-subtitle", !!subtitle);
+        overlay.classList.toggle("is-hidden", isBurstSlide);
+        overlay.classList.toggle("has-subtitle", !isBurstSlide && !!subtitle);
         overlay.classList.remove("is-expanded");
       }
     }

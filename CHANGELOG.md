@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.16.2 - 2026-03-07
+
+### Changed
+- Bumped extension version to `1.16.2` in `manifest.json`.
+
+### Fixed
+- Exported GIF/interaction slides now suppress burst header metadata (title, interaction counts, FPS/context chips) for end-consumer playback.
+- Exported GIF/interaction slides now hide the top overlay header card and align burst media framing to match normal screenshot sections.
+
 ## v1.16.1 - 2026-03-04
 
 ### Changed
