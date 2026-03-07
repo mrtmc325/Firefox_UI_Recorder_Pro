@@ -93,6 +93,7 @@ const TEXT_SPOOL_BYTE_CAP = 256 * 1024 * 1024;
 const AUDIO_SPOOL_BYTE_CAP = 512 * 1024 * 1024;
 const SECTION_TEXT_MAX_BYTES = 2 * 1024 * 1024;
 const SECTION_MEDIA_UPLOAD_MAX_BYTES = 24 * 1024 * 1024;
+const GIF_EXPORT_MAX_BYTES = 256 * 1024 * 1024;
 const SECTION_TEXT_ALLOWED_EXTENSIONS = Object.freeze(["txt", "md", "json"]);
 const SECTION_TEXT_ALLOWED_MIME = Object.freeze({
   txt: "text/plain",
@@ -2673,14 +2674,209 @@ function drawBurstMarker(ctx, x, y, markerIndex, markerColor, markerStyle) {
   ctx.fillText(String(markerIndex), x, y);
 }
 
+function getBurstFrameImage(frame) {
+  if (!frame || typeof frame !== "object") return null;
+  if (frame.img && typeof frame.img === "object") return frame.img;
+  if (frame.image && typeof frame.image === "object") return frame.image;
+  return null;
+}
+
+function getBurstFrameContextKey(frame) {
+  if (!frame || typeof frame.contextKey !== "string") return "";
+  return String(frame.contextKey).trim();
+}
+
+function containBurstFrameInCanvas(sourceWidthRaw, sourceHeightRaw, targetWidthRaw, targetHeightRaw) {
+  const sourceWidth = Math.max(1, Number(sourceWidthRaw) || 1);
+  const sourceHeight = Math.max(1, Number(sourceHeightRaw) || 1);
+  const targetWidth = Math.max(1, Number(targetWidthRaw) || 1);
+  const targetHeight = Math.max(1, Number(targetHeightRaw) || 1);
+  const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  const drawWidth = Math.max(1, Math.round(sourceWidth * scale));
+  const drawHeight = Math.max(1, Math.round(sourceHeight * scale));
+  return {
+    x: Math.round((targetWidth - drawWidth) / 2),
+    y: Math.round((targetHeight - drawHeight) / 2),
+    w: drawWidth,
+    h: drawHeight
+  };
+}
+
+function resolveBurstFrameSourceDimensions(frame) {
+  const viewportWidth = normalizeBurstViewportDimension(frame && frame.viewportW);
+  const viewportHeight = normalizeBurstViewportDimension(frame && frame.viewportH);
+  const img = getBurstFrameImage(frame);
+  const imageWidth = Math.max(0, Number(img && (img.naturalWidth || img.width)) || 0);
+  const imageHeight = Math.max(0, Number(img && (img.naturalHeight || img.height)) || 0);
+  if (viewportWidth && viewportHeight) {
+    return { width: viewportWidth, height: viewportHeight };
+  }
+  if (viewportWidth && imageHeight) {
+    return { width: viewportWidth, height: imageHeight };
+  }
+  if (imageWidth && viewportHeight) {
+    return { width: imageWidth, height: viewportHeight };
+  }
+  if (imageWidth && imageHeight) {
+    return { width: imageWidth, height: imageHeight };
+  }
+  if (viewportWidth) {
+    return { width: viewportWidth, height: viewportWidth };
+  }
+  if (viewportHeight) {
+    return { width: viewportHeight, height: viewportHeight };
+  }
+  return { width: 1, height: 1 };
+}
+
+function resolveBurstRenderSurfaceFromFrames(framesRaw, fallbackWidth = 640, fallbackHeight = 360) {
+  const fallbackW = Math.max(1, Math.round(Number(fallbackWidth) || 640));
+  const fallbackH = Math.max(1, Math.round(Number(fallbackHeight) || 360));
+  const frames = Array.isArray(framesRaw) ? framesRaw : [];
+  for (const frame of frames) {
+    const dims = resolveBurstFrameSourceDimensions(frame);
+    if (dims.width > 1 && dims.height > 1) {
+      return dims;
+    }
+  }
+  return { width: fallbackW, height: fallbackH };
+}
+
+function drawBurstMousePointer(ctx, xRaw, yRaw, canvasWidthRaw, canvasHeightRaw) {
+  const x = Math.round(Number(xRaw) || 0);
+  const y = Math.round(Number(yRaw) || 0);
+  const canvasWidth = Math.max(1, Number(canvasWidthRaw) || 1);
+  const canvasHeight = Math.max(1, Number(canvasHeightRaw) || 1);
+  const pointerSize = Math.max(14, Math.round(Math.min(canvasWidth, canvasHeight) * 0.03));
+  const pointerWidth = Math.round(pointerSize * 0.68);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-0.16);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(0, pointerSize);
+  ctx.lineTo(Math.round(pointerWidth * 0.3), Math.round(pointerSize * 0.78));
+  ctx.lineTo(Math.round(pointerWidth * 0.5), Math.round(pointerSize * 1.08));
+  ctx.lineTo(Math.round(pointerWidth * 0.68), Math.round(pointerSize * 0.98));
+  ctx.lineTo(Math.round(pointerWidth * 0.48), Math.round(pointerSize * 0.67));
+  ctx.lineTo(pointerWidth, Math.round(pointerSize * 0.67));
+  ctx.closePath();
+  ctx.fillStyle = "rgba(255, 255, 255, 0.96)";
+  ctx.shadowColor = "rgba(2, 6, 23, 0.45)";
+  ctx.shadowBlur = Math.max(2, Math.round(pointerSize * 0.2));
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(2, 6, 23, 0.9)";
+  ctx.lineWidth = Math.max(1.2, pointerSize * 0.08);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBurstCursorPointerOverlay(ctx, canvas, framesRaw, frameIndexRaw, drawRect) {
+  const frames = Array.isArray(framesRaw) ? framesRaw : [];
+  if (!frames.length) return;
+  const frameIndex = Math.max(0, Math.min(frames.length - 1, Math.round(Number(frameIndexRaw) || 0)));
+  const activeFrame = frames[frameIndex];
+  if (!activeFrame) return;
+  const activeContextKey = getBurstFrameContextKey(activeFrame);
+  for (let i = frameIndex; i >= 0; i--) {
+    const entry = frames[i];
+    if (!entry) continue;
+    if (activeContextKey) {
+      const entryContextKey = getBurstFrameContextKey(entry);
+      if (!entryContextKey || entryContextKey !== activeContextKey) break;
+    }
+    const point = entry.marker;
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+    drawBurstMousePointer(
+      ctx,
+      Math.round(drawRect.x + (point.x * drawRect.w)),
+      Math.round(drawRect.y + (point.y * drawRect.h)),
+      canvas.width,
+      canvas.height
+    );
+    return;
+  }
+}
+
+function resolveBurstOverlayMode(burst, options) {
+  const opts = isPlainObject(options) ? options : {};
+  const explicitShowMarkers = typeof opts.showMarkers === "boolean" ? opts.showMarkers : null;
+  const explicitShowCursor = typeof opts.showCursorPointer === "boolean" ? opts.showCursorPointer : null;
+  const burstShowMarkers = burst && typeof burst.showMarkers === "boolean" ? burst.showMarkers : null;
+  const burstShowCursor = burst && typeof burst.showCursorTrail === "boolean" ? burst.showCursorTrail : null;
+  const fallbackShowMarkers = !(
+    burst &&
+    (
+      burst.hotkeyMode === true ||
+      burstShowMarkers === false
+    )
+  );
+  const showMarkers = explicitShowMarkers !== null
+    ? explicitShowMarkers
+    : (burstShowMarkers !== null ? burstShowMarkers : fallbackShowMarkers);
+  const showCursorPointer = explicitShowCursor !== null
+    ? explicitShowCursor
+    : (burstShowCursor !== null ? burstShowCursor : !!(burst && burst.hotkeyMode));
+  return {
+    showMarkers: !!showMarkers,
+    showCursorPointer: !showMarkers && !!showCursorPointer
+  };
+}
+
+function renderBurstFrameToCanvas(ctx, canvas, framesRaw, frameIndexRaw, options) {
+  if (!ctx || !canvas) return null;
+  const frames = Array.isArray(framesRaw) ? framesRaw : [];
+  if (!frames.length) return null;
+  const frameIndex = Math.max(0, Math.min(frames.length - 1, Math.round(Number(frameIndexRaw) || 0)));
+  const frame = frames[frameIndex];
+  const img = getBurstFrameImage(frame);
+  if (!img) return null;
+  const opts = isPlainObject(options) ? options : {};
+  const overlay = resolveBurstOverlayMode(opts.burst || null, {
+    showMarkers: opts.showMarkers,
+    showCursorPointer: opts.showCursorPointer
+  });
+  const markerColor = normalizeHexColor(opts.markerColor, CLICK_BURST_DEFAULTS.clickBurstMarkerColor);
+  const markerStyle = normalizeClickBurstMarkerStyle(opts.markerStyle);
+  const markerCap = Math.max(1, Math.round(Number(opts.markerCap) || CLICK_BURST_RENDER_MARKER_CAP));
+  const sourceDims = resolveBurstFrameSourceDimensions(frame);
+  const drawRect = containBurstFrameInCanvas(sourceDims.width, sourceDims.height, canvas.width, canvas.height);
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, drawRect.x, drawRect.y, drawRect.w, drawRect.h);
+
+  if (overlay.showMarkers) {
+    const markerLimit = Math.min(markerCap, frameIndex + 1);
+    for (let i = 0; i < markerLimit; i++) {
+      const point = frames[i] && frames[i].marker ? frames[i].marker : null;
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+      const x = Math.round(drawRect.x + (point.x * drawRect.w));
+      const y = Math.round(drawRect.y + (point.y * drawRect.h));
+      drawBurstMarker(ctx, x, y, i + 1, markerColor, markerStyle);
+    }
+  } else if (overlay.showCursorPointer) {
+    drawBurstCursorPointerOverlay(ctx, canvas, frames, frameIndex, drawRect);
+  }
+
+  return {
+    frame,
+    drawRect
+  };
+}
+
 function createClickBurstPlayer(card, burst, options) {
   const sourceFpsRaw = Number(burst && burst.sourceFps);
   const sourceFps = Number.isFinite(sourceFpsRaw)
     ? Number(clampNumber(sourceFpsRaw, 0.25, 60, CLICK_BURST_DEFAULTS.clickBurstPlaybackFps).toFixed(2))
     : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
   const baseFrameDurationMs = Math.max(16, Math.round(1000 / sourceFps));
-  const showMarkers = !!(options && options.showMarkers);
-  const showCursorTrail = !!(options && options.showCursorTrail);
+  const overlayMode = resolveBurstOverlayMode(burst, {
+    showMarkers: options && typeof options.showMarkers === "boolean" ? options.showMarkers : undefined,
+    showCursorPointer: options && typeof options.showCursorTrail === "boolean" ? options.showCursorTrail : undefined
+  });
   const markerColor = normalizeHexColor(
     options && options.markerColor,
     CLICK_BURST_DEFAULTS.clickBurstMarkerColor
@@ -2807,6 +3003,10 @@ function createClickBurstPlayer(card, burst, options) {
       };
     })
     .filter(Boolean);
+  const initialSurface = resolveBurstRenderSurfaceFromFrames(frames, 640, 360);
+  canvas.width = initialSurface.width;
+  canvas.height = initialSurface.height;
+  canvas.style.aspectRatio = `${initialSurface.width} / ${initialSurface.height}`;
 
   const shouldEvictFrames = frames.length > 420;
   const evictDistance = shouldEvictFrames ? 96 : Number.POSITIVE_INFINITY;
@@ -3011,51 +3211,6 @@ function createClickBurstPlayer(card, burst, options) {
     ctx.fillText(text, Math.round(canvas.width / 2), Math.round(canvas.height / 2));
   };
 
-  const drawCursorTrail = (index) => {
-    const activeFrame = frames[index];
-    if (!activeFrame) return;
-    const activeContextKey = String(activeFrame.contextKey || "").trim();
-    const points = [];
-    for (let i = index; i >= 0 && points.length < CLICK_BURST_CURSOR_TRAIL_CAP; i--) {
-      const entry = frames[i];
-      if (!entry) continue;
-      if (activeContextKey) {
-        const entryContextKey = String(entry.contextKey || "").trim();
-        if (!entryContextKey || entryContextKey !== activeContextKey) break;
-      }
-      const point = entry.marker;
-      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
-      points.unshift({
-        x: Math.round(point.x * canvas.width),
-        y: Math.round(point.y * canvas.height)
-      });
-    }
-    if (!points.length) return;
-    if (points.length >= 2) {
-      for (let i = 1; i < points.length; i++) {
-        const prev = points[i - 1];
-        const next = points[i];
-        const ratio = points.length <= 1 ? 1 : (i / (points.length - 1));
-        ctx.beginPath();
-        ctx.moveTo(prev.x, prev.y);
-        ctx.lineTo(next.x, next.y);
-        ctx.strokeStyle = hexToRgba(markerColor, 0.18 + (ratio * 0.5));
-        ctx.lineWidth = 2 + (ratio * 2.5);
-        ctx.lineCap = "round";
-        ctx.stroke();
-      }
-    }
-    const head = points[points.length - 1];
-    ctx.beginPath();
-    ctx.arc(head.x, head.y, Math.round(4.5 * CLICK_BURST_MARKER_SCALE), 0, Math.PI * 2);
-    ctx.fillStyle = hexToRgba(markerColor, 0.35);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(head.x, head.y, Math.round(2.4 * CLICK_BURST_MARKER_SCALE), 0, Math.PI * 2);
-    ctx.fillStyle = markerColor;
-    ctx.fill();
-  };
-
   const drawFrame = (index) => {
     if (destroyed) return;
     const frame = frames[index];
@@ -3074,26 +3229,21 @@ function createClickBurstPlayer(card, burst, options) {
       return;
     }
 
-    if (canvas.width !== frame.img.width || canvas.height !== frame.img.height) {
-      canvas.width = frame.img.width;
-      canvas.height = frame.img.height;
+    const surface = resolveBurstRenderSurfaceFromFrames(frames, canvas.width, canvas.height);
+    if (canvas.width !== surface.width || canvas.height !== surface.height) {
+      canvas.width = surface.width;
+      canvas.height = surface.height;
+      canvas.style.aspectRatio = `${surface.width} / ${surface.height}`;
     }
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(frame.img, 0, 0, canvas.width, canvas.height);
-
-    if (showMarkers) {
-      const markerLimit = Math.min(CLICK_BURST_RENDER_MARKER_CAP, index + 1);
-      for (let i = 0; i < markerLimit; i++) {
-        const point = frames[i] && frames[i].marker ? frames[i].marker : null;
-        if (!point) continue;
-        const x = Math.round(point.x * canvas.width);
-        const y = Math.round(point.y * canvas.height);
-        drawBurstMarker(ctx, x, y, i + 1, markerColor, markerStyle);
-      }
-    } else if (showCursorTrail) {
-      drawCursorTrail(index);
-    }
+    renderBurstFrameToCanvas(ctx, canvas, frames, index, {
+      burst,
+      showMarkers: overlayMode.showMarkers,
+      showCursorPointer: overlayMode.showCursorPointer,
+      markerColor,
+      markerStyle,
+      markerCap: CLICK_BURST_RENDER_MARKER_CAP
+    });
 
     progress.textContent = `Frame ${index + 1}/${frames.length}`;
     updateFrameStatus(false);
@@ -3385,7 +3535,11 @@ function renderClickBursts(target, bursts, options) {
         try {
           await onExportBurstGif(
             burst,
-            Number.isFinite(Number(entry && entry.burstIndex)) ? Number(entry.burstIndex) : index
+            Number.isFinite(Number(entry && entry.burstIndex)) ? Number(entry.burstIndex) : index,
+            (progress) => {
+              const percent = Math.max(0, Math.min(100, Math.round(Number(progress && progress.percent) || 0)));
+              exportGif.textContent = `Exporting ${percent}%`;
+            }
           );
         } finally {
           exportGif.disabled = false;
@@ -5833,7 +5987,6 @@ ${quickPreviewNotice}
   var speedRaw = Number(payload && payload.playbackSpeed);
   var defaultSpeedMultiplier = Number.isFinite(speedRaw) ? Math.max(0.25, Math.min(3, speedRaw)) : ${CLICK_BURST_DEFAULTS.clickBurstPlaybackSpeed};
   var markerCap = ${CLICK_BURST_RENDER_MARKER_CAP};
-  var cursorTrailCap = ${CLICK_BURST_CURSOR_TRAIL_CAP};
   var markerScale = ${CLICK_BURST_MARKER_SCALE};
 
   function hexToRgba(hex, alpha) {
@@ -5898,12 +6051,67 @@ ${quickPreviewNotice}
     };
   }
 
-  function drawCursorTrail(ctx, loaded, frameIndex, drawRect) {
+  function normalizeViewportDim(value) {
+    var n = Math.round(Number(value) || 0);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n;
+  }
+
+  function frameSourceDimensions(frame) {
+    var viewportW = normalizeViewportDim(frame && frame.viewportW);
+    var viewportH = normalizeViewportDim(frame && frame.viewportH);
+    var imageW = Math.max(0, Number(frame && frame.img && (frame.img.naturalWidth || frame.img.width)) || 0);
+    var imageH = Math.max(0, Number(frame && frame.img && (frame.img.naturalHeight || frame.img.height)) || 0);
+    if (viewportW && viewportH) return { width: viewportW, height: viewportH };
+    if (viewportW && imageH) return { width: viewportW, height: imageH };
+    if (imageW && viewportH) return { width: imageW, height: viewportH };
+    if (imageW && imageH) return { width: imageW, height: imageH };
+    if (viewportW) return { width: viewportW, height: viewportW };
+    if (viewportH) return { width: viewportH, height: viewportH };
+    return { width: 1, height: 1 };
+  }
+
+  function resolvePlaybackSurface(loaded, fallbackW, fallbackH) {
+    var baseW = Math.max(1, Math.round(Number(fallbackW) || 640));
+    var baseH = Math.max(1, Math.round(Number(fallbackH) || 360));
+    for (var i = 0; i < loaded.length; i++) {
+      var dims = frameSourceDimensions(loaded[i]);
+      if (dims.width > 1 && dims.height > 1) return dims;
+    }
+    return { width: baseW, height: baseH };
+  }
+
+  function drawMousePointer(ctx, x, y, canvas) {
+    var pointerSize = Math.max(14, Math.round(Math.min(canvas.width, canvas.height) * 0.03));
+    var pointerWidth = Math.round(pointerSize * 0.68);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(-0.16);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, pointerSize);
+    ctx.lineTo(Math.round(pointerWidth * 0.3), Math.round(pointerSize * 0.78));
+    ctx.lineTo(Math.round(pointerWidth * 0.5), Math.round(pointerSize * 1.08));
+    ctx.lineTo(Math.round(pointerWidth * 0.68), Math.round(pointerSize * 0.98));
+    ctx.lineTo(Math.round(pointerWidth * 0.48), Math.round(pointerSize * 0.67));
+    ctx.lineTo(pointerWidth, Math.round(pointerSize * 0.67));
+    ctx.closePath();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.96)";
+    ctx.shadowColor = "rgba(2, 6, 23, 0.45)";
+    ctx.shadowBlur = Math.max(2, Math.round(pointerSize * 0.2));
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = "rgba(2, 6, 23, 0.9)";
+    ctx.lineWidth = Math.max(1.2, pointerSize * 0.08);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawCursorPointer(ctx, loaded, frameIndex, drawRect, canvas) {
     var activeFrame = loaded[frameIndex];
     if (!activeFrame) return;
     var activeContext = frameContextKey(activeFrame);
-    var points = [];
-    for (var i = frameIndex; i >= 0 && points.length < cursorTrailCap; i--) {
+    for (var i = frameIndex; i >= 0; i--) {
       var entry = loaded[i];
       if (!entry) continue;
       if (activeContext) {
@@ -5912,35 +6120,41 @@ ${quickPreviewNotice}
       }
       var point = entry.marker;
       if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
-      points.unshift({
-        x: Math.round(drawRect.x + (point.x * drawRect.w)),
-        y: Math.round(drawRect.y + (point.y * drawRect.h))
-      });
+      drawMousePointer(
+        ctx,
+        Math.round(drawRect.x + (point.x * drawRect.w)),
+        Math.round(drawRect.y + (point.y * drawRect.h)),
+        canvas
+      );
+      return;
     }
-    if (!points.length) return;
-    if (points.length >= 2) {
-      for (var j = 1; j < points.length; j++) {
-        var prev = points[j - 1];
-        var next = points[j];
-        var ratio = points.length <= 1 ? 1 : (j / (points.length - 1));
-        ctx.beginPath();
-        ctx.moveTo(prev.x, prev.y);
-        ctx.lineTo(next.x, next.y);
-        ctx.strokeStyle = hexToRgba(markerColor, 0.18 + (ratio * 0.5));
-        ctx.lineWidth = 2 + (ratio * 2.5);
-        ctx.lineCap = "round";
-        ctx.stroke();
+  }
+
+  function renderFrameToCanvas(ctx, canvas, loaded, frameIndex, showMarkers, showCursorTrail) {
+    var frame = loaded[frameIndex];
+    if (!frame || !frame.img) return false;
+    var dims = frameSourceDimensions(frame);
+    var drawRect = containRect(dims.width, dims.height, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(frame.img, drawRect.x, drawRect.y, drawRect.w, drawRect.h);
+    if (showMarkers) {
+      var limit = Math.min(markerCap, frameIndex + 1);
+      for (var m = 0; m < limit; m++) {
+        var point = loaded[m] && loaded[m].marker ? loaded[m].marker : null;
+        if (!point) continue;
+        drawMarker(
+          ctx,
+          Math.round(drawRect.x + (point.x * drawRect.w)),
+          Math.round(drawRect.y + (point.y * drawRect.h)),
+          m + 1
+        );
       }
+    } else if (showCursorTrail) {
+      drawCursorPointer(ctx, loaded, frameIndex, drawRect, canvas);
     }
-    var head = points[points.length - 1];
-    ctx.beginPath();
-    ctx.arc(head.x, head.y, Math.round(4.5 * markerScale), 0, Math.PI * 2);
-    ctx.fillStyle = hexToRgba(markerColor, 0.35);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(head.x, head.y, Math.round(2.4 * markerScale), 0, Math.PI * 2);
-    ctx.fillStyle = markerColor;
-    ctx.fill();
+    return true;
   }
 
   slots.forEach(function (slot) {
@@ -6068,7 +6282,9 @@ ${quickPreviewNotice}
           resolve({
             img: img,
             marker: frame && frame.marker ? frame.marker : null,
-            contextKey: frame && typeof frame.contextKey === "string" ? String(frame.contextKey).trim() : ""
+            contextKey: frame && typeof frame.contextKey === "string" ? String(frame.contextKey).trim() : "",
+            viewportW: normalizeViewportDim(frame && frame.viewportW),
+            viewportH: normalizeViewportDim(frame && frame.viewportH)
           });
         };
         img.onerror = function () { resolve(null); };
@@ -6085,8 +6301,9 @@ ${quickPreviewNotice}
         toggle.disabled = true;
         return;
       }
-      var stableWidth = Math.max(1, Number(loaded[0] && loaded[0].img && loaded[0].img.width) || 640);
-      var stableHeight = Math.max(1, Number(loaded[0] && loaded[0].img && loaded[0].img.height) || 360);
+      var surface = resolvePlaybackSurface(loaded, 640, 360);
+      var stableWidth = Math.max(1, Number(surface && surface.width) || 640);
+      var stableHeight = Math.max(1, Number(surface && surface.height) || 360);
       canvas.width = stableWidth;
       canvas.height = stableHeight;
       canvas.style.aspectRatio = stableWidth + " / " + stableHeight;
@@ -6103,28 +6320,15 @@ ${quickPreviewNotice}
       function drawFrame(i) {
         var frame = loaded[i];
         if (!frame) return;
-        var drawRect = containRect(frame.img.width, frame.img.height, canvas.width, canvas.height);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = "#000";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(frame.img, drawRect.x, drawRect.y, drawRect.w, drawRect.h);
+        var activeSurface = resolvePlaybackSurface(loaded, canvas.width, canvas.height);
+        if (canvas.width !== activeSurface.width || canvas.height !== activeSurface.height) {
+          canvas.width = activeSurface.width;
+          canvas.height = activeSurface.height;
+          canvas.style.aspectRatio = activeSurface.width + " / " + activeSurface.height;
+        }
         var showMarkers = !burst || burst.showMarkers !== false;
         var showCursorTrail = !!(burst && burst.showCursorTrail);
-        if (showMarkers) {
-          var limit = Math.min(markerCap, i + 1);
-          for (var m = 0; m < limit; m++) {
-            var point = loaded[m] && loaded[m].marker ? loaded[m].marker : null;
-            if (!point) continue;
-            drawMarker(
-              ctx,
-              Math.round(drawRect.x + (point.x * drawRect.w)),
-              Math.round(drawRect.y + (point.y * drawRect.h)),
-              m + 1
-            );
-          }
-        } else if (showCursorTrail) {
-          drawCursorTrail(ctx, loaded, i, drawRect);
-        }
+        renderFrameToCanvas(ctx, canvas, loaded, i, showMarkers, showCursorTrail);
         progress.textContent = "Frame " + (i + 1) + "/" + loaded.length;
       }
 
@@ -6528,7 +6732,23 @@ async function buildExportHtmlAsync(report, options = {}) {
         retryMs: FRAME_REF_RESOLVE_RETRY_MS_DEFAULT,
         requireExistence: true
       });
-      if (!dataUrl) continue;
+      if (!dataUrl) {
+        if (typeof onProgress === "function") {
+          const current = Math.min(total, frameIndex + 1);
+          const percent = Math.round((current / total) * 100);
+          try {
+            onProgress({
+              stage: "frame-load",
+              current,
+              total,
+              percent,
+              message: `Loading GIF frames... ${percent}%`
+            });
+          } catch (_) {}
+        }
+        if ((frameIndex % 4) === 0) await waitForMs(0);
+        continue;
+      }
       frameDataUrls[frameId] = dataUrl;
     }
   }
@@ -7050,10 +7270,85 @@ document.addEventListener("DOMContentLoaded", async () => {
     importStatus.classList.toggle("error", !!isError);
   }
 
+  function normalizeDownloadFileNameForAnchor(fileNameRaw) {
+    const fileName = String(fileNameRaw || "").trim() || "download.bin";
+    const normalized = fileName.replace(/\\/g, "/");
+    const parts = normalized.split("/").filter(Boolean);
+    const candidate = parts.length ? parts[parts.length - 1] : normalized;
+    return candidate || "download.bin";
+  }
+
+  function ensureDownloadId(downloadId) {
+    if (!Number.isFinite(Number(downloadId))) {
+      throw new Error("Download API did not return a valid download ID.");
+    }
+    return Number(downloadId);
+  }
+
+  async function triggerAnchorDownload(url, filename) {
+    if (typeof document === "undefined" || !document || typeof document.createElement !== "function") {
+      throw new Error("Document API unavailable for anchor download fallback.");
+    }
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = normalizeDownloadFileNameForAnchor(filename);
+    anchor.rel = "noopener";
+    anchor.style.display = "none";
+    const root = document.body || document.documentElement;
+    if (!root || typeof root.appendChild !== "function") {
+      throw new Error("DOM root unavailable for anchor download fallback.");
+    }
+    root.appendChild(anchor);
+    try {
+      anchor.click();
+    } finally {
+      if (anchor.parentNode) anchor.parentNode.removeChild(anchor);
+    }
+  }
+
+  function describeErrorMessage(err) {
+    if (!err) return "Unknown error.";
+    if (typeof err === "string") return err;
+    if (err && typeof err.message === "string" && err.message.trim()) return err.message.trim();
+    try {
+      return JSON.stringify(err);
+    } catch (_) {
+      return String(err);
+    }
+  }
+
   async function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
-    await browser.downloads.download({ url, filename, saveAs: true });
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    let primaryError = null;
+    let secondaryError = null;
+    try {
+      if (browser && browser.downloads && typeof browser.downloads.download === "function") {
+        try {
+          const id = await browser.downloads.download({ url, filename, saveAs: true });
+          ensureDownloadId(id);
+          return;
+        } catch (err) {
+          primaryError = err;
+        }
+        try {
+          const id = await browser.downloads.download({ url, filename, saveAs: false });
+          ensureDownloadId(id);
+          return;
+        } catch (err) {
+          secondaryError = err;
+        }
+      } else {
+        primaryError = new Error("browser.downloads API unavailable.");
+      }
+      await triggerAnchorDownload(url, filename);
+    } catch (fallbackErr) {
+      const first = describeErrorMessage(primaryError);
+      const second = describeErrorMessage(secondaryError);
+      const fallback = describeErrorMessage(fallbackErr);
+      throw new Error(`Download failed (saveAs=true: ${first}; saveAs=false: ${second}; anchor fallback: ${fallback})`);
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    }
   }
 
   function sanitizeMediaFileToken(value, fallback = "section") {
@@ -7114,20 +7409,41 @@ document.addEventListener("DOMContentLoaded", async () => {
     target.push(0x00);
   }
 
+  const GIF_RGB555_BIN_COUNT = 32 * 32 * 32;
+
+  function rgb555LevelToByte(level) {
+    const value = Math.max(0, Math.min(31, Number(level) || 0));
+    return (value << 3) | (value >> 2);
+  }
+
+  function rgbToGifPaletteBin(r, g, b) {
+    const rr = (Math.max(0, Math.min(255, Number(r) || 0)) >> 3) & 0x1f;
+    const gg = (Math.max(0, Math.min(255, Number(g) || 0)) >> 3) & 0x1f;
+    const bb = (Math.max(0, Math.min(255, Number(b) || 0)) >> 3) & 0x1f;
+    return (rr << 10) | (gg << 5) | bb;
+  }
+
+  function gifPaletteBinToRgb(binRaw) {
+    const bin = Math.max(0, Math.min(GIF_RGB555_BIN_COUNT - 1, Number(binRaw) || 0));
+    return {
+      r: rgb555LevelToByte((bin >> 10) & 0x1f),
+      g: rgb555LevelToByte((bin >> 5) & 0x1f),
+      b: rgb555LevelToByte(bin & 0x1f)
+    };
+  }
+
   function buildGif332Palette() {
     const palette = new Uint8Array(256 * 3);
     for (let index = 0; index < 256; index++) {
-      const r = (index >> 5) & 0x07;
-      const g = (index >> 2) & 0x07;
-      const b = index & 0x03;
-      palette[(index * 3) + 0] = Math.round((r * 255) / 7);
-      palette[(index * 3) + 1] = Math.round((g * 255) / 7);
-      palette[(index * 3) + 2] = Math.round((b * 255) / 3);
+      const rr = (index >> 5) & 0x07;
+      const gg = (index >> 2) & 0x07;
+      const bb = index & 0x03;
+      palette[(index * 3) + 0] = Math.round((rr * 255) / 7);
+      palette[(index * 3) + 1] = Math.round((gg * 255) / 7);
+      palette[(index * 3) + 2] = Math.round((bb * 255) / 3);
     }
     return palette;
   }
-
-  const GIF_332_PALETTE = buildGif332Palette();
 
   function quantizeRgb332(r, g, b) {
     const rr = (Math.max(0, Math.min(255, Number(r) || 0)) >> 5) & 0x07;
@@ -7136,7 +7452,90 @@ document.addEventListener("DOMContentLoaded", async () => {
     return (rr << 5) | (gg << 2) | bb;
   }
 
-  function lzwEncodeGifIndices(indicesRaw, minCodeSize = 8) {
+  const GIF_332_PALETTE = buildGif332Palette();
+  const GIF_RGB555_TO_332_LOOKUP = (() => {
+    const lookup = new Uint8Array(GIF_RGB555_BIN_COUNT);
+    for (let bin = 0; bin < GIF_RGB555_BIN_COUNT; bin++) {
+      const rgb = gifPaletteBinToRgb(bin);
+      lookup[bin] = quantizeRgb332(rgb.r, rgb.g, rgb.b);
+    }
+    return lookup;
+  })();
+
+  function buildAdaptiveGifPaletteAndLookup(histogramRaw) {
+    const histogram = histogramRaw instanceof Uint32Array
+      ? histogramRaw
+      : new Uint32Array(GIF_RGB555_BIN_COUNT);
+    const ranked = [];
+    for (let bin = 0; bin < histogram.length; bin++) {
+      const count = histogram[bin];
+      if (count > 0) ranked.push({ bin, count });
+    }
+    ranked.sort((a, b) => b.count - a.count);
+
+    const palette = new Uint8Array(256 * 3);
+    const directIndexByBin = new Int16Array(GIF_RGB555_BIN_COUNT);
+    directIndexByBin.fill(-1);
+
+    // Reserve slot 0 as opaque black fallback.
+    palette[0] = 0;
+    palette[1] = 0;
+    palette[2] = 0;
+    let paletteSize = 1;
+
+    for (let i = 0; i < ranked.length && paletteSize < 256; i++) {
+      const bin = ranked[i].bin;
+      if (directIndexByBin[bin] >= 0) continue;
+      const rgb = gifPaletteBinToRgb(bin);
+      const offset = paletteSize * 3;
+      palette[offset + 0] = rgb.r;
+      palette[offset + 1] = rgb.g;
+      palette[offset + 2] = rgb.b;
+      directIndexByBin[bin] = paletteSize;
+      paletteSize += 1;
+    }
+
+    if (paletteSize <= 1) {
+      return { palette: GIF_332_PALETTE, lookup: GIF_RGB555_TO_332_LOOKUP };
+    }
+
+    const lookup = new Uint8Array(GIF_RGB555_BIN_COUNT);
+    for (let bin = 0; bin < GIF_RGB555_BIN_COUNT; bin++) {
+      const direct = directIndexByBin[bin];
+      if (direct >= 0) {
+        lookup[bin] = direct;
+        continue;
+      }
+      const rgb = gifPaletteBinToRgb(bin);
+      let bestIndex = 1;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      for (let idx = 1; idx < paletteSize; idx++) {
+        const offset = idx * 3;
+        const dr = rgb.r - palette[offset + 0];
+        const dg = rgb.g - palette[offset + 1];
+        const db = rgb.b - palette[offset + 2];
+        const distance = (dr * dr) + (dg * dg) + (db * db);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestIndex = idx;
+          if (distance === 0) break;
+        }
+      }
+      lookup[bin] = bestIndex;
+    }
+
+    const fillFrom = (paletteSize - 1) * 3;
+    for (let idx = paletteSize; idx < 256; idx++) {
+      const offset = idx * 3;
+      palette[offset + 0] = palette[fillFrom + 0];
+      palette[offset + 1] = palette[fillFrom + 1];
+      palette[offset + 2] = palette[fillFrom + 2];
+    }
+
+    return { palette, lookup };
+  }
+
+  async function lzwEncodeGifIndices(indicesRaw, minCodeSize = 8) {
     const indices = indicesRaw instanceof Uint8Array ? indicesRaw : new Uint8Array(indicesRaw || []);
     if (!indices.length) return new Uint8Array(0);
     const clearCode = 1 << minCodeSize;
@@ -7147,6 +7546,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     let codeSize = minCodeSize + 1;
     let bitBuffer = 0;
     let bitCount = 0;
+    let writeCountSinceYield = 0;
+    const yieldEveryWrites = 262144;
 
     const resetDictionary = () => {
       dict.clear();
@@ -7162,6 +7563,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         bitBuffer >>= 8;
         bitCount -= 8;
       }
+      writeCountSinceYield += 1;
     };
 
     resetDictionary();
@@ -7172,17 +7574,21 @@ document.addEventListener("DOMContentLoaded", async () => {
       const key = (prefix << 8) | next;
       if (dict.has(key)) {
         prefix = dict.get(key);
-        continue;
-      }
-      writeCode(prefix);
-      if (nextCode < 4096) {
-        dict.set(key, nextCode++);
-        if (nextCode === (1 << codeSize) && codeSize < 12) codeSize += 1;
       } else {
-        writeCode(clearCode);
-        resetDictionary();
+        writeCode(prefix);
+        if (nextCode < 4096) {
+          dict.set(key, nextCode++);
+          if (nextCode > (1 << codeSize) && codeSize < 12) codeSize += 1;
+        } else {
+          writeCode(clearCode);
+          resetDictionary();
+        }
+        prefix = next;
       }
-      prefix = next;
+      if (writeCountSinceYield >= yieldEveryWrites) {
+        writeCountSinceYield = 0;
+        await waitForMs(0);
+      }
     }
     writeCode(prefix);
     writeCode(endCode);
@@ -7209,14 +7615,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function normalizeGifExportSize(widthRaw, heightRaw) {
     const width = Math.max(1, Math.round(Number(widthRaw) || 1));
     const height = Math.max(1, Math.round(Number(heightRaw) || 1));
-    const maxSide = 960;
-    const largest = Math.max(width, height);
-    if (largest <= maxSide) return { width, height };
-    const scale = maxSide / largest;
-    return {
-      width: Math.max(1, Math.round(width * scale)),
-      height: Math.max(1, Math.round(height * scale))
-    };
+    return { width, height };
   }
 
   async function loadImageFromDataUrlForExport(dataUrl) {
@@ -7367,26 +7766,101 @@ document.addEventListener("DOMContentLoaded", async () => {
     };
   }
 
-  async function resolveBurstFrameImagesForGif(burst) {
+  function buildEventLookupByStepIdForGifExport() {
+    const lookup = new Map();
+    if (!hasReport || !Array.isArray(report && report.events)) return lookup;
+    for (const ev of report.events) {
+      const stepId = ev && ev.stepId ? String(ev.stepId).trim() : "";
+      if (!stepId || lookup.has(stepId)) continue;
+      lookup.set(stepId, ev);
+    }
+    return lookup;
+  }
+
+  function resolveStepShotDataUrlForGifExport(stepIdRaw) {
+    if (typeof document === "undefined" || !document || typeof document.getElementById !== "function") return "";
+    const stepId = String(stepIdRaw || "").trim();
+    if (!stepId) return "";
+    const numeric = stepId.startsWith("step-") ? stepId.slice(5) : stepId;
+    if (!numeric) return "";
+    const node = document.getElementById(`step-shot-${numeric}`);
+    if (!node || typeof node.src !== "string") return "";
+    return safeDataImageUrl(node.src || "");
+  }
+
+  async function resolveBurstFrameDataUrlForGif(frame, eventLookup) {
+    const direct = safeDataImageUrl(frame && frame.screenshot || "");
+    if (direct) return direct;
+    const frameRef = cloneScreenshotRef(frame && frame.screenshotRef);
+    if (frameRef) {
+      const resolvedFromRef = String(await resolveFrameDataUrlFromRef(frameRef, {
+        retries: FRAME_REF_RESOLVE_RETRIES_DEFAULT,
+        retryMs: FRAME_REF_RESOLVE_RETRY_MS_DEFAULT,
+        requireExistence: true
+      }) || "");
+      const refDataUrl = safeDataImageUrl(resolvedFromRef);
+      if (refDataUrl) return refDataUrl;
+    }
+    const stepId = frame && frame.stepId ? String(frame.stepId).trim() : "";
+    if (!stepId) return "";
+    const domDataUrl = resolveStepShotDataUrlForGifExport(stepId);
+    if (domDataUrl) return domDataUrl;
+    const ev = eventLookup instanceof Map ? eventLookup.get(stepId) : null;
+    if (!ev) return "";
+    const eventDataUrl = String(await resolveEventScreenshotDataUrlForExport(ev) || "");
+    return safeDataImageUrl(eventDataUrl || "");
+  }
+
+  async function resolveBurstFrameImagesForGif(burst, onProgress) {
     const sourceFrames = Array.isArray(burst && burst.frames) ? burst.frames : [];
+    const eventLookup = buildEventLookupByStepIdForGifExport();
     const loaded = [];
-    for (const frame of sourceFrames) {
-      let dataUrl = safeDataImageUrl(frame && frame.screenshot || "");
+    const total = Math.max(1, sourceFrames.length);
+    for (let frameIndex = 0; frameIndex < sourceFrames.length; frameIndex++) {
+      const frame = sourceFrames[frameIndex];
+      const dataUrl = await resolveBurstFrameDataUrlForGif(frame, eventLookup);
       if (!dataUrl) {
-        const ref = cloneScreenshotRef(frame && frame.screenshotRef);
-        if (ref) {
-          dataUrl = String(await resolveFrameDataUrlFromRef(ref, {
-            retries: FRAME_REF_RESOLVE_RETRIES_DEFAULT,
-            retryMs: FRAME_REF_RESOLVE_RETRY_MS_DEFAULT,
-            requireExistence: true
-          }) || "");
+        if (typeof onProgress === "function") {
+          const current = Math.min(total, frameIndex + 1);
+          const percent = Math.round((current / total) * 100);
+          try {
+            onProgress({
+              stage: "frame-load",
+              current,
+              total,
+              percent,
+              message: `Loading GIF frames... ${percent}%`
+            });
+          } catch (_) {}
         }
+        if ((frameIndex % 4) === 0) await waitForMs(0);
+        continue;
       }
-      if (!dataUrl) continue;
       try {
         const image = await loadImageFromDataUrlForExport(dataUrl);
-        loaded.push({ image });
+        loaded.push({
+          image,
+          marker: frame && frame.marker ? frame.marker : null,
+          contextKey: frame && typeof frame.contextKey === "string" ? String(frame.contextKey).trim() : "",
+          viewportW: normalizeBurstViewportDimension(frame && frame.viewportW),
+          viewportH: normalizeBurstViewportDimension(frame && frame.viewportH),
+          stepId: frame && frame.stepId ? String(frame.stepId) : ""
+        });
       } catch (_) {}
+      if (typeof onProgress === "function") {
+        const current = Math.min(total, frameIndex + 1);
+        const percent = Math.round((current / total) * 100);
+        try {
+          onProgress({
+            stage: "frame-load",
+            current,
+            total,
+            percent,
+            message: `Loading GIF frames... ${percent}%`
+          });
+        } catch (_) {}
+      }
+      if ((frameIndex % 4) === 0) await waitForMs(0);
     }
     return loaded;
   }
@@ -7417,6 +7891,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function buildBurstGifAssetForSection(burst, burstIndex = 0, options) {
+    const opts = isPlainObject(options) ? options : {};
+    const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+    const emitProgress = (stage, currentRaw, totalRaw, messageRaw) => {
+      if (!onProgress) return;
+      const total = Math.max(1, Math.round(Number(totalRaw) || 1));
+      const current = Math.max(0, Math.min(total, Math.round(Number(currentRaw) || 0)));
+      const percent = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+      const message = String(messageRaw || "").trim();
+      try {
+        onProgress({ stage, current, total, percent, message });
+      } catch (_) {}
+    };
+
     const mediaOverride = cloneBurstMediaOverride(burst && burst.mediaOverride);
     if (mediaOverride && mediaOverride.mime === "image/gif") {
       const overrideBytes = dataUrlToBytes(mediaOverride.dataUrl);
@@ -7434,6 +7921,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           ? Number(clampNumber(sourceFpsRaw, 0.25, 60, CLICK_BURST_DEFAULTS.clickBurstPlaybackFps).toFixed(2))
           : CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
         const filename = buildBurstGifExportFileName(burst, burstIndex, options);
+        emitProgress("final-package", 1, 1, "Finalizing GIF file... 100%");
         return {
           filename,
           mime: "image/gif",
@@ -7449,6 +7937,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     let loadedFrames = [];
     let overrideImage = null;
     if (mediaOverride && mediaOverride.mime) {
+      emitProgress("frame-load", 0, 1, "Loading GIF frames... 0%");
       try {
         overrideImage = await loadImageFromDataUrlForExport(mediaOverride.dataUrl);
       } catch (_) {
@@ -7456,14 +7945,42 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
     if (overrideImage) {
-      loadedFrames = [{ image: overrideImage }, { image: overrideImage }];
+      loadedFrames = [{
+        image: overrideImage,
+        marker: null,
+        contextKey: "",
+        viewportW: null,
+        viewportH: null,
+        stepId: ""
+      }, {
+        image: overrideImage,
+        marker: null,
+        contextKey: "",
+        viewportW: null,
+        viewportH: null,
+        stepId: ""
+      }];
+      emitProgress("frame-load", 1, 1, "Loading GIF frames... 100%");
     } else {
-      loadedFrames = await resolveBurstFrameImagesForGif(burst);
+      const frameTotal = Math.max(1, Array.isArray(burst && burst.frames) ? burst.frames.length : 0);
+      emitProgress("frame-load", 0, frameTotal, "Loading GIF frames... 0%");
+      loadedFrames = await resolveBurstFrameImagesForGif(burst, onProgress ? (progress) => {
+        emitProgress(
+          "frame-load",
+          progress && progress.current,
+          progress && progress.total,
+          progress && progress.message
+        );
+      } : null);
     }
-    if (loadedFrames.length < 2) throw new Error("Need at least 2 burst frames to export GIF.");
+    if (loadedFrames.length < 2) {
+      const sourceCount = Array.isArray(burst && burst.frames) ? burst.frames.length : 0;
+      throw new Error(`Need at least 2 burst frames to export GIF (resolved ${loadedFrames.length}/${sourceCount}).`);
+    }
 
-    const sourceWidth = Math.max(1, Number(loadedFrames[0].image.naturalWidth || loadedFrames[0].image.width) || 1);
-    const sourceHeight = Math.max(1, Number(loadedFrames[0].image.naturalHeight || loadedFrames[0].image.height) || 1);
+    const sourceSurface = resolveBurstRenderSurfaceFromFrames(loadedFrames, 640, 360);
+    const sourceWidth = sourceSurface.width;
+    const sourceHeight = sourceSurface.height;
     const { width, height } = normalizeGifExportSize(sourceWidth, sourceHeight);
     const sourceFps = Number(clampNumber(
       burst && burst.sourceFps,
@@ -7472,6 +7989,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       CLICK_BURST_DEFAULTS.clickBurstPlaybackFps
     ));
     const delayCs = Math.max(2, Math.round((1000 / sourceFps) / 10));
+    const overlayMode = resolveBurstOverlayMode(burst, null);
+    const applyOverlays = !overrideImage;
+    const burstSettings = normalizeClickBurstSettings(report && report.settings);
+    const markerColor = burstSettings.clickBurstMarkerColor;
+    const markerStyle = burstSettings.clickBurstMarkerStyle;
 
     const canvas = document.createElement("canvas");
     canvas.width = width;
@@ -7479,40 +8001,71 @@ document.addEventListener("DOMContentLoaded", async () => {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) throw new Error("Canvas context unavailable for GIF export.");
 
+    const renderFrameToCanvas = (frameIndex) => {
+      renderBurstFrameToCanvas(ctx, canvas, loadedFrames, frameIndex, {
+        burst,
+        showMarkers: applyOverlays && overlayMode.showMarkers,
+        showCursorPointer: applyOverlays && overlayMode.showCursorPointer,
+        markerColor,
+        markerStyle,
+        markerCap: CLICK_BURST_RENDER_MARKER_CAP
+      });
+      return ctx.getImageData(0, 0, width, height).data;
+    };
+
+    const histogram = new Uint32Array(GIF_RGB555_BIN_COUNT);
+    const maxPaletteSampleFrames = 48;
+    const paletteFrameStride = Math.max(1, Math.ceil(loadedFrames.length / maxPaletteSampleFrames));
+    const samplePixelStride = Math.max(1, Math.round(Math.sqrt((width * height) / 120000)));
+    const palettePassTotal = Math.max(1, Math.ceil(loadedFrames.length / paletteFrameStride));
+    let palettePassIndex = 0;
+    emitProgress("palette-prep", 0, palettePassTotal, "Analyzing color palette... 0%");
+    for (let frameIndex = 0; frameIndex < loadedFrames.length; frameIndex += paletteFrameStride) {
+      const rgba = renderFrameToCanvas(frameIndex);
+      for (let p = 0; p < rgba.length; p += (4 * samplePixelStride)) {
+        if (rgba[p + 3] < 16) continue;
+        const bin = rgbToGifPaletteBin(rgba[p], rgba[p + 1], rgba[p + 2]);
+        histogram[bin] += 1;
+      }
+      palettePassIndex += 1;
+      emitProgress(
+        "palette-prep",
+        palettePassIndex,
+        palettePassTotal,
+        `Analyzing color palette... ${Math.round((palettePassIndex / palettePassTotal) * 100)}%`
+      );
+      await waitForMs(0);
+    }
+    const adaptivePalette = buildAdaptiveGifPaletteAndLookup(histogram);
+    const palette = adaptivePalette.palette;
+    const paletteLookup = adaptivePalette.lookup;
+
     const bytes = [];
     bytes.push(0x47, 0x49, 0x46, 0x38, 0x39, 0x61); // GIF89a
     writeGifWord(bytes, width);
     writeGifWord(bytes, height);
     bytes.push(0xF7, 0x00, 0x00); // global color table (256)
-    for (let i = 0; i < GIF_332_PALETTE.length; i++) bytes.push(GIF_332_PALETTE[i]);
+    for (let i = 0; i < palette.length; i++) bytes.push(palette[i]);
     bytes.push(
       0x21, 0xFF, 0x0B,
       0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2E, 0x30,
       0x03, 0x01, 0x00, 0x00, 0x00 // infinite loop
     );
 
-    for (const frame of loadedFrames) {
-      const img = frame.image;
-      const drawRect = containRectForMediaExport(
-        img.naturalWidth || img.width,
-        img.naturalHeight || img.height,
-        width,
-        height
-      );
-      ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, width, height);
-      ctx.drawImage(img, drawRect.x, drawRect.y, drawRect.w, drawRect.h);
-
-      const rgba = ctx.getImageData(0, 0, width, height).data;
+    emitProgress("frame-encode", 0, loadedFrames.length, "Encoding GIF frames... 0%");
+    for (let frameIndex = 0; frameIndex < loadedFrames.length; frameIndex++) {
+      const rgba = renderFrameToCanvas(frameIndex);
       const indexed = new Uint8Array(width * height);
       for (let p = 0, j = 0; p < rgba.length; p += 4, j += 1) {
         const alpha = rgba[p + 3];
-        indexed[j] = alpha < 16
-          ? 0
-          : quantizeRgb332(rgba[p], rgba[p + 1], rgba[p + 2]);
+        if (alpha < 16) {
+          indexed[j] = 0;
+          continue;
+        }
+        const bin = rgbToGifPaletteBin(rgba[p], rgba[p + 1], rgba[p + 2]);
+        indexed[j] = paletteLookup[bin];
       }
-      const lzwData = lzwEncodeGifIndices(indexed, 8);
+      const lzwData = await lzwEncodeGifIndices(indexed, 8);
 
       bytes.push(0x21, 0xF9, 0x04, 0x04);
       writeGifWord(bytes, delayCs);
@@ -7526,12 +8079,26 @@ document.addEventListener("DOMContentLoaded", async () => {
       bytes.push(0x00);
       bytes.push(0x08);
       appendGifSubBlocks(bytes, lzwData);
+      if (bytes.length > GIF_EXPORT_MAX_BYTES) {
+        throw new Error("GIF export exceeded 256 MB at native 1:1 size. Shorten the interaction or use a pre-rendered media override.");
+      }
+      emitProgress(
+        "frame-encode",
+        frameIndex + 1,
+        loadedFrames.length,
+        `Encoding GIF frames... ${Math.round(((frameIndex + 1) / loadedFrames.length) * 100)}%`
+      );
+      await waitForMs(0);
     }
 
     bytes.push(0x3B); // trailer
     canvas.width = 1;
     canvas.height = 1;
-    if (overrideImage) overrideImage.src = "";
+    loadedFrames.forEach((frame) => {
+      const img = getBurstFrameImage(frame);
+      if (img) img.src = "";
+    });
+    emitProgress("final-package", 1, 1, "Finalizing GIF file... 100%");
 
     const outputBytes = new Uint8Array(bytes);
     const filename = buildBurstGifExportFileName(burst, burstIndex, options);
@@ -7546,8 +8113,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     };
   }
 
-  async function exportBurstGifForSection(burst, burstIndex = 0) {
-    const asset = await buildBurstGifAssetForSection(burst, burstIndex);
+  async function exportBurstGifForSection(burst, burstIndex = 0, options) {
+    const opts = isPlainObject(options) ? options : {};
+    const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+    const asset = await buildBurstGifAssetForSection(burst, burstIndex, options);
+    if (onProgress) {
+      try {
+        onProgress({
+          stage: "download",
+          current: 1,
+          total: 1,
+          percent: 100,
+          message: "Starting file download..."
+        });
+      } catch (_) {}
+    }
     await downloadBlob(new Blob([asset.bytes], { type: asset.mime }), asset.filename);
     return asset.filename;
   }
@@ -7571,7 +8151,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     };
   }
 
-  async function exportAllSectionMediaZip() {
+  async function exportAllSectionMediaZip(options) {
+    const opts = isPlainObject(options) ? options : {};
+    const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+    const emitProgress = (payload) => {
+      if (!onProgress || !payload || typeof payload !== "object") return;
+      try { onProgress(payload); } catch (_) {}
+    };
+
     if (!hasReport) throw new Error("No report available to export.");
     if (!Array.isArray(report.events) || !report.events.length) {
       throw new Error("No section events available.");
@@ -7615,16 +8202,40 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
 
+    const exportableBursts = [];
     for (let i = 0; i < bursts.length; i++) {
       const burst = bursts[i];
       if (!(burst && Array.isArray(burst.frames) && burst.frames.length >= 2)) continue;
+      exportableBursts.push({ burst, burstIndex: i });
+    }
+
+    let completedBurstExports = 0;
+    const totalBurstExports = exportableBursts.length;
+    for (const entry of exportableBursts) {
+      const burst = entry.burst;
+      const i = entry.burstIndex;
+      const burstOrdinal = completedBurstExports + 1;
       try {
         const indexToken = String(gifsManifest.length + 1).padStart(3, "0");
         const asset = await buildBurstGifAssetForSection(burst, i, {
           includeReportName: false,
           includeTimestamp: false,
           fileNamePrefix: indexToken,
-          usedNames: usedGifNames
+          usedNames: usedGifNames,
+          onProgress: (progress) => {
+            const localPercent = Math.max(0, Math.min(100, Math.round(Number(progress && progress.percent) || 0)));
+            const overallPercent = totalBurstExports > 0
+              ? Math.round(((completedBurstExports + (localPercent / 100)) / totalBurstExports) * 100)
+              : 100;
+            const stageMessage = String(progress && progress.message || "").trim() || `Preparing GIF... ${localPercent}%`;
+            emitProgress({
+              stage: "gif-bundle",
+              current: burstOrdinal,
+              total: totalBurstExports,
+              percent: overallPercent,
+              message: `Building section media ZIP... GIF ${burstOrdinal}/${Math.max(1, totalBurstExports)} - ${stageMessage} (overall ${overallPercent}%)`
+            });
+          }
         });
         const filePath = `gifs/${asset.filename}`;
         zipEntries.push({ name: filePath, data: asset.bytes, updatedAt: exportedAt });
@@ -7643,6 +8254,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       } catch (_) {
         skippedGifs += 1;
       }
+      completedBurstExports += 1;
+      const completePercent = totalBurstExports > 0
+        ? Math.round((completedBurstExports / totalBurstExports) * 100)
+        : 100;
+      emitProgress({
+        stage: "gif-bundle",
+        current: completedBurstExports,
+        total: Math.max(1, totalBurstExports),
+        percent: completePercent,
+        message: totalBurstExports > 0
+          ? `Building section media ZIP... GIF ${completedBurstExports}/${totalBurstExports} complete (${completePercent}%)`
+          : "Building section media ZIP... 100%"
+      });
     }
 
     if (!zipEntries.length) {
@@ -10054,9 +10678,21 @@ document.addEventListener("DOMContentLoaded", async () => {
             canMoveBurst: (targetBurst, delta) => canMoveBurstByOffset(targetBurst, delta),
             onMoveBurst: (targetBurst, delta) => { moveBurstAndRefresh(targetBurst, delta); },
             onRenameBurst: (targetBurst, title) => { renameBurstAndRefresh(targetBurst, title); },
-            onExportBurstGif: async (targetBurst, targetBurstIndex) => {
+            onExportBurstGif: async (targetBurst, targetBurstIndex, onProgress) => {
               try {
-                const fileName = await exportBurstGifForSection(targetBurst, targetBurstIndex);
+                const fileName = await exportBurstGifForSection(targetBurst, targetBurstIndex, {
+                  onProgress: (progress) => {
+                    const percent = Math.max(0, Math.min(100, Math.round(Number(progress && progress.percent) || 0)));
+                    if (typeof onProgress === "function") {
+                      try { onProgress(progress); } catch (_) {}
+                    }
+                    const stageMessage = String(progress && progress.message || "").trim();
+                    setImportStatus(
+                      stageMessage || `Preparing burst GIF... ${percent}%`,
+                      false
+                    );
+                  }
+                });
                 setImportStatus(`Exported burst GIF: ${fileName}`, false);
               } catch (err) {
                 const message = String((err && err.message) || err || "Burst GIF export failed.");
@@ -11102,7 +11738,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       mediaBundleBtn.textContent = "Exporting...";
       setImportStatus("Building section media ZIP...", false);
       try {
-        const result = await exportAllSectionMediaZip();
+        const result = await exportAllSectionMediaZip({
+          onProgress: (progress) => {
+            const message = String(progress && progress.message || "").trim();
+            if (message) setImportStatus(message, false);
+          }
+        });
+        setImportStatus("Starting section media ZIP download...", false);
         const skipped = [];
         if (result.skippedImages > 0) skipped.push(`${result.skippedImages} image${result.skippedImages === 1 ? "" : "s"} skipped`);
         if (result.skippedGifs > 0) skipped.push(`${result.skippedGifs} GIF${result.skippedGifs === 1 ? "" : "s"} skipped`);

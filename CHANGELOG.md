@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.16.3 - 2026-03-07
+
+### Changed
+- Bumped extension version to `1.16.3` in `manifest.json`.
+- GIF section export now uses shared burst frame composition logic for builder playback, exported HTML playback, and GIF rendering to improve 1:1 visual parity.
+- Section GIF export and media ZIP export now show stage-aware progress updates through frame load, palette prep, frame encode, and download start.
+
+### Fixed
+- Corrected GIF LZW code-size growth boundary to prevent corrupted/blank/black exported frames.
+- Added robust GIF palette fallback path to prevent degenerate all-black palette/index outcomes.
+- Improved burst frame resolution for GIF export by falling back across frame refs, step DOM screenshots, and step-linked report events.
+- Added download fallback sequence (`saveAs:true` -> `saveAs:false` -> anchor download) to avoid silent no-file completion on some environments.
+- GIF oversize errors now report clear 1:1-cap guidance, and low-frame-resolution failures now report resolved/source frame counts.
+
 ## v1.16.2 - 2026-03-07
 
 ### Changed
