@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.16.4 - 2026-03-13
+
+### Added
+- Added repository `LICENSE` file for release packaging/legal clarity.
+
+### Changed
+- Bumped extension version to `1.16.4` in `manifest.json`.
+- Recording startup now requires explicit tab-scope selection from popup **Recording Scope**.
+- Tab scope now supports inline watch mode (`Watch On/Off`) in the popup to auto-add activated website tabs into the same selection list.
+- Host permissions now remain optional and are requested at start time for selected tab origins only.
+
+### Fixed
+- Hardened runtime start boundary: rejected untrusted/non-extension runtime senders for `START_RECORDING`.
+- Serialized watch-mode draft writes to avoid lost-update races during rapid tab activate/update/remove transitions.
+- Scope list styling now visibly highlights selected tabs, including a stronger watch-mode treatment.
+
 ## v1.16.3 - 2026-03-07
 
 ### Changed
