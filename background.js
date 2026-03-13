@@ -59,6 +59,7 @@ let activeCaptureUpdatedAt = 0;
 let recordingTabSelection = new Set();
 let recordingScopeEnforced = false;
 let tabScopeWatchEnabled = false;
+let tabScopeDraftWriteQueue = Promise.resolve();
 let burstHotkeyModeActive = false;
 let burstModeEpoch = 0;
 let burstRunId = 0;
@@ -731,43 +732,94 @@ function clearRecordingTabSelection(reason = "clear") {
   });
 }
 
+function isTrustedRuntimeUiSender(sender) {
+  const runtimeId = String((browser && browser.runtime && browser.runtime.id) || "").trim();
+  const senderId = String((sender && sender.id) || "").trim();
+  const senderUrl = String((sender && sender.url) || "").trim();
+  const hasSenderTab = !!(sender && sender.tab && typeof sender.tab.id === "number");
+  if (hasSenderTab) return false;
+  if (runtimeId && senderId && senderId !== runtimeId) return false;
+  if (!senderUrl) return !!senderId;
+  try {
+    return senderUrl.startsWith(browser.runtime.getURL(""));
+  } catch (_) {
+    return false;
+  }
+}
+
+function enqueueTabScopeDraftWrite(task) {
+  const run = tabScopeDraftWriteQueue.then(
+    () => task(),
+    () => task()
+  );
+  tabScopeDraftWriteQueue = run.catch(() => {});
+  return run;
+}
+
 async function addTabToSelectionDraft(tabId, reason = "watch") {
-  if (!tabScopeWatchEnabled) return { ok: false, ignored: true, reason: "watch-disabled" };
   const normalized = normalizeTabId(tabId);
   if (normalized === null) return { ok: false, ignored: true, reason: "invalid-tab-id" };
-  let tab = null;
-  try {
-    tab = await browser.tabs.get(normalized);
-  } catch (_) {
-    return { ok: false, ignored: true, reason: "tab-missing" };
-  }
-  if (!tab || !isInjectableTabUrl(tab.url)) {
-    return { ok: false, ignored: true, reason: "tab-not-recordable" };
-  }
-
-  let currentDraft = [];
-  try {
-    const stored = await browser.storage.local.get([TAB_SCOPE_DRAFT_KEY, TAB_SCOPE_WATCH_ENABLED_KEY]);
-    if (!stored[TAB_SCOPE_WATCH_ENABLED_KEY]) {
-      tabScopeWatchEnabled = false;
-      return { ok: false, ignored: true, reason: "watch-disabled" };
+  return await enqueueTabScopeDraftWrite(async () => {
+    if (!tabScopeWatchEnabled) return { ok: false, ignored: true, reason: "watch-disabled" };
+    let tab = null;
+    try {
+      tab = await browser.tabs.get(normalized);
+    } catch (_) {
+      return { ok: false, ignored: true, reason: "tab-missing" };
     }
-    currentDraft = normalizeTabIdList(stored[TAB_SCOPE_DRAFT_KEY]);
-  } catch (_) {
-    return { ok: false, ignored: true, reason: "storage-unavailable" };
-  }
-  if (currentDraft.includes(normalized)) {
-    return { ok: true, added: false, tabId: normalized };
-  }
-  currentDraft.push(normalized);
-  const nextDraft = normalizeTabIdList(currentDraft);
-  try {
-    await browser.storage.local.set({ [TAB_SCOPE_DRAFT_KEY]: nextDraft });
-    bgLog("tab-scope-watch:draft-added", { reason, tabId: normalized });
-    return { ok: true, added: true, tabId: normalized };
-  } catch (_) {
-    return { ok: false, ignored: true, reason: "storage-write-failed" };
-  }
+    if (!tab || !isInjectableTabUrl(tab.url)) {
+      return { ok: false, ignored: true, reason: "tab-not-recordable" };
+    }
+
+    let currentDraft = [];
+    try {
+      const stored = await browser.storage.local.get([TAB_SCOPE_DRAFT_KEY, TAB_SCOPE_WATCH_ENABLED_KEY]);
+      if (!stored[TAB_SCOPE_WATCH_ENABLED_KEY]) {
+        tabScopeWatchEnabled = false;
+        return { ok: false, ignored: true, reason: "watch-disabled" };
+      }
+      currentDraft = normalizeTabIdList(stored[TAB_SCOPE_DRAFT_KEY]);
+    } catch (_) {
+      return { ok: false, ignored: true, reason: "storage-unavailable" };
+    }
+    if (currentDraft.includes(normalized)) {
+      return { ok: true, added: false, tabId: normalized };
+    }
+    currentDraft.push(normalized);
+    const nextDraft = normalizeTabIdList(currentDraft);
+    try {
+      await browser.storage.local.set({ [TAB_SCOPE_DRAFT_KEY]: nextDraft });
+      bgLog("tab-scope-watch:draft-added", { reason, tabId: normalized });
+      return { ok: true, added: true, tabId: normalized };
+    } catch (_) {
+      return { ok: false, ignored: true, reason: "storage-write-failed" };
+    }
+  });
+}
+
+async function removeTabFromSelectionDraft(tabId, reason = "watch") {
+  const normalized = normalizeTabId(tabId);
+  if (normalized === null) return { ok: false, ignored: true, reason: "invalid-tab-id" };
+  return await enqueueTabScopeDraftWrite(async () => {
+    let currentDraft = [];
+    try {
+      const stored = await browser.storage.local.get([TAB_SCOPE_DRAFT_KEY]);
+      currentDraft = normalizeTabIdList(stored[TAB_SCOPE_DRAFT_KEY]);
+    } catch (_) {
+      return { ok: false, ignored: true, reason: "storage-unavailable" };
+    }
+    if (!currentDraft.includes(normalized)) {
+      return { ok: true, removed: false, tabId: normalized };
+    }
+    const nextDraft = currentDraft.filter((value) => value !== normalized);
+    try {
+      await browser.storage.local.set({ [TAB_SCOPE_DRAFT_KEY]: nextDraft });
+      bgLog("tab-scope-watch:draft-removed", { reason, tabId: normalized });
+      return { ok: true, removed: true, tabId: normalized };
+    } catch (_) {
+      return { ok: false, ignored: true, reason: "storage-write-failed" };
+    }
+  });
 }
 
 function getOriginPatternForUrl(urlRaw) {
@@ -3044,9 +3096,34 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     }
 
     if (msgType === "START_RECORDING") {
+      if (!isTrustedRuntimeUiSender(sender)) {
+        bgWarn("start-recording:unauthorized-sender", {
+          requestId,
+          senderTabId,
+          senderUrl: sender && sender.url ? String(sender.url) : "",
+          senderId: sender && sender.id ? String(sender.id) : ""
+        });
+        return {
+          ok: false,
+          reason: "unauthorized-sender",
+          error: "Start recording must be initiated from the extension popup."
+        };
+      }
+      const requestedSelection = normalizeTabIdList(msg.selectedTabIds);
+      if (!requestedSelection.length) {
+        bgLog("start-recording:selection-required", {
+          requestId,
+          senderUrl: sender && sender.url ? String(sender.url) : ""
+        });
+        return {
+          ok: false,
+          reason: "selection-required",
+          error: "Select at least one tab in Recording Scope before starting."
+        };
+      }
       return await enqueueLifecycleAction(
         `runtime:start:${requestId}`,
-        () => startRecordingInternal(`runtime:${requestId}`, { selectedTabIds: msg.selectedTabIds })
+        () => startRecordingInternal(`runtime:${requestId}`, { selectedTabIds: requestedSelection })
       );
     }
 
@@ -3628,14 +3705,7 @@ browser.storage.onChanged.addListener(async (changes, areaName) => {
 browser.tabs.onRemoved.addListener(async (tabId) => {
   if (typeof tabId !== "number") return;
   if (tabScopeWatchEnabled) {
-    try {
-      const stored = await browser.storage.local.get([TAB_SCOPE_DRAFT_KEY]);
-      const currentDraft = normalizeTabIdList(stored[TAB_SCOPE_DRAFT_KEY]);
-      if (currentDraft.includes(tabId)) {
-        const filtered = currentDraft.filter((value) => value !== tabId);
-        await browser.storage.local.set({ [TAB_SCOPE_DRAFT_KEY]: filtered });
-      }
-    } catch (_) {}
+    removeTabFromSelectionDraft(tabId, "tabs:onRemoved").catch(() => {});
   }
   if (isTabIdInRecordingSelection(tabId)) {
     recordingTabSelection.delete(tabId);
