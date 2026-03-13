@@ -406,6 +406,99 @@ body.popup .settings-group-help .settings-summary-meta {
   font-size: 13px;
 }
 
+.row-tab-scope {
+  align-items: flex-start;
+}
+
+.tab-scope-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.tab-scope-list {
+  margin-top: 6px;
+  max-height: 168px;
+  overflow: auto;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 6px;
+  display: grid;
+  gap: 4px;
+}
+
+.tab-scope-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px;
+}
+
+.tab-scope-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 5px 6px;
+}
+
+.tab-scope-item:hover {
+  border-color: #dbe4ef;
+  background: #f8fafc;
+}
+
+.tab-scope-item.is-selected {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.tab-scope-list.watch-mode .tab-scope-item.is-selected {
+  border-color: #0ea5e9;
+  background: #ecfeff;
+}
+
+.tab-scope-item input[type="checkbox"] {
+  margin-top: 1px;
+}
+
+.tab-scope-item-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.tab-scope-item-title {
+  font-size: 12px;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-scope-item-meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#tab-scope-status.tab-scope-error {
+  color: #b91c1c;
+}
+
+#tab-scope-status.tab-scope-success {
+  color: #166534;
+}
+
+.btn.watch-active {
+  border-color: #0ea5e9;
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.14), rgba(34, 197, 94, 0.16));
+}
+
 .burst-mode-state {
   font-weight: 600;
 }

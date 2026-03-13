@@ -14,7 +14,9 @@
     "activeTab",
     "storage",
     "downloads",
-    "idle",
+    "idle"
+  ],
+  "optional_permissions": [
     "<all_urls>"
   ],
   "background": {
@@ -29,19 +31,6 @@
     "default_icon": "icons/icon.svg",
     "default_popup": "popup.html"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_start",
-      "all_frames": true,
-      "match_about_blank": true
-    }
-  ],
   "web_accessible_resources": [
     "report.html",
     "report.js",

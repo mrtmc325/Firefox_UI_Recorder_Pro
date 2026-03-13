@@ -33,6 +33,28 @@
   <section class="card settings-card">
     <div class="card-title">Settings</div>
 
+    <details class="settings-group settings-group-scope">
+      <summary class="settings-summary">
+        <span class="settings-summary-title">Recording Scope</span>
+        <span class="settings-summary-meta">Tabs</span>
+      </summary>
+      <div class="settings-group-body">
+        <div class="row row-tab-scope">
+          Tab selection
+          <div class="tab-scope-actions">
+            <button id="tab-scope-select-active" class="btn subtle btn-small" type="button">Active</button>
+            <button id="tab-scope-select-all" class="btn ghost btn-small" type="button">All</button>
+            <button id="tab-scope-clear" class="btn ghost btn-small" type="button">Clear</button>
+            <button id="tab-scope-refresh" class="btn ghost btn-small" type="button">Refresh</button>
+            <button id="tab-scope-watch" class="btn ghost btn-small" type="button">Watch Off</button>
+          </div>
+        </div>
+        <div id="tab-scope-list" class="tab-scope-list"></div>
+        <div id="tab-scope-meta" class="hint">Select one or more tabs before starting capture.</div>
+        <div id="tab-scope-status" class="hint"></div>
+      </div>
+    </details>
+
     <details class="settings-group">
       <summary class="settings-summary">
         <span class="settings-summary-title">Capture</span>

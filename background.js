@@ -56,6 +56,9 @@ let activeCaptureWindowId = null;
 let activeCaptureTabUrl = "";
 let activeCaptureTabTitle = "";
 let activeCaptureUpdatedAt = 0;
+let recordingTabSelection = new Set();
+let recordingScopeEnforced = false;
+let tabScopeWatchEnabled = false;
 let burstHotkeyModeActive = false;
 let burstModeEpoch = 0;
 let burstRunId = 0;
@@ -101,6 +104,8 @@ let burstPerf = {
 const burstCursorSamplesByTab = new Map();
 
 const DEBUG_LOGS = false;
+const TAB_SCOPE_DRAFT_KEY = "recordingTabSelectionDraft";
+const TAB_SCOPE_WATCH_ENABLED_KEY = "recordingTabSelectionWatchEnabled";
 const EVENT_COMPACT_TRIGGER_COUNT = 600;
 const SCREENSHOT_COMPACT_TRIGGER_COUNT = 220;
 const SCREENSHOT_KEEP_TARGET = 160;
@@ -662,8 +667,235 @@ function stateSummary() {
     stopInProgress,
     eventCount: events.length,
     reportCount: reports.length,
-    sessionId
+    sessionId,
+    tabSelectionCount: recordingTabSelection.size,
+    tabSelectionEnforced: !!recordingScopeEnforced
   };
+}
+
+function normalizeTabId(value) {
+  const tabId = Number(value);
+  if (!Number.isInteger(tabId) || tabId <= 0) return null;
+  return tabId;
+}
+
+function normalizeTabIdList(values) {
+  const source = Array.isArray(values) ? values : [];
+  const out = [];
+  const seen = new Set();
+  source.forEach((value) => {
+    const tabId = normalizeTabId(value);
+    if (tabId === null || seen.has(tabId)) return;
+    seen.add(tabId);
+    out.push(tabId);
+  });
+  return out;
+}
+
+function getRecordingTabSelectionArray() {
+  return Array.from(recordingTabSelection.values()).sort((a, b) => a - b);
+}
+
+function hasRecordingTabSelection() {
+  return recordingTabSelection.size > 0;
+}
+
+function isTabIdInRecordingSelection(tabId) {
+  const normalized = normalizeTabId(tabId);
+  if (normalized === null) return false;
+  return recordingTabSelection.has(normalized);
+}
+
+function setRecordingTabSelection(tabIds, reason = "set") {
+  const normalized = normalizeTabIdList(tabIds);
+  recordingTabSelection = new Set(normalized);
+  recordingScopeEnforced = normalized.length > 0;
+  bgLog("recording-scope:set", {
+    reason,
+    tabCount: recordingTabSelection.size,
+    tabIds: normalized,
+    enforced: recordingScopeEnforced
+  });
+  return normalized;
+}
+
+function clearRecordingTabSelection(reason = "clear") {
+  if (!recordingTabSelection.size && !recordingScopeEnforced) return;
+  const previous = getRecordingTabSelectionArray();
+  recordingTabSelection = new Set();
+  recordingScopeEnforced = false;
+  bgLog("recording-scope:cleared", {
+    reason,
+    previousTabCount: previous.length,
+    previousTabIds: previous
+  });
+}
+
+async function addTabToSelectionDraft(tabId, reason = "watch") {
+  if (!tabScopeWatchEnabled) return { ok: false, ignored: true, reason: "watch-disabled" };
+  const normalized = normalizeTabId(tabId);
+  if (normalized === null) return { ok: false, ignored: true, reason: "invalid-tab-id" };
+  let tab = null;
+  try {
+    tab = await browser.tabs.get(normalized);
+  } catch (_) {
+    return { ok: false, ignored: true, reason: "tab-missing" };
+  }
+  if (!tab || !isInjectableTabUrl(tab.url)) {
+    return { ok: false, ignored: true, reason: "tab-not-recordable" };
+  }
+
+  let currentDraft = [];
+  try {
+    const stored = await browser.storage.local.get([TAB_SCOPE_DRAFT_KEY, TAB_SCOPE_WATCH_ENABLED_KEY]);
+    if (!stored[TAB_SCOPE_WATCH_ENABLED_KEY]) {
+      tabScopeWatchEnabled = false;
+      return { ok: false, ignored: true, reason: "watch-disabled" };
+    }
+    currentDraft = normalizeTabIdList(stored[TAB_SCOPE_DRAFT_KEY]);
+  } catch (_) {
+    return { ok: false, ignored: true, reason: "storage-unavailable" };
+  }
+  if (currentDraft.includes(normalized)) {
+    return { ok: true, added: false, tabId: normalized };
+  }
+  currentDraft.push(normalized);
+  const nextDraft = normalizeTabIdList(currentDraft);
+  try {
+    await browser.storage.local.set({ [TAB_SCOPE_DRAFT_KEY]: nextDraft });
+    bgLog("tab-scope-watch:draft-added", { reason, tabId: normalized });
+    return { ok: true, added: true, tabId: normalized };
+  } catch (_) {
+    return { ok: false, ignored: true, reason: "storage-write-failed" };
+  }
+}
+
+function getOriginPatternForUrl(urlRaw) {
+  const raw = String(urlRaw || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    if (!parsed.host) return "";
+    return `${parsed.protocol}//${parsed.host}/*`;
+  } catch (_) {
+    return "";
+  }
+}
+
+async function hasOriginPermission(originPattern) {
+  const pattern = String(originPattern || "").trim();
+  if (!pattern) return false;
+  if (
+    !browser ||
+    !browser.permissions ||
+    typeof browser.permissions.contains !== "function"
+  ) {
+    return true;
+  }
+  try {
+    return !!(await browser.permissions.contains({ origins: [pattern] }));
+  } catch (_) {
+    return false;
+  }
+}
+
+async function resolveSelectedTabsForStart(tabIds, source) {
+  const normalizedIds = normalizeTabIdList(tabIds);
+  const selectionSet = new Set(normalizedIds);
+  if (!normalizedIds.length) {
+    return {
+      ok: true,
+      tabs: [],
+      selectionSet,
+      reason: "",
+      error: "",
+      missingOrigins: []
+    };
+  }
+  const allowActiveFallback = String(source || "").startsWith("runtime:");
+  let activeTabId = null;
+  if (allowActiveFallback) {
+    try {
+      const tab = await getActiveTab();
+      activeTabId = tab && typeof tab.id === "number" ? tab.id : null;
+    } catch (_) {
+      activeTabId = null;
+    }
+  }
+  const tabs = [];
+  const missingOrigins = new Set();
+  for (const tabId of normalizedIds) {
+    let tab = null;
+    try {
+      tab = await browser.tabs.get(tabId);
+    } catch (_) {
+      return {
+        ok: false,
+        tabs: [],
+        selectionSet,
+        reason: "selected-tab-missing",
+        error: `Selected tab ${tabId} is no longer available.`,
+        missingOrigins: []
+      };
+    }
+    if (!tab || !isInjectableTabUrl(tab.url)) {
+      return {
+        ok: false,
+        tabs: [],
+        selectionSet,
+        reason: "selected-tab-not-recordable",
+        error: `Selected tab ${tabId} is not a recordable web page.`,
+        missingOrigins: []
+      };
+    }
+    const originPattern = getOriginPatternForUrl(tab.url);
+    if (!originPattern) {
+      return {
+        ok: false,
+        tabs: [],
+        selectionSet,
+        reason: "selected-tab-origin-unsupported",
+        error: `Selected tab ${tabId} does not expose an http/https origin.`,
+        missingOrigins: []
+      };
+    }
+    const hasPermission = await hasOriginPermission(originPattern);
+    const hasActiveFallback = allowActiveFallback && activeTabId === tabId;
+    if (!hasPermission && !hasActiveFallback) missingOrigins.add(originPattern);
+    tabs.push(tab);
+  }
+  if (missingOrigins.size) {
+    return {
+      ok: false,
+      tabs,
+      selectionSet,
+      reason: "host-permission-required",
+      error: "Host permission is required for one or more selected tabs. Open the popup and grant access before starting.",
+      missingOrigins: Array.from(missingOrigins.values())
+    };
+  }
+  return {
+    ok: true,
+    tabs,
+    selectionSet,
+    reason: "",
+    error: "",
+    missingOrigins: []
+  };
+}
+
+function senderMatchesRecordingScope(senderTab, effectiveSettings) {
+  const settingsSnapshot = effectiveSettings && typeof effectiveSettings === "object"
+    ? effectiveSettings
+    : getEffectiveSettings();
+  if (recordingScopeEnforced) {
+    return !!(senderTab && typeof senderTab.id === "number" && isTabIdInRecordingSelection(senderTab.id));
+  }
+  if (settingsSnapshot.activeTabOnly) {
+    return isEventFromActiveTarget(senderTab);
+  }
+  return true;
 }
 
 if (typeof self !== "undefined" && self.addEventListener) {
@@ -720,12 +952,21 @@ function clearActiveCaptureTarget(reason) {
   }
 }
 
-async function refreshActiveCaptureTarget(reason) {
+async function refreshActiveCaptureTarget(reason, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const scopedSelection = opts.selectionSet instanceof Set ? opts.selectionSet : recordingTabSelection;
+  const enforceSelection = Object.prototype.hasOwnProperty.call(opts, "enforceSelection")
+    ? !!opts.enforceSelection
+    : !!recordingScopeEnforced;
   try {
     const tabs = await browser.tabs.query({ active: true, lastFocusedWindow: true });
     const tab = tabs && tabs[0] ? tabs[0] : null;
     if (!tab || typeof tab.id !== "number") {
       clearActiveCaptureTarget(`${reason}:no-active-tab`);
+      return null;
+    }
+    if (enforceSelection && (!scopedSelection || !scopedSelection.size || !scopedSelection.has(tab.id))) {
+      clearActiveCaptureTarget(`${reason}:active-tab-out-of-scope`);
       return null;
     }
     activeCaptureTabId = tab.id;
@@ -1778,7 +2019,18 @@ function maybePersistBurstLoopState() {
     });
 }
 
-async function persist() { await browser.storage.local.set({ isRecording, isPaused, events, settings, reports, sessionId }); }
+async function persist() {
+  await browser.storage.local.set({
+    isRecording,
+    isPaused,
+    events,
+    settings,
+    reports,
+    sessionId,
+    recordingTabSelection: getRecordingTabSelectionArray(),
+    recordingScopeEnforced: !!recordingScopeEnforced
+  });
+}
 
 async function persistSafe(context) {
   try {
@@ -1808,6 +2060,9 @@ async function loadPersisted() {
     "settings",
     "reports",
     "sessionId",
+    "recordingTabSelection",
+    "recordingScopeEnforced",
+    TAB_SCOPE_WATCH_ENABLED_KEY,
     MIC_DIAG_STORAGE_KEY
   ]);
   isRecording = !!stored.isRecording;
@@ -1815,6 +2070,17 @@ async function loadPersisted() {
   events = Array.isArray(stored.events) ? stored.events : [];
   reports = Array.isArray(stored.reports) ? stored.reports : [];
   sessionId = stored.sessionId || null;
+  recordingTabSelection = new Set(normalizeTabIdList(stored.recordingTabSelection));
+  recordingScopeEnforced = !!stored.recordingScopeEnforced;
+  tabScopeWatchEnabled = !!stored[TAB_SCOPE_WATCH_ENABLED_KEY];
+  if (!isRecording) {
+    recordingTabSelection = new Set();
+    recordingScopeEnforced = false;
+    tabScopeWatchEnabled = false;
+    try {
+      await browser.storage.local.remove([TAB_SCOPE_DRAFT_KEY, TAB_SCOPE_WATCH_ENABLED_KEY]);
+    } catch (_) {}
+  }
   if (stored.settings) settings = { ...settings, ...stored.settings };
   settings = normalizeSettings(settings);
   recordingStartedAtMs = isRecording ? Date.now() : 0;
@@ -2416,14 +2682,72 @@ async function resumeRecording() {
   await setBadge("REC");
 }
 
-async function startRecordingInternal(source) {
+async function startRecordingInternal(source, options = {}) {
   if (isRecording) {
     bgLog("start-recording:ignored", { source, reason: "already-recording", ...stateSummary() });
     return { ok: true, ignored: true, reason: "already-recording" };
   }
+  const opts = options && typeof options === "object" ? options : {};
+  const requestedSelection = normalizeTabIdList(opts.selectedTabIds);
+  const selectedScope = await resolveSelectedTabsForStart(requestedSelection, source);
+  if (!selectedScope.ok) {
+    bgWarn("start-recording:blocked", {
+      source,
+      reason: selectedScope.reason,
+      missingOrigins: selectedScope.missingOrigins
+    });
+    return {
+      ok: false,
+      reason: selectedScope.reason,
+      error: selectedScope.error,
+      missingOrigins: selectedScope.missingOrigins
+    };
+  }
+  const effective = getEffectiveSettings();
+  if (effective.activeTabOnly) {
+    const activeTab = await refreshActiveCaptureTarget("start", {
+      selectionSet: selectedScope.selectionSet,
+      enforceSelection: selectedScope.selectionSet.size > 0
+    });
+    if (activeCaptureTabId === null || !activeTab) {
+      return {
+        ok: false,
+        reason: selectedScope.selectionSet.size ? "active-tab-out-of-scope" : "no-active-target",
+        error: selectedScope.selectionSet.size
+          ? "Activate one of the selected tabs, then start recording."
+          : "No eligible active tab is available for strict recording."
+      };
+    }
+    const injected = await ensureContentScriptInTab(activeCaptureTabId, "start");
+    if (!injected) {
+      return {
+        ok: false,
+        reason: "host-permission-required",
+        error: "Cannot access the active tab. Grant host access from the popup and retry."
+      };
+    }
+    await notifyActiveTargetTab("start");
+  } else {
+    clearActiveCaptureTarget("start:non-strict");
+  }
+  if (selectedScope.tabs.length) {
+    for (const tab of selectedScope.tabs) {
+      const tabId = Number(tab && tab.id);
+      if (!Number.isInteger(tabId) || tabId <= 0) continue;
+      const injected = await ensureContentScriptInTab(tabId, "start:selected-scope");
+      if (!injected) {
+        return {
+          ok: false,
+          reason: "host-permission-required",
+          error: `Cannot access selected tab ${tabId}. Grant host access and retry.`
+        };
+      }
+    }
+  }
   clearPendingHotkeyStop("start-recording");
   stopInProgress = false;
   resetBurstPerf();
+  setRecordingTabSelection(requestedSelection, "start-recording");
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
   burstRunId = 0;
@@ -2436,21 +2760,16 @@ async function startRecordingInternal(source) {
   events = [];
   sessionId = newSessionId();
   recordingStartedAtMs = Date.now();
-  const effective = getEffectiveSettings();
-  if (effective.activeTabOnly) {
-    await refreshActiveCaptureTarget("start");
-    if (activeCaptureTabId !== null) {
-      await ensureContentScriptInTab(activeCaptureTabId, "start");
-      await notifyActiveTargetTab("start");
-    }
-  }
-  else clearActiveCaptureTarget("start:non-strict");
   resetScreenshotState();
   await appendLifecycleScreenshotEvent("start", source);
   const persisted = await persistSafe("start-recording");
   await setBadge("REC");
   bgLog("start-recording:done", { source, sessionId, persisted: persisted.ok, ...stateSummary() });
-  return { ok: persisted.ok, persisted: persisted.ok };
+  return {
+    ok: persisted.ok,
+    persisted: persisted.ok,
+    recordingTabSelection: getRecordingTabSelectionArray()
+  };
 }
 
 async function stopRecordingInternal(source) {
@@ -2473,6 +2792,7 @@ async function stopRecordingInternal(source) {
     const hadBurstHotkeyMode = burstHotkeyModeActive;
     const detachedSessionId = String(sessionId || "").trim();
     const detachedEvents = Array.isArray(events) ? events : [];
+    const detachedTabSelection = getRecordingTabSelectionArray();
     const queueStateAtStop = getFrameSpoolQueueState();
     updateWriteQueueHighWater(queueStateAtStop);
     const queuePressureLevelAtStop = getFrameSpoolBackpressureLevel(queueStateAtStop);
@@ -2504,6 +2824,7 @@ async function stopRecordingInternal(source) {
         bgWarn("capture-mode:notify-stop-failed", { error: formatError(err) });
       });
     }
+    clearRecordingTabSelection("stop-recording");
     clearActiveCaptureTarget("stop");
     resetScreenshotState();
     setBadge("").catch(() => {});
@@ -2567,6 +2888,7 @@ async function stopRecordingInternal(source) {
     bgLog("stop-recording:done", {
       source,
       saved,
+      selectedTabCount: detachedTabSelection.length,
       persisted: true,
       finalizing,
       finalizationJobId,
@@ -2646,13 +2968,14 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     if (msgType === "GET_STATE") {
       const effectiveSettings = getEffectiveSettings();
       const hasSenderTab = !!(sender && sender.tab && typeof sender.tab.id === "number");
-      const isActiveCaptureTab = effectiveSettings.activeTabOnly
-        ? (hasSenderTab ? isEventFromActiveTarget(sender.tab) : true)
+      const isActiveCaptureTab = hasSenderTab
+        ? senderMatchesRecordingScope(sender.tab, effectiveSettings)
         : true;
       const frameSpoolState = getFrameSpoolQueueState();
       updateWriteQueueHighWater(frameSpoolState);
       const spoolRuntime = getFrameSpoolRuntimeSnapshot(frameSpoolState);
       const spoolWorkers = getFrameSpoolWorkerSnapshot();
+      const recordingTabSelectionList = getRecordingTabSelectionArray();
       return {
         isRecording,
         isPaused,
@@ -2661,6 +2984,9 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         activeCaptureTabId: effectiveSettings.activeTabOnly ? activeCaptureTabId : null,
         activeCaptureWindowId: effectiveSettings.activeTabOnly ? activeCaptureWindowId : null,
         isActiveCaptureTab,
+        recordingTabSelection: recordingTabSelectionList,
+        recordingTabSelectionCount: recordingTabSelectionList.length,
+        recordingScopeEnforced: !!recordingScopeEnforced,
         burstHotkeyModeActive,
         burstRunTargetFps,
         burstLoopActive,
@@ -2708,7 +3034,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       if (!senderTab || typeof senderTab.id !== "number") {
         return { ok: false, ignored: true, reason: "no-sender-tab" };
       }
-      if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
+      if (!senderMatchesRecordingScope(senderTab, effectiveSettings)) {
         return { ok: false, ignored: true, reason: "non-active-tab" };
       }
       const accepted = setBurstCursorSample(senderTab, msg.sample);
@@ -2718,7 +3044,10 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     }
 
     if (msgType === "START_RECORDING") {
-      return await enqueueLifecycleAction(`runtime:start:${requestId}`, () => startRecordingInternal(`runtime:${requestId}`));
+      return await enqueueLifecycleAction(
+        `runtime:start:${requestId}`,
+        () => startRecordingInternal(`runtime:${requestId}`, { selectedTabIds: msg.selectedTabIds })
+      );
     }
 
     if (msgType === "STOP_RECORDING") {
@@ -2729,11 +3058,11 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     if (msgType === "ADD_NOTE") {
       if (!isRecording) return { ok: false, ignored: true };
       const effectiveSettings = getEffectiveSettings();
-      if (effectiveSettings.activeTabOnly && (activeCaptureTabId === null || activeCaptureWindowId === null)) {
+      if (!hasRecordingTabSelection() && effectiveSettings.activeTabOnly && (activeCaptureTabId === null || activeCaptureWindowId === null)) {
         return { ok: false, ignored: true, reason: "no-active-target" };
       }
       const tab = await getActiveTab();
-      if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(tab)) {
+      if (!senderMatchesRecordingScope(tab, effectiveSettings)) {
         return { ok: false, ignored: true, reason: "non-active-tab" };
       }
       const note = String(msg.text || "").trim();
@@ -3142,7 +3471,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         const hotkeyBurstActive = isHotkeyBurstModeActive();
         if (shouldIgnoreEventType(e.type)) return { ok: false, ignored: true };
         const senderTab = sender && sender.tab ? sender.tab : null;
-        if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
+        if (!senderMatchesRecordingScope(senderTab, effectiveSettings)) {
           bgLog("record-event:dropped-non-active", {
             requestId,
             eventType,
@@ -3198,7 +3527,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           cleaned.screenshotSkipReason = hotkeyBurstActive ? "gif-loop-owned" : "not-needed";
         }
 
-        if (effectiveSettings.activeTabOnly && !isEventFromActiveTarget(senderTab)) {
+        if (!senderMatchesRecordingScope(senderTab, effectiveSettings)) {
           bgLog("record-event:dropped-non-active", {
             requestId,
             eventType,
@@ -3270,6 +3599,10 @@ browser.storage.onChanged.addListener(async (changes, areaName) => {
   if (changes.settings && changes.settings.newValue) {
     settings = normalizeSettings({ ...settings, ...changes.settings.newValue });
   }
+  if (Object.prototype.hasOwnProperty.call(changes, TAB_SCOPE_WATCH_ENABLED_KEY)) {
+    tabScopeWatchEnabled = !!(changes[TAB_SCOPE_WATCH_ENABLED_KEY] && changes[TAB_SCOPE_WATCH_ENABLED_KEY].newValue);
+    bgLog("tab-scope-watch:state", { enabled: tabScopeWatchEnabled });
+  }
   const stopChange = changes.__uiRecorderStopRequestTs;
   if (!stopChange) return;
 
@@ -3294,6 +3627,27 @@ browser.storage.onChanged.addListener(async (changes, areaName) => {
 
 browser.tabs.onRemoved.addListener(async (tabId) => {
   if (typeof tabId !== "number") return;
+  if (tabScopeWatchEnabled) {
+    try {
+      const stored = await browser.storage.local.get([TAB_SCOPE_DRAFT_KEY]);
+      const currentDraft = normalizeTabIdList(stored[TAB_SCOPE_DRAFT_KEY]);
+      if (currentDraft.includes(tabId)) {
+        const filtered = currentDraft.filter((value) => value !== tabId);
+        await browser.storage.local.set({ [TAB_SCOPE_DRAFT_KEY]: filtered });
+      }
+    } catch (_) {}
+  }
+  if (isTabIdInRecordingSelection(tabId)) {
+    recordingTabSelection.delete(tabId);
+    bgLog("recording-scope:tab-removed", {
+      removedTabId: tabId,
+      remainingTabCount: recordingTabSelection.size
+    });
+    if (!recordingTabSelection.size) {
+      clearActiveCaptureTarget("tabs:onRemoved:scope-empty");
+    }
+    persistSafe("tabs:onRemoved:scope-update").catch(() => {});
+  }
   const sessionsToClear = [];
   micProxySessions.forEach((session, sessionId) => {
     if (!session || typeof session !== "object") return;
@@ -3321,6 +3675,13 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (tab && tab.active) rememberUsableWebTab(tab, "tabs:onUpdated");
+  if (tabScopeWatchEnabled && tab && tab.active) {
+    const urlChanged = !!(changeInfo && typeof changeInfo.url === "string");
+    const completed = !!(changeInfo && changeInfo.status === "complete");
+    if (urlChanged || completed) {
+      addTabToSelectionDraft(tabId, "tabs:onUpdated").catch(() => {});
+    }
+  }
   const targetUnavailable = !!(
     changeInfo &&
     (
@@ -3338,6 +3699,9 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 browser.tabs.onActivated.addListener(async (activeInfo) => {
   if (activeInfo && typeof activeInfo.tabId === "number") {
+    if (tabScopeWatchEnabled) {
+      addTabToSelectionDraft(activeInfo.tabId, "tabs:onActivated").catch(() => {});
+    }
     try {
       const tab = await browser.tabs.get(activeInfo.tabId);
       rememberUsableWebTab(tab, "tabs:onActivated");

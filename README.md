@@ -89,7 +89,7 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Section text is rendered in collapsible caption-style panels in builder and exported HTML.
   - Text payloads are stored in IndexedDB spool with lightweight refs in report events.
   - Section text now includes read-aloud controls in the builder: play/pause, restart, timeline scrub, tempo, narration source (Browser/OS or OpenAI cloud), and voice selection.
-  - OpenAI cloud narration uses your API key stored in local browser storage on the builder device.
+  - OpenAI cloud narration uses your API key stored only for the active report tab session (legacy local keys are auto-migrated and scrubbed).
   - Speech-to-text in the section editor now uses upload-only transcription (`Transcribe audio file`) for Firefox stability.
   - All live microphone capture paths (report tab, workflow tab proxy, and popup capture) are removed from this build.
   - Generated OpenAI narration is baked into section audio refs for export so report viewers can play audio without API keys or provider setup.
@@ -115,6 +115,9 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
 ## Quick Start
 1. Open extension popup.
 2. Click **Start**.
+   - In popup **Recording Scope**, select the tab(s) you want captured first.
+   - Optional: click **Watch Off** to enable in-popup watch mode. Activated website tabs auto-add to the same selection list.
+   - The extension requests host access only for selected tab origins (active tab can use temporary activeTab access).
 3. Perform workflow.
 4. Click **Stop**.
 5. Click **Open report**.

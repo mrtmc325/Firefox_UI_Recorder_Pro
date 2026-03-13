@@ -160,6 +160,8 @@ const sectionTextCache = new Map();
 let sectionTextCacheBytes = 0;
 const sectionAudioCache = new Map();
 let sectionAudioCacheBytes = 0;
+let sectionNarrationOpenAiApiKeyCache = "";
+let sectionNarrationOpenAiApiKeyLoaded = false;
 let frameSpoolGcTimer = null;
 let frameSpoolSyncTimer = null;
 let frameSpoolPendingReports = null;
@@ -7185,19 +7187,39 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function getSectionNarrationOpenAiApiKey() {
-    try {
-      return String(localStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE) || "").trim();
-    } catch (_) {
-      return "";
+    if (!sectionNarrationOpenAiApiKeyLoaded) {
+      let next = "";
+      try {
+        next = String(sessionStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE) || "").trim();
+      } catch (_) {
+        next = "";
+      }
+      if (!next) {
+        try {
+          next = String(localStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE) || "").trim();
+        } catch (_) {
+          next = "";
+        }
+        if (next) {
+          try { sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE, next); } catch (_) {}
+        }
+      }
+      try { localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE); } catch (_) {}
+      sectionNarrationOpenAiApiKeyCache = next;
+      sectionNarrationOpenAiApiKeyLoaded = true;
     }
+    return sectionNarrationOpenAiApiKeyCache;
   }
 
   function setSectionNarrationOpenAiApiKey(value) {
     const next = String(value || "").trim();
+    sectionNarrationOpenAiApiKeyCache = next;
+    sectionNarrationOpenAiApiKeyLoaded = true;
     try {
-      if (!next) localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE);
-      else localStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE, next);
+      if (!next) sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE);
+      else sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE, next);
     } catch (_) {}
+    try { localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE); } catch (_) {}
     return next;
   }
 
@@ -10043,14 +10065,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     audioCloudKeyBtn.addEventListener("click", () => {
-      const existing = getSectionNarrationOpenAiApiKey();
       const next = prompt(
-        "Enter OpenAI API key for cloud narration and audio transcription (leave empty to clear):",
-        existing
+        "Enter OpenAI API key for cloud narration and audio transcription (leave empty to clear):"
       );
       if (next === null) return;
       const saved = setSectionNarrationOpenAiApiKey(next);
-      if (saved) setStatus("OpenAI API key saved in local browser storage.");
+      if (saved) setStatus("OpenAI API key saved for this report-tab session only.");
       else setStatus("OpenAI API key cleared.");
     });
 
