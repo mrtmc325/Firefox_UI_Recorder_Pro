@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.16.5 - 2026-03-19
+
+### Changed
+- Bumped extension version to `1.16.5` in `manifest.json`.
+- Refreshed release metadata/docs to align with the new tagged build.
+
 ## v1.16.4 - 2026-03-13
 
 ### Added
