@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Firefox UI Recorder Pro - Security Audit Report</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --ink: #0f172a;
+      --muted: #475569;
+      --line: #dbe3ef;
+      --p1: #b91c1c;
+      --p2: #c2410c;
+      --p3: #0f766e;
+      --accent: #1d4ed8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #eef3fb 0%, var(--bg) 100%);
+      color: var(--ink);
+      font: 15px/1.5 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    }
+    .wrap {
+      max-width: 1080px;
+      margin: 28px auto;
+      padding: 0 18px 28px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px 20px;
+      margin-bottom: 14px;
+      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+    }
+    h1, h2, h3 { margin: 0 0 10px; line-height: 1.25; }
+    h1 { font-size: 26px; }
+    h2 { font-size: 19px; border-bottom: 1px solid var(--line); padding-bottom: 7px; }
+    h3 { font-size: 16px; margin-top: 12px; }
+    p, li { color: var(--ink); }
+    .muted { color: var(--muted); }
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px 16px;
+      margin-top: 10px;
+    }
+    .meta div {
+      background: #f8fbff;
+      border: 1px solid #dbeafe;
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      padding: 10px 8px;
+    }
+    th {
+      background: #f8fafc;
+      color: #0b2447;
+      font-weight: 600;
+    }
+    .sev {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      color: #fff;
+    }
+    .p1 { background: var(--p1); }
+    .p2 { background: var(--p2); }
+    .p3 { background: var(--p3); }
+    code {
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      padding: 1px 5px;
+      border-radius: 5px;
+      font-size: 0.95em;
+    }
+    ol, ul { margin: 8px 0 0 22px; padding: 0; }
+    .note {
+      border-left: 4px solid var(--accent);
+      background: #eff6ff;
+      padding: 10px 12px;
+      border-radius: 8px;
+      color: #1e3a8a;
+    }
+    .footer {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    @media print {
+      body { background: #fff; }
+      .wrap { margin: 0; max-width: none; padding: 0; }
+      .card { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>Security Audit Report</h1>
+      <p class="muted">Project: <strong>Firefox UI Recorder Pro</strong></p>
+      <div class="meta">
+        <div><strong>Audit date:</strong> March 12, 2026</div>
+        <div><strong>Audit type:</strong> Multi-pass static review</div>
+        <div><strong>Focus areas:</strong> Core features, runtime structure, dead code, data at rest, data in transit, endpoint access</div>
+        <div><strong>Codebase path:</strong> <code>/Users/tristan/Firefox_UI_Recorder_Pro</code></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Executive Summary</h2>
+      <p>The extension is functionally rich and has good defensive normalization patterns in many areas, but there are critical security hygiene gaps around secret storage and persisted sensitive artifacts. A deprecated microphone subsystem is also still present as dead code, increasing attack surface and audit burden.</p>
+      <div class="note">
+        Highest risks: plaintext API key storage, unencrypted local sensitive data persistence, and a large unreachable mic-proxy subsystem still shipped in runtime code.
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Findings by Severity</h2>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:90px;">Severity</th>
+            <th>Finding</th>
+            <th>Evidence (file:line)</th>
+            <th>Impact</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="sev p1">P1</span></td>
+            <td>OpenAI API key stored in plaintext local storage.</td>
+            <td><code>report.js:6967</code>, <code>report.js:6979</code>, <code>report.js:9424</code></td>
+            <td>Key theft risk if extension page/profile is compromised.</td>
+          </tr>
+          <tr>
+            <td><span class="sev p1">P1</span></td>
+            <td>Sensitive capture artifacts are persisted locally without encryption; screenshot pixels are not redacted.</td>
+            <td><code>background.js:1781</code>, <code>background.js:1959</code>, <code>report.js:1890</code></td>
+            <td>Potential long-lived local exposure of sensitive business/auth data.</td>
+          </tr>
+          <tr>
+            <td><span class="sev p2">P2</span></td>
+            <td>Large dead microphone proxy subsystem remains in code although runtime requests are rejected.</td>
+            <td><code>background.js:2635</code>, <code>background.js:2763</code>, <code>content.js:1473</code>, <code>content.js:2818</code></td>
+            <td>Increases maintenance risk, attack surface, and reactivation risk.</td>
+          </tr>
+          <tr>
+            <td><span class="sev p2">P2</span></td>
+            <td>Capture listeners do not gate on trusted user events.</td>
+            <td><code>content.js:2586</code>, <code>content.js:2627</code>, <code>content.js:2685</code></td>
+            <td>Page scripts can inject synthetic events and poison workflows.</td>
+          </tr>
+          <tr>
+            <td><span class="sev p3">P3</span></td>
+            <td>Privilege and exposure scope is broad (`&lt;all_urls&gt;`, all-frames, web-accessible resources).</td>
+            <td><code>manifest.json:18</code>, <code>manifest.json:35</code>, <code>manifest.json:40</code>, <code>manifest.json:45</code></td>
+            <td>Greater blast radius than a least-privilege profile.</td>
+          </tr>
+          <tr>
+            <td><span class="sev p3">P3</span></td>
+            <td>ZIP import has no up-front file-size guard before full in-memory parse.</td>
+            <td><code>report.js:10790</code>, <code>report.js:10792</code>, <code>report.js:1517</code></td>
+            <td>Availability risk from oversized/malicious imports.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Data in Transit and Endpoint Access</h2>
+      <ul>
+        <li>External API endpoints observed: <code>https://api.openai.com/v1/audio/transcriptions</code> and <code>https://api.openai.com/v1/audio/speech</code> (<code>report.js:688</code>, <code>report.js:8290</code>).</li>
+        <li>No external extension message endpoint (`onMessageExternal`) observed in this pass.</li>
+        <li>Internal runtime message handling is centralized at <code>background.js:2622</code>.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>Dead Code and Structure Notes</h2>
+      <ul>
+        <li>Deprecated mic proxy logic still spans a large branch in background and content scripts even after runtime rejection behavior was added.</li>
+        <li>Approximate dead footprint: background mic branch ~369 lines; content mic-related symbol references ~160.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>Remediation Plan (Multi-Job Sequence)</h2>
+      <ol>
+        <li><strong>Job 1:</strong> Remove mic proxy dead code paths and unreachable message branches end-to-end.</li>
+        <li><strong>Job 2:</strong> Replace persistent API key storage with session-only key flow (or user-secret-protected encryption).</li>
+        <li><strong>Job 3:</strong> Implement secure-at-rest mode for reports/screenshots and stronger redaction policy options.</li>
+        <li><strong>Job 4:</strong> Enforce trusted-event checks and event-rate abuse limits in capture listeners.</li>
+        <li><strong>Job 5:</strong> Minimize permissions/host scope and tighten web-accessible resource exposure.</li>
+        <li><strong>Job 6:</strong> Add strict import size caps and safe parse guards before ZIP processing.</li>
+      </ol>
+    </section>
+
+    <section class="card footer">
+      Static review report. No dynamic exploit simulation, fuzzing, or live Firefox runtime instrumentation was performed in this pass.
+    </section>
+  </div>
+</body>
+</html>

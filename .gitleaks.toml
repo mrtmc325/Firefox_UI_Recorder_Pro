@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Exempt operational-test harness: contains deliberately fake redaction-test fixtures, not real secrets."
+paths = [
+  '''docs/optest\.js''',
+]

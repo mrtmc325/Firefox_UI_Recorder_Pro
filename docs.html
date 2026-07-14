@@ -8,9 +8,20 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.16.1. This patch release aligns popup version display with manifest metadata and retains the burst-playback stability work from v1.16.0 (stable contain-fit export rendering, deterministic autoplay resume, and context-aware multi-tab cursor trails).</p>
+    <p>Version 1.17.0. Ships the completed security hardening pass described below, halves the default burst JPEG quality (75 → 38) to keep exported bundles small, and retains the burst-playback stability work from v1.16.0 (stable contain-fit export rendering, deterministic autoplay resume, and context-aware multi-tab cursor trails).</p>
 
-    <h2>Version Notes (v1.16.1)</h2>
+    <h2>Security &amp; Privacy Hardening (current build)</h2>
+    <ul>
+      <li><strong>Screenshot redaction policy</strong> (popup &gt; Privacy &amp; Stability): <em>Omit all screenshots</em> suppresses all screenshot pixel capture — step, lifecycle, and GIF burst frames. Steps record an explicit skip reason instead.</li>
+      <li><strong>Secure-at-rest mode</strong>: reports/events are kept in browser session storage (memory-only, cleared when the browser closes) and screenshot capture is disabled. On Firefox versions without session storage, the recorder falls back to local storage with screenshots stripped. Section text/audio persistence is blocked while the mode is on. The mode is forward-only: media stored before enabling it is not purged.</li>
+      <li><strong>Session-only OpenAI API key</strong>: the key lives in the report tab's session storage only — cleared when the tab closes, never written to disk, exports, or logs. Any key stored by older versions is migrated and deleted at report-page load.</li>
+      <li><strong>Trusted-event capture</strong>: only real user events (<code>isTrusted</code>) are recorded, with per-event-type rate limits. Script-generated (synthetic) events are ignored — automation-driven flows will not produce steps.</li>
+      <li><strong>Minimized permissions</strong>: host access is limited to <code>http://*/*</code> and <code>https://*/*</code> (no <code>&lt;all_urls&gt;</code>), no web-accessible resources, no <code>about:blank</code> frame injection.</li>
+      <li><strong>Hardened raw ZIP import</strong>: strict archive-size, entry-count, and per-entry caps (sized to accept anything the extension itself exports), Store-only method, path-traversal and duplicate-name rejection, image magic-byte validation, and MIME allow-lists for restored media.</li>
+      <li>The deprecated microphone-capture subsystem is fully removed; residual mic requests are rejected with <code>mic-capture-removed</code>.</li>
+    </ul>
+
+    <h2>Version Notes (v1.17.0)</h2>
     <ul>
       <li>Popup header version badge now resolves directly from extension manifest version to prevent stale hardcoded values after releases.</li>
       <li>Exported carousel right rail now uses <strong>Workflow Queue</strong> naming consistently.</li>
@@ -139,6 +150,8 @@
       <li><strong>Capture mode</strong>: All events</li>
       <li><strong>Redact sensitive text in report</strong>: On</li>
       <li><strong>Redact usernames on login pages</strong>: On</li>
+      <li><strong>Screenshot redaction policy</strong>: Omit all screenshots (when pixels must never be captured)</li>
+      <li><strong>Secure-at-rest mode</strong>: On for session-only storage; export the report before closing the browser</li>
       <li><strong>Page watch (dynamic UI)</strong>: On</li>
       <li><strong>Page watch interval (ms)</strong>: 600 to 1000</li>
     </ul>
@@ -195,6 +208,7 @@
       <li>Use the subsection description textarea per step to add concise context (max 200 characters, ASCII supported).</li>
       <li>Use section read-aloud controls to narrate embedded text for guided walkthroughs.</li>
       <li>Use <strong>Transcribe audio file</strong> in each section text panel for OpenAI speech-to-text.</li>
+      <li>Use <strong>Play cloud voice tour</strong> to preview OpenAI narration voices with a short fixed sample phrase (same API key and consent gate as cloud narration; no report content is sent).</li>
       <li>Live microphone capture is disabled in this release.</li>
     </ul>
 
@@ -221,6 +235,7 @@
       <li><strong>Exported narration bar</strong>: Icon-based bottom player with timeline clock (<code>mm:ss | mm:ss</code>), fullscreen toggle, and gear menu for captions/fade/tempo settings.</li>
       <li><strong>Export raw ZIP</strong>: Editable payload for re-import later (bundle v4 includes frame manifest + frame files, text manifest + text payload files, and audio manifest + baked narration audio payload files).</li>
       <li><strong>Import raw ZIP</strong>: Import as new report or merge into active report.</li>
+      <li><strong>Import safety</strong>: raw ZIP import enforces strict archive-size, entry-count, and per-entry caps (sized to accept anything the extension itself exports), accepts Store-only entries, and rejects unsafe or duplicate entry paths.</li>
       <li><strong>Compatibility</strong>: bundle v1 (inline screenshot ZIPs) remains supported on import.</li>
       <li><strong>Saved report rollover</strong>: Recorder keeps the 3 most recent saved reports. On each new stop/save, older reports beyond 3 are removed automatically.</li>
     </ul>
@@ -230,7 +245,7 @@
       <li><code>Ctrl+Shift+Y</code> toggles start/stop recording.</li>
       <li>Hotkey stop grace: first <code>Ctrl+Shift+Y</code> stop press schedules stop in 2000ms; a second press during grace forces immediate stop.</li>
       <li><code>Cmd+Opt+G</code> (macOS target) / <code>Ctrl+Alt+G</code> (default) toggles high-speed GIF burst mode while recording.</li>
-      <li>When ON, GIF burst mode attempts unconditional screenshot capture at the selected 5/10/15 FPS target cadence until toggled OFF.</li>
+      <li>When ON, GIF burst mode attempts screenshot capture at the selected 5/10/15 FPS target cadence until toggled OFF (suppressed while a screenshot privacy policy — omit or secure-at-rest — is active).</li>
       <li>GIF burst behavior is hotkey-only; popup tuning is intentionally limited to capture FPS.</li>
       <li>Capture FPS is selectable (5/10/15) in popup GIF settings; replay speed is tuned in the report builder and carried into export.</li>
       <li>Replay timing uses measured source FPS per burst as the 1.0x baseline, so playback pace matches recorded cadence.</li>
@@ -239,7 +254,7 @@
     </ul>
 
     <h2>Privacy</h2>
-    <p>All core capture/report data remains in local browser storage. Optional OpenAI cloud narration sends section text only when explicitly selected in the builder with a provided API key and granted Firefox website content permission. Optional OpenAI speech-to-text uploads user-selected audio files only after the same explicit key/permission flow. Screenshots are unmodified; redaction applies to report text fields.</p>
+    <p>All core capture/report data remains in local browser storage; with secure-at-rest mode on, recorder events/reports are kept in memory-only browser session storage instead. Only trusted (real user) events are recorded — script-generated events are ignored. Optional OpenAI cloud narration sends section text only when explicitly selected in the builder with a provided API key and granted Firefox website content permission; the key lives only in the report tab's session storage and is never persisted to disk. Optional OpenAI speech-to-text uploads user-selected audio files only after the same explicit key/permission flow. Text redaction applies to report text fields; captured screenshot pixels are not edited — use the screenshot redaction policy (omit) or secure-at-rest mode to suppress screenshot capture entirely for sensitive workflows.</p>
   </main>
 </body>
 </html>

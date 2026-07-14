@@ -22,6 +22,7 @@
   var COLLECTOR2_YIELD_MS = 0;
   var COLLECTOR3_BATCH_SIZE = 2;
   var COLLECTOR3_YIELD_MS = 0;
+  var PUMP_STALL_RETRY_MS = 12;
   var CAPTURE_QUEUE_BYTES_CAP_DEFAULT = 12 * 1024 * 1024;
   var PROCESS_QUEUE_BYTES_CAP_DEFAULT = 24 * 1024 * 1024;
   var WRITE_QUEUE_BYTES_CAP_DEFAULT = 24 * 1024 * 1024;
@@ -1053,22 +1054,25 @@
     };
   };
 
-  FrameSpoolService.prototype._schedulePump = function () {
+  FrameSpoolService.prototype._schedulePump = function (delayMs) {
     var self = this;
     if (self._pumpScheduled || self._closed) return;
     self._pumpScheduled = true;
-    Promise.resolve().then(function () {
+    var run = function () {
       self._pumpScheduled = false;
       self._pump().catch(function (err) {
         self._warnEvent("frame-spool:pump-error", { error: String((err && err.message) || err) });
       });
-    });
+    };
+    var wait = Math.max(0, Number(delayMs) || 0);
+    if (wait > 0) setTimeout(run, wait);
+    else Promise.resolve().then(run);
   };
 
   FrameSpoolService.prototype._pump = async function () {
-    this._drainCollector1();
+    var collector1DidWork = this._drainCollector1();
     var collector2DidWork = await this._drainCollector2();
-    await this._drainCollector3();
+    var collector3DidWork = await this._drainCollector3();
     if (this.captureQueue.length || this.processQueue.length || this.writeQueue.length) {
       if (
         this._decodeInflight.size &&
@@ -1079,11 +1083,19 @@
       ) {
         return;
       }
-      this._schedulePump();
+      if (collector1DidWork || collector2DidWork || collector3DidWork) {
+        this._schedulePump();
+      } else {
+        // No forward progress this iteration (e.g., another pump call is mid
+        // collector3 write): retry on a timer so microtask spinning cannot
+        // starve IndexedDB callbacks and timers.
+        this._schedulePump(PUMP_STALL_RETRY_MS);
+      }
     }
   };
 
   FrameSpoolService.prototype._drainCollector1 = function () {
+    var moved = false;
     while (this.captureQueue.length && this.processQueue.length < this.processQueueMax) {
       var candidate = this.captureQueue[0];
       var est = Math.max(0, Number(candidate && candidate.estimatedBytes) || 0);
@@ -1092,8 +1104,10 @@
       this.captureQueueBytes = Math.max(0, this.captureQueueBytes - est);
       this.processQueueBytes += est;
       this.processQueue.push(item);
+      moved = true;
     }
     this._updateQueueByteHighWater();
+    return moved;
   };
 
   FrameSpoolService.prototype._drainCollector2 = async function () {
@@ -1143,8 +1157,9 @@
   };
 
   FrameSpoolService.prototype._drainCollector3 = async function () {
-    if (this._collector3Running) return;
+    if (this._collector3Running) return false;
     this._collector3Running = true;
+    var didWork = false;
     try {
       var writesInBatch = 0;
       while (this.writeQueue.length) {
@@ -1163,6 +1178,7 @@
           item.byteLength = 0;
           item.meta = null;
         }
+        didWork = true;
         writesInBatch += 1;
         if (writesInBatch >= COLLECTOR3_BATCH_SIZE) {
           writesInBatch = 0;
@@ -1173,6 +1189,7 @@
     } finally {
       this._collector3Running = false;
     }
+    return didWork;
   };
 
   FrameSpoolService.prototype._writeFrameItem = async function (item) {
@@ -1812,7 +1829,12 @@
 
   FrameSpoolService.prototype.gc = async function (options) {
     var opts = options || {};
-    var orphanMaxAgeMs = Math.max(60 * 1000, Number(opts.orphanMaxAgeMs) || (24 * 60 * 60 * 1000));
+    // An explicit orphanMaxAgeMs of 0 is honored so secure-at-rest purges can
+    // delete unreferenced frames regardless of age.
+    var orphanMaxAgeMsRaw = Number(opts.orphanMaxAgeMs);
+    var orphanMaxAgeMs = Number.isFinite(orphanMaxAgeMsRaw) && orphanMaxAgeMsRaw >= 0
+      ? orphanMaxAgeMsRaw
+      : (24 * 60 * 60 * 1000);
     var maxBytes = Math.max(64 * 1024 * 1024, Number(opts.maxBytes) || (1536 * 1024 * 1024));
     var activeSessions = new Set(uniqueStrings(opts.activeSessionIds));
 
