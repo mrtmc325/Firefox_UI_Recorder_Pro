@@ -18,6 +18,8 @@ function normalizeHotkeyBurstFps(value) {
 function burstPauseReasonLabel(reason) {
   const key = String(reason || "").trim().toLowerCase();
   if (!key) return "running";
+  if (key === "secure-at-rest") return "secure mode";
+  if (key === "redaction-policy") return "redaction policy";
   if (key === "mode-off") return "mode off";
   if (key === "inactive-recording") return "recording inactive";
   if (key === "paused") return "recording paused";
@@ -560,6 +562,8 @@ async function refresh() {
   document.getElementById("diff").checked = !!st.settings?.diffEnabled;
   document.getElementById("redact").checked = !!st.settings?.redactEnabled;
   document.getElementById("redact-user").checked = !!st.settings?.redactLoginUsernames;
+  document.getElementById("screenshot-redaction-mode").value = st.settings?.screenshotRedactionMode === "omit" ? "omit" : "none";
+  document.getElementById("secure-at-rest").checked = !!st.settings?.secureAtRestMode;
   document.getElementById("auto-idle").checked = !!st.settings?.autoPauseOnIdle;
   document.getElementById("idle-sec").value = st.settings?.idleThresholdSec ?? 60;
   document.getElementById("resume-focus").checked = !!st.settings?.resumeOnFocus;
@@ -724,6 +728,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("redact-user").addEventListener("change", async (e) => {
     await updateSettings({ redactLoginUsernames: !!e.target.checked });
+    await refresh();
+  });
+  document.getElementById("screenshot-redaction-mode").addEventListener("change", async (e) => {
+    await updateSettings({ screenshotRedactionMode: String(e.target.value || "none") });
+    await refresh();
+  });
+  document.getElementById("secure-at-rest").addEventListener("change", async (e) => {
+    await updateSettings({ secureAtRestMode: !!e.target.checked });
     await refresh();
   });
   document.getElementById("auto-idle").addEventListener("change", async (e) => {

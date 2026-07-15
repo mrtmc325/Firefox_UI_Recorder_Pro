@@ -91,6 +91,11 @@ const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TEXT_SPOOL_BYTE_CAP = 256 * 1024 * 1024;
 const AUDIO_SPOOL_BYTE_CAP = 512 * 1024 * 1024;
+const RAW_IMPORT_ZIP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const RAW_IMPORT_ZIP_MAX_ENTRIES = 60000;
+const RAW_IMPORT_ZIP_MAX_ENTRY_BYTES = 512 * 1024 * 1024;
+const RAW_IMPORT_ZIP_MAX_TOTAL_BYTES = RAW_IMPORT_ZIP_MAX_BYTES;
+const RAW_IMPORT_ZIP_MAX_CENTRAL_DIR_BYTES = 16 * 1024 * 1024;
 const SECTION_TEXT_MAX_BYTES = 2 * 1024 * 1024;
 const SECTION_MEDIA_UPLOAD_MAX_BYTES = 24 * 1024 * 1024;
 const GIF_EXPORT_MAX_BYTES = 256 * 1024 * 1024;
@@ -112,7 +117,8 @@ const SECTION_NARRATION_OPENAI_MODEL = "gpt-4o-mini-tts";
 const SECTION_TRANSCRIPTION_OPENAI_MODEL = "whisper-1";
 const SECTION_TRANSCRIPTION_OPENAI_MAX_BYTES = 24 * 1024 * 1024;
 const SECTION_NARRATION_OPENAI_MAX_CHARS = 12000;
-const SECTION_NARRATION_OPENAI_API_KEY_STORAGE = "__uiRecorderNarrationOpenAiApiKey";
+const SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE = "__uiRecorderNarrationOpenAiApiKeySession";
+const SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE = "__uiRecorderNarrationOpenAiApiKey";
 const SECTION_DESCRIPTION_MAX_CHARS = 200;
 const SECTION_NARRATION_OPENAI_VOICES = Object.freeze([
   "alloy",
@@ -708,6 +714,49 @@ async function requestOpenAiSpeechToTextTranscription(audioBlob, options = {}) {
   return normalized;
 }
 
+async function requestOpenAiTextToSpeechAudio(inputText, options = {}) {
+  const opts = isPlainObject(options) ? options : {};
+  const apiKey = String(opts.apiKey || "").trim();
+  if (!apiKey) {
+    throw new Error("Set an OpenAI API key to generate cloud voice audio.");
+  }
+  const text = String(inputText || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    throw new Error("Cloud voice sample text is empty.");
+  }
+  const model = String(opts.model || SECTION_NARRATION_OPENAI_MODEL).trim() || SECTION_NARRATION_OPENAI_MODEL;
+  const voice = normalizeSectionNarrationOpenAiVoice(opts.voice || "");
+  const responseFormat = String(opts.responseFormat || "mp3").trim() || "mp3";
+  const response = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      voice,
+      input: text,
+      response_format: responseFormat
+    })
+  });
+  if (!response.ok) {
+    let detail = "";
+    try { detail = await response.text(); } catch (_) {}
+    throw new Error(`OpenAI TTS request failed (${response.status}). ${String(detail || "").slice(0, 220)}`.trim());
+  }
+  const blob = await response.blob();
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  if (!bytes.length) throw new Error("Generated narration audio was empty.");
+  return {
+    bytes,
+    mime: String(blob.type || "audio/mpeg").trim() || "audio/mpeg",
+    model,
+    voice,
+    responseFormat
+  };
+}
+
 function collectScreenshotRefsFromEvents(events) {
   const refs = new Map();
   const source = Array.isArray(events) ? events : [];
@@ -911,6 +960,9 @@ function waitForMs(ms) {
 }
 
 async function persistSectionTextDocument(rawText, options = {}) {
+  if ((await resolveReportStorageContext()).secureAtRestMode) {
+    throw new Error("Secure-at-rest mode is on: section text is not persisted to disk.");
+  }
   if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.putTextFromBytes !== "function") {
     throw new Error("Text embedding requires local IndexedDB support.");
   }
@@ -944,6 +996,9 @@ async function persistSectionTextDocument(rawText, options = {}) {
 }
 
 async function persistSectionAudioDocument(rawBytes, options = {}) {
+  if ((await resolveReportStorageContext()).secureAtRestMode) {
+    throw new Error("Secure-at-rest mode is on: narration audio is not persisted to disk.");
+  }
   if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.putAudioFromBytes !== "function") {
     throw new Error("Audio embedding requires local IndexedDB support.");
   }
@@ -1161,10 +1216,21 @@ function scheduleFrameSpoolGc(delayMs = 1200) {
   frameSpoolGcTimer = setTimeout(async () => {
     frameSpoolGcTimer = null;
     if (!(await ensureFrameSpoolClientReady())) return;
+    let activeSessionIds = [];
+    try {
+      const recordingState = await browser.storage.local.get(["isRecording", "sessionId"]);
+      const isRecordingNow = !!(recordingState && recordingState.isRecording);
+      const activeSessionId = String((recordingState && recordingState.sessionId) || "").trim();
+      if (isRecordingNow && !activeSessionId) return;
+      if (isRecordingNow) activeSessionIds = [activeSessionId];
+    } catch (_) {
+      return;
+    }
     try {
       await frameSpoolClient.gc({
         maxBytes: FRAME_SPOOL_BYTE_CAP,
-        orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS
+        orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS,
+        activeSessionIds
       });
       if (typeof frameSpoolClient.gcText === "function") {
         await frameSpoolClient.gcText({
@@ -1517,8 +1583,18 @@ function buildStoredZip(entries) {
   return concatBytes([...localParts, ...centralParts, end]);
 }
 
-function parseStoredZip(buffer) {
+function parseStoredZip(buffer, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const maxArchiveBytes = Math.max(1024 * 1024, Number(opts.maxArchiveBytes) || RAW_IMPORT_ZIP_MAX_BYTES);
+  const maxEntries = Math.max(1, Number(opts.maxEntries) || RAW_IMPORT_ZIP_MAX_ENTRIES);
+  const maxEntryBytes = Math.max(1024, Number(opts.maxEntryBytes) || RAW_IMPORT_ZIP_MAX_ENTRY_BYTES);
+  const maxTotalBytes = Math.max(maxEntryBytes, Number(opts.maxTotalBytes) || RAW_IMPORT_ZIP_MAX_TOTAL_BYTES);
+  const maxCentralDirBytes = Math.max(1024, Number(opts.maxCentralDirBytes) || RAW_IMPORT_ZIP_MAX_CENTRAL_DIR_BYTES);
   const bytes = new Uint8Array(buffer);
+  if (!bytes.length) throw new Error("ZIP file is empty.");
+  if (bytes.length > maxArchiveBytes) {
+    throw new Error(`ZIP exceeds the ${formatByteCount(maxArchiveBytes)} import limit.`);
+  }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const minOffset = Math.max(0, bytes.length - 22 - 65535);
   let eocdOffset = -1;
@@ -1532,16 +1608,26 @@ function parseStoredZip(buffer) {
   if (eocdOffset < 0) throw new Error("Invalid ZIP: end-of-central-directory not found.");
 
   const entryCount = view.getUint16(eocdOffset + 10, true);
+  if (entryCount > maxEntries) {
+    throw new Error(`ZIP contains too many files (${entryCount}). Limit is ${maxEntries}.`);
+  }
   const centralSize = view.getUint32(eocdOffset + 12, true);
+  if (centralSize > maxCentralDirBytes) {
+    throw new Error(`ZIP central directory exceeds ${formatByteCount(maxCentralDirBytes)}.`);
+  }
   const centralOffset = view.getUint32(eocdOffset + 16, true);
   if (centralOffset + centralSize > bytes.length) {
     throw new Error("Invalid ZIP: central directory is truncated.");
   }
 
   const files = new Map();
+  let totalUncompressedBytes = 0;
   let ptr = centralOffset;
 
   for (let i = 0; i < entryCount; i++) {
+    if ((ptr + 46) > bytes.length) {
+      throw new Error("Invalid ZIP: central directory header is truncated.");
+    }
     if (view.getUint32(ptr, true) !== 0x02014b50) {
       throw new Error("Invalid ZIP: central directory entry is malformed.");
     }
@@ -1555,27 +1641,51 @@ function parseStoredZip(buffer) {
     const nameStart = ptr + 46;
     const nameEnd = nameStart + nameLen;
     if (nameEnd > bytes.length) throw new Error("Invalid ZIP: filename exceeds file bounds.");
+    const entryEnd = nameEnd + extraLen + commentLen;
+    if (entryEnd > bytes.length) throw new Error("Invalid ZIP: central directory entry extends past file bounds.");
     const name = decodeText(bytes.slice(nameStart, nameEnd));
+    const normalizedName = String(name || "").replace(/\\/g, "/").trim();
+    if (!normalizedName || normalizedName.includes("\u0000")) {
+      throw new Error("Invalid ZIP: entry filename is empty or malformed.");
+    }
+    if (normalizedName.startsWith("/") || normalizedName.startsWith("../") || normalizedName.includes("/../")) {
+      throw new Error(`Invalid ZIP: unsafe entry path "${normalizedName}".`);
+    }
+    if (files.has(normalizedName)) {
+      throw new Error(`Invalid ZIP: duplicate entry "${normalizedName}".`);
+    }
 
     if (method !== 0) {
       throw new Error(`Unsupported ZIP compression for "${name}". Use Store mode.`);
     }
+    if (compressedSize > maxEntryBytes || uncompressedSize > maxEntryBytes) {
+      throw new Error(`ZIP entry "${normalizedName}" exceeds per-file limit of ${formatByteCount(maxEntryBytes)}.`);
+    }
+    totalUncompressedBytes += uncompressedSize;
+    if (totalUncompressedBytes > maxTotalBytes) {
+      throw new Error(`ZIP uncompressed content exceeds ${formatByteCount(maxTotalBytes)}.`);
+    }
+    if ((localOffset + 30) > bytes.length) {
+      throw new Error(`Invalid ZIP: local header out of range for "${normalizedName}".`);
+    }
     if (view.getUint32(localOffset, true) !== 0x04034b50) {
-      throw new Error(`Invalid ZIP: local header missing for "${name}".`);
+      throw new Error(`Invalid ZIP: local header missing for "${normalizedName}".`);
     }
     const localNameLen = view.getUint16(localOffset + 26, true);
     const localExtraLen = view.getUint16(localOffset + 28, true);
     const dataStart = localOffset + 30 + localNameLen + localExtraLen;
     const dataEnd = dataStart + compressedSize;
-    if (dataEnd > bytes.length) throw new Error(`Invalid ZIP: data for "${name}" is truncated.`);
+    if (dataStart < 0 || dataEnd > bytes.length || dataEnd < dataStart) {
+      throw new Error(`Invalid ZIP: data for "${normalizedName}" is truncated.`);
+    }
 
     const payload = bytes.slice(dataStart, dataEnd);
     if (payload.length !== uncompressedSize) {
-      throw new Error(`Invalid ZIP: size mismatch for "${name}".`);
+      throw new Error(`Invalid ZIP: size mismatch for "${normalizedName}".`);
     }
-    files.set(name, payload);
+    files.set(normalizedName, payload);
 
-    ptr = nameEnd + extraLen + commentLen;
+    ptr = entryEnd;
   }
 
   return files;
@@ -1653,6 +1763,57 @@ function mergeReports(baseReport, incomingReport) {
   return merged;
 }
 
+const AUDIO_IMPORT_ALLOWED_MIME = Object.freeze(new Set([
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/ogg",
+  "audio/webm",
+  "audio/aac",
+  "audio/mp4",
+  "audio/m4a"
+]));
+
+const TEXT_IMPORT_ALLOWED_MIME = Object.freeze(new Set([
+  "text/plain",
+  "text/markdown",
+  "application/json"
+]));
+
+function normalizeImportedAudioMime(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return AUDIO_IMPORT_ALLOWED_MIME.has(raw) ? raw : "audio/mpeg";
+}
+
+function normalizeImportedTextMime(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return TEXT_IMPORT_ALLOWED_MIME.has(raw) ? raw : "text/plain";
+}
+
+function sniffImportedImageMime(bytes) {
+  if (!bytes || bytes.length < 12) return "";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return "image/gif";
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return "image/webp";
+  return "";
+}
+
+function sniffImportedAudioMime(bytes) {
+  if (!bytes || bytes.length < 12) return "";
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return "audio/mpeg";
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x41 && bytes[10] === 0x56 && bytes[11] === 0x45) return "audio/wav";
+  if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) return "audio/ogg";
+  if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) return "audio/mp4";
+  if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return "audio/webm";
+  return "";
+}
+
 function normalizeFrameManifestEntries(rawEntries) {
   if (!Array.isArray(rawEntries)) return [];
   return rawEntries.map((entry) => {
@@ -1664,7 +1825,7 @@ function normalizeFrameManifestEntries(rawEntries) {
       frameId,
       file,
       sessionId: String(entry.sessionId || "").trim(),
-      mime: String(entry.mime || "image/png"),
+      mime: normalizeSectionMediaImageMime(entry.mime) || "image/png",
       createdAtMs: Number(entry.createdAtMs) || Date.now(),
       width: Number(entry.width) || null,
       height: Number(entry.height) || null
@@ -1681,7 +1842,7 @@ function normalizeTextManifestEntries(rawEntries) {
     return {
       docId,
       file: String(entry.file || "").trim(),
-      mime: String(entry.mime || "text/plain"),
+      mime: normalizeImportedTextMime(entry.mime),
       createdAtMs: Number(entry.createdAtMs) || Date.now(),
       byteLength: Number(entry.byteLength) || 0,
       fileName: String(entry.fileName || "").trim(),
@@ -1700,7 +1861,7 @@ function normalizeAudioManifestEntries(rawEntries) {
     return {
       docId,
       file: String(entry.file || "").trim(),
-      mime: String(entry.mime || "audio/mpeg"),
+      mime: normalizeImportedAudioMime(entry.mime),
       createdAtMs: Number(entry.createdAtMs) || Date.now(),
       byteLength: Number(entry.byteLength) || 0,
       fileName: String(entry.fileName || "").trim(),
@@ -1719,10 +1880,18 @@ async function restoreFramesFromBundle(archive, frameEntries, importedReport) {
   const fallbackDataUrls = new Map();
   const canUseSpool = await ensureFrameSpoolClientReady();
   const entries = normalizeFrameManifestEntries(frameEntries);
+  let skippedCount = 0;
   for (const entry of entries) {
     const guessedPath = entry.file || `frames/${entry.frameId}.png`;
     const bytes = archive.get(guessedPath);
     if (!bytes || !bytes.length) continue;
+    // Trust the payload's magic bytes, not the manifest's declared MIME.
+    const sniffedMime = sniffImportedImageMime(bytes);
+    if (!sniffedMime) {
+      skippedCount += 1;
+      continue;
+    }
+    entry.mime = sniffedMime;
     if (canUseSpool) {
       try {
         await frameSpoolClient.putFrameFromBytes({
@@ -1755,21 +1924,27 @@ async function restoreFramesFromBundle(archive, frameEntries, importedReport) {
   });
   return {
     restoredCount: restored.size,
-    fallbackCount: fallbackDataUrls.size
+    fallbackCount: fallbackDataUrls.size,
+    skippedCount
   };
 }
 
 async function restoreTextsFromBundle(archive, textEntries, importedReport) {
   const entries = normalizeTextManifestEntries(textEntries);
-  if (!entries.length) return { restoredCount: 0 };
+  if (!entries.length) return { restoredCount: 0, skippedCount: 0 };
   if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.putTextFromBytes !== "function") {
     throw new Error("Text bundle detected, but local text spool is unavailable.");
   }
   let restoredCount = 0;
+  let skippedCount = 0;
   for (const entry of entries) {
     const filePath = entry.file || `texts/${entry.docId}.txt`;
     const bytes = archive.get(filePath);
     if (!bytes || !bytes.length) continue;
+    if (bytes.length > SECTION_TEXT_MAX_BYTES) {
+      skippedCount += 1;
+      continue;
+    }
     try {
       const text = decodeText(bytes);
       const ref = await frameSpoolClient.putTextFromBytes({
@@ -1785,20 +1960,32 @@ async function restoreTextsFromBundle(archive, textEntries, importedReport) {
       restoredCount += 1;
     } catch (_) {}
   }
-  return { restoredCount };
+  return { restoredCount, skippedCount };
 }
 
 async function restoreAudiosFromBundle(archive, audioEntries, importedReport) {
   const entries = normalizeAudioManifestEntries(audioEntries);
-  if (!entries.length) return { restoredCount: 0 };
+  if (!entries.length) return { restoredCount: 0, skippedCount: 0 };
   if (!(await ensureFrameSpoolClientReady()) || !frameSpoolClient || typeof frameSpoolClient.putAudioFromBytes !== "function") {
     throw new Error("Audio bundle detected, but local audio spool is unavailable.");
   }
   let restoredCount = 0;
+  let skippedCount = 0;
   for (const entry of entries) {
     const filePath = entry.file || `audio/${entry.docId}.${entry.fileType || detectAudioExtension(entry.mime, "mp3") || "mp3"}`;
     const bytes = archive.get(filePath);
     if (!bytes || !bytes.length) continue;
+    if (bytes.length > SECTION_MEDIA_UPLOAD_MAX_BYTES) {
+      skippedCount += 1;
+      continue;
+    }
+    // Trust the payload's magic bytes, not the manifest's declared MIME.
+    const sniffedMime = sniffImportedAudioMime(bytes);
+    if (!sniffedMime) {
+      skippedCount += 1;
+      continue;
+    }
+    entry.mime = sniffedMime;
     try {
       const ref = await frameSpoolClient.putAudioFromBytes({
         docId: entry.docId,
@@ -1814,7 +2001,7 @@ async function restoreAudiosFromBundle(archive, audioEntries, importedReport) {
       restoredCount += 1;
     } catch (_) {}
   }
-  return { restoredCount };
+  return { restoredCount, skippedCount };
 }
 
 function looksAutoGenerated(s) {
@@ -1889,9 +2076,100 @@ function el(tag, cls, text) {
   return n;
 }
 
+function reportIdentityKey(entry) {
+  if (!entry || typeof entry !== "object") return "";
+  const id = String(entry.id || "").trim();
+  if (id) return `id:${id}`;
+  const createdAt = String(entry.createdAt || "").trim();
+  const sessionId = String(entry.sessionId || "").trim();
+  if (!createdAt && !sessionId) return "";
+  return `meta:${createdAt}|${sessionId}`;
+}
+
 async function saveReports(reports) {
-  await browser.storage.local.set({ reports });
-  scheduleFrameSpoolSync(reports, 450);
+  const storageContext = await resolveReportStorageContext();
+  const pageReports = Array.isArray(reports) ? reports : [];
+  const stored = await storageContext.area.get(["reports"]);
+  const storedReports = Array.isArray(stored && stored.reports) ? stored.reports : [];
+  const knownKeys = new Set(pageReports.map(reportIdentityKey).filter(Boolean));
+  const unknownNewer = storedReports.filter((entry) => {
+    const key = reportIdentityKey(entry);
+    return key && !knownKeys.has(key);
+  });
+  const mergedReports = unknownNewer.length ? [...unknownNewer, ...pageReports] : pageReports;
+  const reportsMeta = { writer: "report", nonce: Date.now() };
+  if (storageContext.secureAtRestMode && storageContext.areaName === "session") {
+    await storageContext.area.set({ reports: mergedReports, reportsMeta });
+    await browser.storage.local.set({ reports: [], reportsMeta });
+  } else if (storageContext.secureAtRestMode) {
+    await browser.storage.local.set({ reports: sanitizeReportsForSecurePersistence(mergedReports), reportsMeta });
+  } else {
+    await browser.storage.local.set({ reports: mergedReports, reportsMeta });
+  }
+  scheduleFrameSpoolSync(mergedReports, 450);
+}
+
+function getExtensionSessionStorageArea() {
+  const area = browser && browser.storage ? browser.storage.session : null;
+  if (!area || typeof area.get !== "function" || typeof area.set !== "function") return null;
+  return area;
+}
+
+function sanitizeEventForSecurePersistence(ev) {
+  if (!ev || typeof ev !== "object") return ev;
+  const out = { ...ev };
+  out.screenshot = null;
+  out.screenshotRef = null;
+  out.screenshotHash = null;
+  out.screenshotSkipped = true;
+  out.screenshotSkipReason = "secure-at-rest";
+  out.sectionAudioRef = null;
+  out.sectionAudioMeta = null;
+  out.sectionTextRef = null;
+  out.sectionTextMeta = null;
+  out.burstAudioRef = null;
+  out.burstAudioMeta = null;
+  out.burstTextRef = null;
+  out.burstTextMeta = null;
+  if (out.annotation && typeof out.annotation === "object" && out.annotation.imageDataUrl) {
+    out.annotation = { ...out.annotation, imageDataUrl: null };
+  }
+  return out;
+}
+
+function sanitizeReportsForSecurePersistence(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((report) => {
+    if (!report || typeof report !== "object") return report;
+    const out = { ...report };
+    out.events = Array.isArray(report.events)
+      ? report.events.map(sanitizeEventForSecurePersistence)
+      : [];
+    return out;
+  });
+}
+
+async function resolveReportStorageContext() {
+  let secureAtRestMode = false;
+  try {
+    const settingsStored = await browser.storage.local.get(["settings"]);
+    const savedSettings = settingsStored && settingsStored.settings && typeof settingsStored.settings === "object"
+      ? settingsStored.settings
+      : null;
+    secureAtRestMode = !!(savedSettings && savedSettings.secureAtRestMode);
+  } catch (_) {}
+  const sessionArea = getExtensionSessionStorageArea();
+  if (secureAtRestMode && sessionArea) {
+    return { area: sessionArea, areaName: "session", secureAtRestMode: true };
+  }
+  return { area: browser.storage.local, areaName: "local", secureAtRestMode };
+}
+
+async function loadReportsFromStorage() {
+  const storageContext = await resolveReportStorageContext();
+  const stored = await storageContext.area.get(["reports"]);
+  const reports = Array.isArray(stored && stored.reports) ? stored.reports : [];
+  return { reports, storageContext };
 }
 
 function filterEvents(events, query, typeFilter, urlFilter) {
@@ -4648,7 +4926,7 @@ function buildExportHtml(report, options = {}) {
     : `<div class="viewer-playlist-empty">No sections available.</div>`;
 
   return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${title}</title>
+<html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; media-src data:; base-uri 'none'; form-action 'none'; object-src 'none'"><title>${title}</title>
 <style>
 :root{
   --ink:${preset.ink};
@@ -6781,8 +7059,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const idxParam = params.get("idx");
   if (isPrint) document.body.classList.add("print");
 
-  const stored = await browser.storage.local.get(["reports"]);
-  const reports = Array.isArray(stored.reports) ? stored.reports : [];
+  const { reports } = await loadReportsFromStorage();
   const root = document.getElementById("steps");
   const select = document.getElementById("report-select");
   const search = document.getElementById("search");
@@ -7186,42 +7463,48 @@ document.addEventListener("DOMContentLoaded", async () => {
     return nextVoice;
   }
 
-  function getSectionNarrationOpenAiApiKey() {
-    if (!sectionNarrationOpenAiApiKeyLoaded) {
-      let next = "";
-      try {
-        next = String(sessionStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE) || "").trim();
-      } catch (_) {
-        next = "";
-      }
-      if (!next) {
-        try {
-          next = String(localStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE) || "").trim();
-        } catch (_) {
-          next = "";
-        }
-        if (next) {
-          try { sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE, next); } catch (_) {}
-        }
-      }
-      try { localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE); } catch (_) {}
-      sectionNarrationOpenAiApiKeyCache = next;
-      sectionNarrationOpenAiApiKeyLoaded = true;
+  let sectionNarrationOpenAiApiKey = "";
+  let sectionNarrationOpenAiApiKeyLoaded = false;
+
+  function loadSectionNarrationOpenAiApiKey() {
+    if (sectionNarrationOpenAiApiKeyLoaded) return sectionNarrationOpenAiApiKey;
+    sectionNarrationOpenAiApiKeyLoaded = true;
+    try {
+      sectionNarrationOpenAiApiKey = String(sessionStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE) || "").trim();
+    } catch (_) {
+      sectionNarrationOpenAiApiKey = "";
     }
-    return sectionNarrationOpenAiApiKeyCache;
+    try {
+      const legacy = String(localStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE) || "").trim();
+      if (!sectionNarrationOpenAiApiKey && legacy) {
+        sectionNarrationOpenAiApiKey = legacy;
+        try {
+          sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE, sectionNarrationOpenAiApiKey);
+        } catch (_) {}
+      }
+      localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE);
+    } catch (_) {}
+    return sectionNarrationOpenAiApiKey;
+  }
+
+  function getSectionNarrationOpenAiApiKey() {
+    return loadSectionNarrationOpenAiApiKey();
   }
 
   function setSectionNarrationOpenAiApiKey(value) {
     const next = String(value || "").trim();
-    sectionNarrationOpenAiApiKeyCache = next;
+    sectionNarrationOpenAiApiKey = next;
     sectionNarrationOpenAiApiKeyLoaded = true;
     try {
-      if (!next) sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE);
-      else sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE, next);
+      if (!next) sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE);
+      else sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE, next);
     } catch (_) {}
-    try { localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_STORAGE); } catch (_) {}
+    try { localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE); } catch (_) {}
     return next;
   }
+
+  // Migrate + purge any legacy persisted key at page load, not lazily on first narration use.
+  loadSectionNarrationOpenAiApiKey();
 
   function normalizeTheme(theme) {
     return String(theme || "").toLowerCase() === "dark" ? "dark" : "light";
@@ -9397,6 +9680,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     audioVoiceSelect.className = "section-text-audio-select";
     audioVoiceWrap.appendChild(audioVoiceSelect);
     const audioCloudKeyBtn = el("button", "btn subtle btn-small", "Set API key");
+    const audioCloudVoiceTourBtn = el("button", "btn subtle btn-small", "Play cloud voice tour");
+    audioCloudVoiceTourBtn.setAttribute("title", "Play short OpenAI voice samples for each cloud voice");
+    audioCloudVoiceTourBtn.setAttribute("aria-label", "Play short OpenAI voice samples for each cloud voice");
     const audioTranscribeBtn = el("button", "btn ghost btn-small", "Transcribe audio file");
     audioTranscribeBtn.setAttribute("title", "Upload an audio file and transcribe it into section text");
     audioTranscribeBtn.setAttribute("aria-label", "Upload an audio file and transcribe it into section text");
@@ -9431,6 +9717,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     audioControls.appendChild(audioProviderWrap);
     audioControls.appendChild(audioVoiceWrap);
     audioControls.appendChild(audioCloudKeyBtn);
+    audioControls.appendChild(audioCloudVoiceTourBtn);
     audioControls.appendChild(audioTranscribeBtn);
     audioControls.appendChild(audioScrubWrap);
     audioControls.appendChild(audioSpeedWrap);
@@ -9472,7 +9759,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       typeof window.fetch === "function" &&
       typeof window.FileReader === "function"
     );
+    const supportsCloudVoiceTour = (
+      typeof window !== "undefined" &&
+      typeof window.fetch === "function" &&
+      typeof window.Audio === "function"
+    );
     let transcriptionInFlight = false;
+    let cloudVoiceTourInFlight = false;
+    let cloudVoiceTourToken = 0;
+    const cloudVoiceSampleCache = new Map();
+    let cloudVoiceTourAudio = null;
 
     const setStatus = (message, isError = false) => {
       status.textContent = String(message || "");
@@ -9506,6 +9802,177 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       audioTranscribeBtn.disabled = false;
       audioTranscribeBtn.textContent = "Transcribe audio file";
+    };
+
+    const refreshCloudVoiceTourControls = () => {
+      if (!supportsCloudVoiceTour) {
+        audioCloudVoiceTourBtn.disabled = true;
+        audioCloudVoiceTourBtn.textContent = "Voice tour unavailable";
+        return;
+      }
+      audioCloudVoiceTourBtn.disabled = false;
+      audioCloudVoiceTourBtn.textContent = cloudVoiceTourInFlight ? "Stop voice tour" : "Play cloud voice tour";
+    };
+
+    const mapCloudNarrationConsentMessage = (consentRaw) => {
+      const consent = isPlainObject(consentRaw) ? consentRaw : {};
+      const reason = String(consent.reason || "");
+      const detail = String(consent.detail || "").trim();
+      if (reason === "consent-denied") {
+        return WEBSITE_CONTENT_CONSENT_DENIED_MESSAGE;
+      }
+      if (reason.startsWith("permissions-api")) {
+        if (!detail) return WEBSITE_CONTENT_CONSENT_UNAVAILABLE_MESSAGE;
+        return `${WEBSITE_CONTENT_CONSENT_UNAVAILABLE_MESSAGE} (${detail.slice(0, 180)})`;
+      }
+      return WEBSITE_CONTENT_CONSENT_REQUIRED_MESSAGE;
+    };
+
+    const getCloudVoiceTourAudioElement = () => {
+      if (cloudVoiceTourAudio) return cloudVoiceTourAudio;
+      cloudVoiceTourAudio = new Audio();
+      cloudVoiceTourAudio.preload = "auto";
+      return cloudVoiceTourAudio;
+    };
+
+    const revokeCloudVoiceSamples = () => {
+      for (const sample of cloudVoiceSampleCache.values()) {
+        try {
+          if (sample && sample.url) URL.revokeObjectURL(sample.url);
+        } catch (_) {}
+      }
+      cloudVoiceSampleCache.clear();
+    };
+
+    const stopCloudVoiceTour = (reason = "stopped") => {
+      cloudVoiceTourToken += 1;
+      cloudVoiceTourInFlight = false;
+      if (cloudVoiceTourAudio) {
+        try { cloudVoiceTourAudio.pause(); } catch (_) {}
+        try { cloudVoiceTourAudio.currentTime = 0; } catch (_) {}
+      }
+      refreshCloudVoiceTourControls();
+      return reason;
+    };
+
+    const buildCloudVoiceSampleText = (voice) => {
+      const safeVoice = normalizeSectionNarrationOpenAiVoice(voice);
+      return `Voice preview for ${safeVoice}. This is a short cloud narration sample.`;
+    };
+
+    const ensureCloudVoiceSample = async (voice, apiKey) => {
+      const safeVoice = normalizeSectionNarrationOpenAiVoice(voice);
+      const cached = cloudVoiceSampleCache.get(safeVoice);
+      if (cached && cached.url) return cached;
+      const generated = await requestOpenAiTextToSpeechAudio(buildCloudVoiceSampleText(safeVoice), {
+        apiKey,
+        model: SECTION_NARRATION_OPENAI_MODEL,
+        voice: safeVoice,
+        responseFormat: "mp3"
+      });
+      const url = URL.createObjectURL(new Blob([generated.bytes], { type: generated.mime || "audio/mpeg" }));
+      const sample = {
+        voice: safeVoice,
+        url,
+        mime: generated.mime || "audio/mpeg",
+        byteLength: generated.bytes.length
+      };
+      cloudVoiceSampleCache.set(safeVoice, sample);
+      return sample;
+    };
+
+    const playCloudVoiceSample = async (sample, token) => {
+      const preview = sample && typeof sample === "object" ? sample : null;
+      if (!preview || !preview.url) throw new Error("Voice sample audio is unavailable.");
+      const audio = getCloudVoiceTourAudioElement();
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        const timeoutId = setTimeout(() => {
+          cleanup();
+          resolve(false);
+        }, 30000);
+        const cleanup = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          audio.removeEventListener("ended", onEnded);
+          audio.removeEventListener("error", onError);
+          audio.removeEventListener("pause", onPause);
+        };
+        const onEnded = () => {
+          cleanup();
+          resolve(true);
+        };
+        const onError = () => {
+          cleanup();
+          reject(new Error("Cloud voice sample playback failed."));
+        };
+        const onPause = () => {
+          if (token !== cloudVoiceTourToken || !cloudVoiceTourInFlight) {
+            cleanup();
+            resolve(false);
+          }
+        };
+        audio.addEventListener("ended", onEnded);
+        audio.addEventListener("error", onError, { once: true });
+        audio.addEventListener("pause", onPause);
+        try {
+          audio.src = preview.url;
+          audio.currentTime = 0;
+          const playing = audio.play();
+          Promise.resolve(playing).catch((err) => {
+            cleanup();
+            reject(err);
+          });
+        } catch (err) {
+          cleanup();
+          reject(err);
+        }
+      });
+    };
+
+    const runCloudVoiceTour = async () => {
+      if (cloudVoiceTourInFlight) {
+        stopCloudVoiceTour("manual-stop");
+        setStatus("Cloud voice tour stopped.");
+        return;
+      }
+      const cloudKey = getSectionNarrationOpenAiApiKey();
+      if (!cloudKey) {
+        setStatus("Set an OpenAI API key before running cloud voice tour.", true);
+        return;
+      }
+      const preflightConsent = await ensureWebsiteContentConsent({ interactive: true });
+      if (!preflightConsent || !preflightConsent.ok) {
+        setStatus(mapCloudNarrationConsentMessage(preflightConsent), true);
+        return;
+      }
+      if (narrator) narrator.pause();
+      cloudVoiceTourInFlight = true;
+      const tourSeq = ++cloudVoiceTourToken;
+      refreshCloudVoiceTourControls();
+      try {
+        const voices = SECTION_NARRATION_OPENAI_VOICES.slice(0);
+        for (let i = 0; i < voices.length; i++) {
+          if (tourSeq !== cloudVoiceTourToken) return;
+          const voice = normalizeSectionNarrationOpenAiVoice(voices[i]);
+          setStatus(`Preparing cloud voice sample ${i + 1}/${voices.length}: ${voice}...`);
+          const sample = await ensureCloudVoiceSample(voice, cloudKey);
+          if (tourSeq !== cloudVoiceTourToken) return;
+          setStatus(`Playing cloud voice sample ${i + 1}/${voices.length}: ${voice}`);
+          await playCloudVoiceSample(sample, tourSeq);
+          if (tourSeq !== cloudVoiceTourToken) return;
+          await new Promise((resolve) => setTimeout(resolve, 140));
+        }
+        setStatus("Cloud voice tour complete.");
+      } catch (err) {
+        setStatus((err && err.message) || "Cloud voice tour failed.", true);
+      } finally {
+        if (tourSeq === cloudVoiceTourToken) {
+          cloudVoiceTourInFlight = false;
+          refreshCloudVoiceTourControls();
+        }
+      }
     };
 
     const insertTranscriptionIntoEditor = (transcript) => {
@@ -9819,7 +10286,9 @@ document.addEventListener("DOMContentLoaded", async () => {
             ref: cloneSectionAudioRef(currentAudioRef),
             meta: cloneSectionAudioMeta(currentAudioMeta)
           });
-        } catch (_) {}
+        } catch (err) {
+          setStatus(String((err && err.message) || "Failed to persist narration audio."), true);
+        }
       },
       onActivate: () => {
         promoteActiveNarrationController(narrator);
@@ -9835,6 +10304,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     const narratorDestroy = narrator.destroy.bind(narrator);
     narrator.destroy = (reason = "destroy") => {
+      stopCloudVoiceTour(`narrator-${reason}`);
+      revokeCloudVoiceSamples();
+      if (cloudVoiceTourAudio) {
+        try { cloudVoiceTourAudio.src = ""; } catch (_) {}
+        cloudVoiceTourAudio = null;
+      }
       if (typeof unsubscribeVoiceUpdates === "function") {
         try { unsubscribeVoiceUpdates(); } catch (_) {}
         unsubscribeVoiceUpdates = null;
@@ -9886,6 +10361,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
       } else if (narrator) {
         narrator.pause();
+        stopCloudVoiceTour("panel-closed");
       }
     });
 
@@ -10065,13 +10541,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     audioCloudKeyBtn.addEventListener("click", () => {
+      const hasExisting = !!getSectionNarrationOpenAiApiKey();
       const next = prompt(
-        "Enter OpenAI API key for cloud narration and audio transcription (leave empty to clear):"
+        `Enter OpenAI API key for cloud narration and audio transcription (session only; cleared when this tab closes).${hasExisting ? " A key is currently set for this tab; leave empty to keep it." : ""}`,
+        ""
       );
       if (next === null) return;
-      const saved = setSectionNarrationOpenAiApiKey(next);
-      if (saved) setStatus("OpenAI API key saved for this report-tab session only.");
+      const trimmed = String(next).trim();
+      if (!trimmed && hasExisting) {
+        if (!confirm("No key entered. Clear the API key currently set for this tab?")) {
+          setStatus("Existing OpenAI API key kept for this tab.");
+          return;
+        }
+      }
+      const saved = setSectionNarrationOpenAiApiKey(trimmed);
+      stopCloudVoiceTour("api-key-updated");
+      revokeCloudVoiceSamples();
+      if (saved) setStatus("OpenAI API key saved for this tab session only (not persisted to disk).");
       else setStatus("OpenAI API key cleared.");
+    });
+
+    audioCloudVoiceTourBtn.addEventListener("click", () => {
+      void runCloudVoiceTour();
     });
 
     audioTranscribeBtn.addEventListener("click", () => {
@@ -10120,6 +10611,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     refreshTranscriptionControls();
+    refreshCloudVoiceTourControls();
 
     return panel;
   }
@@ -11444,8 +11936,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (urlFilter) urlFilter.addEventListener("input", () => scheduleRender());
 
   async function importRawBundle(file, mode) {
+    if (!file || !(file.size > 0)) {
+      throw new Error("Select a non-empty ZIP file.");
+    }
+    if (file.size > RAW_IMPORT_ZIP_MAX_BYTES) {
+      throw new Error(`ZIP exceeds the ${formatByteCount(RAW_IMPORT_ZIP_MAX_BYTES)} import limit.`);
+    }
     setImportStatus("Importing raw ZIP bundle...", false);
-    const archive = parseStoredZip(await file.arrayBuffer());
+    const archive = parseStoredZip(await file.arrayBuffer(), {
+      maxArchiveBytes: RAW_IMPORT_ZIP_MAX_BYTES,
+      maxEntries: RAW_IMPORT_ZIP_MAX_ENTRIES,
+      maxEntryBytes: RAW_IMPORT_ZIP_MAX_ENTRY_BYTES,
+      maxTotalBytes: RAW_IMPORT_ZIP_MAX_TOTAL_BYTES,
+      maxCentralDirBytes: RAW_IMPORT_ZIP_MAX_CENTRAL_DIR_BYTES
+    });
     const manifestBytes = archive.get("manifest.json");
     const reportBytes = archive.get("report.json");
     const frameManifestBytes = archive.get("frame-manifest.json");
@@ -11476,10 +11980,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       reportPayload = reportPayload.report;
     }
     const importedReport = normalizeImportedReport(reportPayload);
+    let skippedAssetCount = 0;
     if (frameManifestBytes) {
       const frameEntries = parseOptionalManifestEntries(frameManifestBytes, "frame-manifest.json", "frames");
       try {
-        await restoreFramesFromBundle(archive, frameEntries, importedReport);
+        const frameRestore = await restoreFramesFromBundle(archive, frameEntries, importedReport);
+        skippedAssetCount += Number(frameRestore && frameRestore.skippedCount) || 0;
       } catch (err) {
         const detail = String((err && err.message) || err || "unknown error");
         throw new Error(`Failed to restore frame assets from frame-manifest.json: ${detail}`);
@@ -11488,7 +11994,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (textManifestBytes) {
       const textEntries = parseOptionalManifestEntries(textManifestBytes, "text-manifest.json", "texts");
       try {
-        await restoreTextsFromBundle(archive, textEntries, importedReport);
+        const textRestore = await restoreTextsFromBundle(archive, textEntries, importedReport);
+        skippedAssetCount += Number(textRestore && textRestore.skippedCount) || 0;
       } catch (err) {
         const detail = String((err && err.message) || err || "unknown error");
         throw new Error(`Failed to restore text assets from text-manifest.json: ${detail}`);
@@ -11497,27 +12004,43 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (audioManifestBytes) {
       const audioEntries = parseOptionalManifestEntries(audioManifestBytes, "audio-manifest.json", "audio");
       try {
-        await restoreAudiosFromBundle(archive, audioEntries, importedReport);
+        const audioRestore = await restoreAudiosFromBundle(archive, audioEntries, importedReport);
+        skippedAssetCount += Number(audioRestore && audioRestore.skippedCount) || 0;
       } catch (err) {
         const detail = String((err && err.message) || err || "unknown error");
         throw new Error(`Failed to restore audio assets from audio-manifest.json: ${detail}`);
       }
     }
+    const skippedNote = skippedAssetCount
+      ? ` Skipped ${skippedAssetCount} bundle asset(s) that failed validation or size limits.`
+      : "";
 
     if (mode === "merge" && hasReport) {
       const merged = mergeReports(report, importedReport);
+      const backup = { ...report };
       Object.keys(report).forEach((key) => { delete report[key]; });
       Object.assign(report, merged);
-      await saveReports(reports);
+      try {
+        await saveReports(reports);
+      } catch (err) {
+        Object.keys(report).forEach((key) => { delete report[key]; });
+        Object.assign(report, backup);
+        throw err;
+      }
       refreshMeta();
-      setImportStatus(`Merged ${importedReport.events.length} steps into current report.`, false);
+      setImportStatus(`Merged ${importedReport.events.length} steps into current report.${skippedNote}`, false);
       render();
       return;
     }
 
     reports.unshift(importedReport);
+    const removedReportCount = reports.length > 3 ? reports.length - 3 : 0;
+    if (removedReportCount) reports.length = 3;
+    const retentionNote = removedReportCount
+      ? ` Retention keeps the 3 most recent reports; ${removedReportCount} older report(s) removed.`
+      : "";
     await saveReports(reports);
-    setImportStatus(`Imported report with ${importedReport.events.length} steps.`, false);
+    setImportStatus(`Imported report with ${importedReport.events.length} steps.${skippedNote}${retentionNote}`, false);
     const url = new URL(location.href);
     url.searchParams.set("idx", "0");
     if (isPrint) url.searchParams.set("print", "1");

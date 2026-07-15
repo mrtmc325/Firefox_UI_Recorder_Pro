@@ -106,6 +106,17 @@
           <input id="redact-user" type="checkbox" />
         </label>
         <label class="row">
+          Screenshot redaction policy
+          <select id="screenshot-redaction-mode">
+            <option value="none">Capture screenshots</option>
+            <option value="omit">Omit all screenshots</option>
+          </select>
+        </label>
+        <label class="row">
+          Secure-at-rest mode (session-only storage, no screenshots)
+          <input id="secure-at-rest" type="checkbox" />
+        </label>
+        <label class="row">
           Auto-pause on idle
           <input id="auto-idle" type="checkbox" />
         </label>
@@ -160,7 +171,7 @@
       </summary>
       <div class="settings-group-body">
         <div class="hint">
-          Screenshots are unmodified. Only report text is redacted. Hotkeys: Ctrl+Shift+Y (record), Cmd+Opt+G/Ctrl+Alt+G (GIF capture toggle at selected FPS while recording). GIF mode is hotkey-only.
+          Screenshots can be omitted with the redaction policy. Secure-at-rest mode disables screenshot capture and keeps recorder state in session-only storage (falls back to a sanitized local skeleton without screenshots on older Firefox). Hotkeys: Ctrl+Shift+Y (record), Cmd+Opt+G/Ctrl+Alt+G (GIF capture toggle at selected FPS while recording). GIF mode is hotkey-only.
         </div>
       </div>
     </details>
