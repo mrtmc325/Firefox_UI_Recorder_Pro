@@ -13,6 +13,8 @@ let settings = {
 
   redactEnabled: true,
   redactLoginUsernames: true,
+  screenshotRedactionMode: "none",
+  secureAtRestMode: false,
 
   captureMode: "all",
   activeTabOnly: true,
@@ -25,7 +27,7 @@ let settings = {
   pageWatchMs: 500,
   hotkeyBurstFps: 5,
   hotkeyBurstImageFormat: "jpeg",
-  hotkeyBurstJpegQuality: 75,
+  hotkeyBurstJpegQuality: 38,
   burstStabilityMode: true,
   burstMaxEffectiveFps: 10,
   clickBurstMarkerColor: "#2563eb",
@@ -68,11 +70,15 @@ let burstCaptureLastTs = 0;
 let burstCaptureQueue = Promise.resolve();
 let burstContinuousTimer = null;
 let burstContinuousInFlight = false;
+let burstContinuousTickSeq = 0;
 let burstLoopActive = false;
 let burstLastFrameAtMs = 0;
 let burstLastLoopPauseReason = "mode-off";
 let burstLoopLastPersistAtMs = 0;
 let burstLoopPersistInFlight = false;
+let recordEventPersistTimer = null;
+let recordEventPersistLastAtMs = 0;
+let reportsMetaNonce = Date.now();
 let recordingStartedAtMs = 0;
 let lifecycleQueue = Promise.resolve();
 let pendingHotkeyStopTimer = null;
@@ -87,6 +93,7 @@ let stopFinalizationState = {
   updatedAtMs: null,
   source: null,
   lastError: null,
+  drainOutcome: null,
   droppedBurstFrames: 0
 };
 let burstCaptureFailureStreak = 0;
@@ -118,7 +125,7 @@ const HOTKEY_BURST_DEFAULT_FPS = 5;
 const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
 const HOTKEY_BURST_IMAGE_FORMAT_OPTIONS = new Set(["jpeg", "png"]);
 const HOTKEY_BURST_DEFAULT_IMAGE_FORMAT = "jpeg";
-const HOTKEY_BURST_DEFAULT_JPEG_QUALITY = 75;
+const HOTKEY_BURST_DEFAULT_JPEG_QUALITY = 38;
 const HOTKEY_BURST_STABILITY_MAX_FPS_DEFAULT = 10;
 const HOTKEY_BURST_STABILITY_MAX_FPS_MIN = 4;
 const HOTKEY_BURST_STABILITY_MAX_FPS_MAX = 15;
@@ -134,55 +141,10 @@ const BURST_BACKOFF_NO_ACTIVE_TAB_MS = 250;
 const BURST_BACKOFF_BACKPRESSURE_MIN_MS = 180;
 const BURST_CURSOR_SAMPLE_MAX_AGE_MS = 1400;
 const STOP_LIFECYCLE_CAPTURE_TIMEOUT_MS = 600;
-const SECTION_MIC_PROXY_ENABLED = false;
-const SECTION_MIC_PROXY_MAX_BYTES = 24 * 1024 * 1024;
-const SECTION_MIC_PROXY_MAX_DURATION_MS = 5 * 60 * 1000;
-const MIC_PROXY_SESSION_MAX_AGE_MS = 8 * 60 * 1000;
-const MIC_PROXY_PREPARE_TIMEOUT_MS = 8 * 1000;
-const MIC_PROXY_ARM_EXPIRY_MS = 90 * 1000;
-const MIC_PROXY_START_CONFIRM_TIMEOUT_MS = 15 * 1000;
-const SECTION_MIC_PROXY_INJECT_TIMEOUT_MS = 10 * 1000;
-const SECTION_MIC_PROXY_STOP_RESPONSE_TIMEOUT_MS = 15 * 1000;
-const SECTION_MIC_PROXY_DISCARD_RESPONSE_TIMEOUT_MS = 8 * 1000;
-const MIC_DIAG_STORAGE_KEY = "__uiRecorderMicDiag";
-const MIC_DIAG_MAX_ENTRIES = 300;
-const MIC_DIAG_TTL_MS = 24 * 60 * 60 * 1000;
-const MIC_PROXY_STATE = Object.freeze({
-  NONE: "none",
-  AWAITING_USER_START: "awaiting-user-start",
-  STARTING: "starting",
-  RECORDING: "recording",
-  STOPPING: "stopping",
-  FAILED: "failed",
-  EXPIRED: "expired"
-});
-const MIC_PROXY_REASON = Object.freeze({
-  NONE: "",
-  ARM_EXPIRED: "arm-expired",
-  START_CONFIRM_TIMEOUT: "start-confirm-timeout",
-  TARGET_NOT_INJECTABLE: "target-not-injectable",
-  NO_ELIGIBLE_TAB: "no-eligible-tab",
-  PREPARE_TIMEOUT: "prepare-timeout",
-  PROXY_STATUS_TIMEOUT: "proxy-status-timeout",
-  PROXY_START_FAILED: "proxy-start-failed",
-  PROXY_STOP_FAILED: "proxy-stop-failed",
-  PROXY_DISCARD_FAILED: "proxy-discard-failed",
-  SESSION_NOT_FOUND: "session-not-found",
-  SESSION_OWNER_MISMATCH: "session-owner-mismatch",
-  SESSION_STATE_INVALID: "session-state-invalid",
-  TAB_CONTEXT_UNAVAILABLE: "tab-context-unavailable",
-  PERMISSION_DENIED: "permission-denied",
-  NOT_FOUND: "not-found",
-  ATTACH_FAILED: "attach-failed",
-  RECORDER_FAILED: "recorder-failed"
-});
-const micProxySessions = new Map();
-const micProxyOwnerSessionByTabId = new Map();
-const micProxyArmTimers = new Map();
-const micProxyStartConfirmTimers = new Map();
-const lastUsableWebTabByWindow = new Map();
-let micDiagBuffer = [];
-let micDiagPersistTimer = null;
+const STOP_FINALIZATION_DRAIN_TIMEOUT_MS = 15000;
+const RECORD_EVENT_PERSIST_MIN_INTERVAL_MS = 1500;
+const PENDING_STOP_SNAPSHOT_KEY = "__uiRecorderPendingStopSnapshot";
+const SCREENSHOT_REDACTION_MODES = new Set(["none", "omit"]);
 
 const frameSpool = (
   typeof self !== "undefined" &&
@@ -208,6 +170,8 @@ let frameSpoolMaintenanceTimer = null;
 function normalizeBurstLoopPauseReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
   if (!text) return "mode-off";
+  if (text.includes("secure-at-rest")) return "secure-at-rest";
+  if (text.includes("redaction")) return "redaction-policy";
   if (text.includes("paused")) return "paused";
   if (text.includes("no-active-tab") || text.includes("skip-tab")) return "no-active-tab";
   if (text.includes("capture-failed") || text.includes("capture-skip")) return "capture-failed";
@@ -398,6 +362,7 @@ function getStopFinalizationStateSnapshot() {
     updatedAtMs: Number(stopFinalizationState.updatedAtMs) || null,
     source: stopFinalizationState.source || null,
     lastError: stopFinalizationState.lastError || null,
+    drainOutcome: stopFinalizationState.drainOutcome || null,
     droppedBurstFrames: Number(stopFinalizationState.droppedBurstFrames) || 0
   };
 }
@@ -554,9 +519,13 @@ async function runFrameSpoolGc(reason, opts = {}) {
     const activeSessionIds = Array.isArray(opts.activeSessionIds)
       ? opts.activeSessionIds
       : (isRecording && sessionId ? [sessionId] : []);
+    const orphanMaxAgeMsRaw = Number(opts.orphanMaxAgeMs);
+    const orphanMaxAgeMs = Number.isFinite(orphanMaxAgeMsRaw) && orphanMaxAgeMsRaw >= 0
+      ? orphanMaxAgeMsRaw
+      : FRAME_SPOOL_ORPHAN_MAX_AGE_MS;
     const result = await frameSpool.gc({
       activeSessionIds,
-      orphanMaxAgeMs: FRAME_SPOOL_ORPHAN_MAX_AGE_MS,
+      orphanMaxAgeMs,
       maxBytes: FRAME_SPOOL_BYTE_CAP
     });
     bgLog("frame-spool:gc", { reason, ...result });
@@ -1026,7 +995,6 @@ async function refreshActiveCaptureTarget(reason, options = {}) {
     activeCaptureTabUrl = String(tab.url || "");
     activeCaptureTabTitle = String(tab.title || "");
     activeCaptureUpdatedAt = Date.now();
-    rememberUsableWebTab(tab, `${reason}:refresh`);
     bgLog("active-target:set", {
       reason,
       tabId: activeCaptureTabId,
@@ -1049,461 +1017,9 @@ function isEventFromActiveTarget(senderTab) {
 
 function isInjectableTabUrl(url) {
   if (!url || typeof url !== "string") return false;
+  // Manifest host permissions only grant http/https; anything else cannot be injected.
   const u = url.toLowerCase();
-  return !(
-    u.startsWith("about:") ||
-    u.startsWith("moz-extension:") ||
-    u.startsWith("chrome:") ||
-    u.startsWith("resource:") ||
-    u.startsWith("view-source:")
-  );
-}
-
-function newMicProxySessionId() {
-  return `mic-proxy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function buildMicProxyFailure(reason, error) {
-  return {
-    ok: false,
-    reason: String(reason || "proxy-failed"),
-    error: String(error || "Site microphone proxy failed.")
-  };
-}
-
-function buildMicProxyStatusPayload(session) {
-  if (!session || typeof session !== "object") {
-    return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
-  }
-  return {
-    ok: true,
-    sessionId: String(session.sessionId || ""),
-    state: normalizeMicProxyState(session.state),
-    reason: String(session.reason || ""),
-    error: String(session.error || ""),
-    tabId: typeof session.targetTabId === "number" ? session.targetTabId : null,
-    tabUrl: String(session.targetTabUrl || ""),
-    mimeType: String(session.mimeType || "audio/webm")
-  };
-}
-
-function normalizeMicProxyState(stateRaw) {
-  const state = String(stateRaw || "").trim().toLowerCase();
-  if (state === MIC_PROXY_STATE.AWAITING_USER_START) return MIC_PROXY_STATE.AWAITING_USER_START;
-  if (state === MIC_PROXY_STATE.STARTING) return MIC_PROXY_STATE.STARTING;
-  if (state === MIC_PROXY_STATE.RECORDING) return MIC_PROXY_STATE.RECORDING;
-  if (state === MIC_PROXY_STATE.STOPPING) return MIC_PROXY_STATE.STOPPING;
-  if (state === MIC_PROXY_STATE.FAILED) return MIC_PROXY_STATE.FAILED;
-  if (state === MIC_PROXY_STATE.EXPIRED) return MIC_PROXY_STATE.EXPIRED;
-  return MIC_PROXY_STATE.NONE;
-}
-
-function parseTabHost(url) {
-  const raw = String(url || "").trim();
-  if (!raw) return "";
-  try {
-    return String(new URL(raw).host || "").trim();
-  } catch (_) {
-    return "";
-  }
-}
-
-function newMicDiagId() {
-  return `mdiag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function pruneMicDiagBuffer(entriesRaw, nowMs = Date.now()) {
-  const cutoff = Math.max(0, nowMs - MIC_DIAG_TTL_MS);
-  const source = Array.isArray(entriesRaw) ? entriesRaw : [];
-  const pruned = source
-    .filter((entry) => entry && typeof entry === "object")
-    .filter((entry) => Number(entry.ts) >= cutoff)
-    .slice(-MIC_DIAG_MAX_ENTRIES);
-  return pruned;
-}
-
-function schedulePersistMicDiagBuffer() {
-  if (micDiagPersistTimer) clearTimeout(micDiagPersistTimer);
-  micDiagPersistTimer = setTimeout(async () => {
-    micDiagPersistTimer = null;
-    try {
-      micDiagBuffer = pruneMicDiagBuffer(micDiagBuffer);
-      await browser.storage.local.set({ [MIC_DIAG_STORAGE_KEY]: micDiagBuffer });
-    } catch (err) {
-      bgWarn("mic-diag:persist-failed", { error: formatError(err) });
-    }
-  }, 180);
-}
-
-function appendMicDiag(entryRaw) {
-  const entry = entryRaw && typeof entryRaw === "object" ? entryRaw : {};
-  const nowMs = Date.now();
-  const stored = {
-    id: String(entry.id || newMicDiagId()),
-    ts: Number(entry.ts) || nowMs,
-    source: String(entry.source || "unknown"),
-    event: String(entry.event || "unknown"),
-    sessionId: String(entry.sessionId || ""),
-    requestId: Number(entry.requestId) || 0,
-    ownerTabId: Number.isFinite(Number(entry.ownerTabId)) ? Number(entry.ownerTabId) : null,
-    targetTabId: Number.isFinite(Number(entry.targetTabId)) ? Number(entry.targetTabId) : null,
-    frameId: Number.isFinite(Number(entry.frameId)) ? Number(entry.frameId) : 0,
-    state: normalizeMicProxyState(entry.state),
-    reason: String(entry.reason || ""),
-    durationMs: Number.isFinite(Number(entry.durationMs)) ? Number(entry.durationMs) : 0,
-    deviceCount: Number.isFinite(Number(entry.deviceCount)) ? Number(entry.deviceCount) : -1,
-    consentState: String(entry.consentState || ""),
-    errorName: String(entry.errorName || ""),
-    errorCode: String(entry.errorCode || "")
-  };
-  micDiagBuffer.push(stored);
-  micDiagBuffer = pruneMicDiagBuffer(micDiagBuffer, nowMs);
-  schedulePersistMicDiagBuffer();
-  return stored;
-}
-
-function logMicDiag(source, event, details = {}) {
-  const payload = details && typeof details === "object" ? details : {};
-  appendMicDiag({
-    source: String(source || "unknown"),
-    event: String(event || "unknown"),
-    sessionId: String(payload.sessionId || ""),
-    requestId: Number(payload.requestId) || 0,
-    ownerTabId: payload.ownerTabId,
-    targetTabId: payload.targetTabId,
-    frameId: payload.frameId,
-    state: payload.state,
-    reason: payload.reason,
-    durationMs: payload.durationMs,
-    deviceCount: payload.deviceCount,
-    consentState: payload.consentState,
-    errorName: payload.errorName,
-    errorCode: payload.errorCode
-  });
-}
-
-function getMicProxySessionForOwner(ownerTabId) {
-  if (typeof ownerTabId !== "number") return null;
-  const sessionId = micProxyOwnerSessionByTabId.get(ownerTabId);
-  if (!sessionId) return null;
-  const session = micProxySessions.get(sessionId);
-  if (!session) {
-    micProxyOwnerSessionByTabId.delete(ownerTabId);
-    return null;
-  }
-  return session;
-}
-
-function clearMicProxyTimer(timerMap, sessionId) {
-  if (!timerMap || !sessionId) return;
-  if (!timerMap.has(sessionId)) return;
-  const timerId = timerMap.get(sessionId);
-  timerMap.delete(sessionId);
-  if (timerId) {
-    try { clearTimeout(timerId); } catch (_) {}
-  }
-}
-
-function setMicProxySessionState(session, nextState, details = {}) {
-  if (!session || typeof session !== "object") return null;
-  const previousState = normalizeMicProxyState(session.state);
-  const normalizedState = normalizeMicProxyState(nextState);
-  const reason = details && Object.prototype.hasOwnProperty.call(details, "reason")
-    ? String(details.reason || "")
-    : String(session.reason || "");
-  const error = details && Object.prototype.hasOwnProperty.call(details, "error")
-    ? String(details.error || "")
-    : String(session.error || "");
-  session.state = normalizedState;
-  session.reason = reason;
-  session.error = error;
-  session.updatedAtMs = Date.now();
-  if (normalizedState === MIC_PROXY_STATE.RECORDING && !session.startedAtMs) {
-    session.startedAtMs = session.updatedAtMs;
-  }
-  if (
-    normalizedState === MIC_PROXY_STATE.RECORDING ||
-    normalizedState === MIC_PROXY_STATE.STOPPING ||
-    normalizedState === MIC_PROXY_STATE.FAILED ||
-    normalizedState === MIC_PROXY_STATE.EXPIRED ||
-    normalizedState === MIC_PROXY_STATE.NONE
-  ) {
-    clearMicProxyTimer(micProxyArmTimers, String(session.sessionId || ""));
-  }
-  if (
-    normalizedState === MIC_PROXY_STATE.RECORDING ||
-    normalizedState === MIC_PROXY_STATE.STOPPING ||
-    normalizedState === MIC_PROXY_STATE.FAILED ||
-    normalizedState === MIC_PROXY_STATE.EXPIRED ||
-    normalizedState === MIC_PROXY_STATE.NONE
-  ) {
-    clearMicProxyTimer(micProxyStartConfirmTimers, String(session.sessionId || ""));
-  }
-  if (normalizedState !== previousState || reason || error) {
-    logMicDiag("background", "mic-proxy-state", {
-      sessionId: session.sessionId,
-      ownerTabId: session.ownerTabId,
-      targetTabId: session.targetTabId,
-      state: normalizedState,
-      reason,
-      errorName: error ? "state-error" : "",
-      errorCode: reason || ""
-    });
-  }
-  return session;
-}
-
-async function sendMicProxyHidePrompt(tabId, sessionId, reason) {
-  if (typeof tabId !== "number") return;
-  try {
-    await withTimeout(
-      browser.tabs.sendMessage(tabId, {
-        type: "UIR_SECTION_MIC_PROXY_HIDE_ARM",
-        sessionId: String(sessionId || ""),
-        reason: String(reason || "")
-      }, { frameId: 0 }),
-      SECTION_MIC_PROXY_DISCARD_RESPONSE_TIMEOUT_MS,
-      "Timed out hiding workflow tab microphone prompt."
-    );
-  } catch (_) {}
-}
-
-function scheduleMicProxyArmExpiry(sessionId) {
-  const key = String(sessionId || "").trim();
-  if (!key) return;
-  clearMicProxyTimer(micProxyArmTimers, key);
-  const timerId = setTimeout(async () => {
-    const session = micProxySessions.get(key);
-    if (!session) return;
-    const state = normalizeMicProxyState(session.state);
-    if (state !== MIC_PROXY_STATE.AWAITING_USER_START && state !== MIC_PROXY_STATE.STARTING) return;
-    setMicProxySessionState(session, MIC_PROXY_STATE.EXPIRED, { reason: MIC_PROXY_REASON.ARM_EXPIRED, error: "" });
-    await sendMicProxyHidePrompt(session.targetTabId, session.sessionId, MIC_PROXY_REASON.ARM_EXPIRED);
-    logMicDiag("background", "mic-proxy-arm-expired", {
-      sessionId: session.sessionId,
-      ownerTabId: session.ownerTabId,
-      targetTabId: session.targetTabId,
-      state: session.state,
-      reason: session.reason
-    });
-  }, MIC_PROXY_ARM_EXPIRY_MS);
-  micProxyArmTimers.set(key, timerId);
-}
-
-function scheduleMicProxyStartConfirmTimeout(sessionId) {
-  const key = String(sessionId || "").trim();
-  if (!key) return;
-  clearMicProxyTimer(micProxyStartConfirmTimers, key);
-  const timerId = setTimeout(async () => {
-    const session = micProxySessions.get(key);
-    if (!session) return;
-    if (normalizeMicProxyState(session.state) !== MIC_PROXY_STATE.STARTING) return;
-    setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, {
-      reason: MIC_PROXY_REASON.START_CONFIRM_TIMEOUT,
-      error: "Workflow tab microphone start confirmation timed out."
-    });
-    await sendMicProxyHidePrompt(session.targetTabId, session.sessionId, MIC_PROXY_REASON.START_CONFIRM_TIMEOUT);
-    logMicDiag("background", "mic-proxy-start-timeout", {
-      sessionId: session.sessionId,
-      ownerTabId: session.ownerTabId,
-      targetTabId: session.targetTabId,
-      state: session.state,
-      reason: session.reason
-    });
-  }, MIC_PROXY_START_CONFIRM_TIMEOUT_MS);
-  micProxyStartConfirmTimers.set(key, timerId);
-}
-
-function rememberUsableWebTab(tab, reason) {
-  if (!tab || typeof tab.id !== "number" || typeof tab.windowId !== "number") return false;
-  if (!isInjectableTabUrl(tab.url)) return false;
-  lastUsableWebTabByWindow.set(tab.windowId, {
-    tabId: tab.id,
-    windowId: tab.windowId,
-    url: String(tab.url || ""),
-    updatedAtMs: Date.now()
-  });
-  bgLog("mic-proxy:remember-tab", { reason, tabId: tab.id, windowId: tab.windowId, url: tab.url });
-  return true;
-}
-
-async function clearMicProxySession(sessionId, reason, notifyTarget = false) {
-  const key = String(sessionId || "").trim();
-  if (!key) return false;
-  const session = micProxySessions.get(key);
-  if (!session) return false;
-  clearMicProxyTimer(micProxyArmTimers, key);
-  clearMicProxyTimer(micProxyStartConfirmTimers, key);
-  micProxySessions.delete(key);
-  if (
-    typeof session.ownerTabId === "number" &&
-    micProxyOwnerSessionByTabId.get(session.ownerTabId) === key
-  ) {
-    micProxyOwnerSessionByTabId.delete(session.ownerTabId);
-  }
-  if (notifyTarget && typeof session.targetTabId === "number") {
-    await sendMicProxyHidePrompt(session.targetTabId, key, reason || "session-clear");
-    try {
-      await withTimeout(
-        browser.tabs.sendMessage(session.targetTabId, {
-          type: "UIR_SECTION_MIC_PROXY_DISCARD",
-          sessionId: key,
-          reason: String(reason || "session-clear")
-        }, { frameId: 0 }),
-        SECTION_MIC_PROXY_DISCARD_RESPONSE_TIMEOUT_MS,
-        "Timed out notifying workflow tab to discard proxy microphone session."
-      );
-    } catch (_) {}
-  }
-  logMicDiag("background", "mic-proxy-session-cleared", {
-    sessionId: key,
-    ownerTabId: session.ownerTabId,
-    targetTabId: session.targetTabId,
-    state: session.state,
-    reason: String(reason || "")
-  });
-  bgLog("mic-proxy:session-cleared", {
-    reason,
-    sessionId: key,
-    ownerTabId: session.ownerTabId,
-    targetTabId: session.targetTabId
-  });
-  return true;
-}
-
-async function clearMicProxySessionsForOwner(ownerTabId, reason, notifyTarget = false) {
-  if (typeof ownerTabId !== "number") return 0;
-  const toClear = [];
-  micProxySessions.forEach((session, sessionId) => {
-    if (!session || typeof session !== "object") return;
-    if (session.ownerTabId !== ownerTabId) return;
-    toClear.push(String(sessionId));
-  });
-  if (!toClear.length) return 0;
-  for (const sessionId of toClear) {
-    await clearMicProxySession(sessionId, reason, notifyTarget);
-  }
-  return toClear.length;
-}
-
-function failMicProxySessionsForTargetTab(targetTabId, reason, error) {
-  if (typeof targetTabId !== "number") return 0;
-  let failed = 0;
-  micProxySessions.forEach((session) => {
-    if (!session || typeof session !== "object") return;
-    if (session.targetTabId !== targetTabId) return;
-    setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, {
-      reason: String(reason || MIC_PROXY_REASON.TAB_CONTEXT_UNAVAILABLE),
-      error: String(error || "Workflow tab context is unavailable for microphone capture.")
-    });
-    failed++;
-  });
-  return failed;
-}
-
-async function sweepMicProxySessions(reason) {
-  const now = Date.now();
-  const stale = [];
-  micProxySessions.forEach((session, sessionId) => {
-    const createdAtMs = Number(session && session.createdAtMs) || 0;
-    if (!createdAtMs || (now - createdAtMs) > MIC_PROXY_SESSION_MAX_AGE_MS) {
-      stale.push(String(sessionId));
-    }
-  });
-  if (!stale.length) return 0;
-  for (const sessionId of stale) {
-    await clearMicProxySession(sessionId, `${reason || "sweep"}:expired`, true);
-  }
-  return stale.length;
-}
-
-async function resolveMicProxyTargetTab(ownerTab) {
-  if (!ownerTab || typeof ownerTab.windowId !== "number") return null;
-  const ownerTabId = typeof ownerTab.id === "number" ? ownerTab.id : null;
-  const ownerWindowId = ownerTab.windowId;
-
-  const isEligibleCandidate = (tab, requireSameWindow = false) => {
-    if (!tab || typeof tab.id !== "number") return false;
-    if (ownerTabId !== null && tab.id === ownerTabId) return false;
-    if (requireSameWindow && tab.windowId !== ownerWindowId) return false;
-    return isInjectableTabUrl(tab.url);
-  };
-
-  const pickCandidate = (tabs, requireSameWindow = false) => {
-    const sorted = (Array.isArray(tabs) ? tabs : [])
-      .filter((tab) => isEligibleCandidate(tab, requireSameWindow))
-      .sort((a, b) => {
-        const aLast = Number(a && a.lastAccessed) || 0;
-        const bLast = Number(b && b.lastAccessed) || 0;
-        return bLast - aLast;
-      });
-    return sorted.length ? sorted[0] : null;
-  };
-
-  const tryRememberedWindowTab = async (windowId) => {
-    if (typeof windowId !== "number") return null;
-    const remembered = lastUsableWebTabByWindow.get(windowId);
-    if (!remembered || typeof remembered.tabId !== "number") return null;
-    try {
-      const tab = await browser.tabs.get(remembered.tabId);
-      if (!isEligibleCandidate(tab, windowId === ownerWindowId)) return null;
-      return tab;
-    } catch (_) {
-      lastUsableWebTabByWindow.delete(windowId);
-      return null;
-    }
-  };
-
-  const rememberedSameWindow = await tryRememberedWindowTab(ownerWindowId);
-  if (rememberedSameWindow && typeof rememberedSameWindow.id === "number") return rememberedSameWindow;
-
-  try {
-    const ownerWindowTabs = await browser.tabs.query({ windowId: ownerWindowId });
-    const sameWindowCandidate = pickCandidate(ownerWindowTabs, true);
-    if (sameWindowCandidate && typeof sameWindowCandidate.id === "number") return sameWindowCandidate;
-  } catch (err) {
-    bgWarn("mic-proxy:resolve-target-owner-window-failed", {
-      windowId: ownerWindowId,
-      error: formatError(err)
-    });
-  }
-
-  const rememberedEntries = Array.from(lastUsableWebTabByWindow.entries())
-    .filter(([windowId, entry]) => (
-      typeof windowId === "number" &&
-      windowId !== ownerWindowId &&
-      entry &&
-      typeof entry === "object" &&
-      typeof entry.updatedAtMs === "number"
-    ))
-    .sort((a, b) => {
-      const aUpdated = Number(a[1] && a[1].updatedAtMs) || 0;
-      const bUpdated = Number(b[1] && b[1].updatedAtMs) || 0;
-      return bUpdated - aUpdated;
-    });
-
-  for (const [windowId] of rememberedEntries) {
-    const rememberedTarget = await tryRememberedWindowTab(windowId);
-    if (rememberedTarget && typeof rememberedTarget.id === "number") return rememberedTarget;
-  }
-
-  try {
-    const activeTabs = await browser.tabs.query({ active: true });
-    const activeCandidate = pickCandidate(activeTabs, false);
-    if (activeCandidate && typeof activeCandidate.id === "number") return activeCandidate;
-  } catch (err) {
-    bgWarn("mic-proxy:resolve-target-active-global-failed", { error: formatError(err) });
-  }
-
-  try {
-    const allTabs = await browser.tabs.query({});
-    const globalCandidate = pickCandidate(allTabs, false);
-    if (globalCandidate && typeof globalCandidate.id === "number") return globalCandidate;
-  } catch (err) {
-    bgWarn("mic-proxy:resolve-target-global-failed", { error: formatError(err) });
-  }
-
-  return null;
+  return u.startsWith("http:") || u.startsWith("https:");
 }
 
 async function ensureContentScriptInTab(tabId, reason) {
@@ -1594,6 +1110,13 @@ function normalizeMarkerStyle(value) {
   return "rounded-bold";
 }
 
+function normalizeScreenshotRedactionMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (SCREENSHOT_REDACTION_MODES.has(mode)) return mode;
+  // Unset means default; an unrecognized stored value fails closed to "omit".
+  return mode ? "omit" : "none";
+}
+
 function normalizeHotkeyBurstFps(value) {
   const fps = Math.round(Number(value));
   if (HOTKEY_BURST_FPS_OPTIONS.has(fps)) return fps;
@@ -1607,7 +1130,7 @@ function normalizeHotkeyBurstImageFormat(value) {
 }
 
 function normalizeHotkeyBurstJpegQuality(value) {
-  return Math.round(clampNumber(value, 60, 95, HOTKEY_BURST_DEFAULT_JPEG_QUALITY));
+  return Math.round(clampNumber(value, 20, 95, HOTKEY_BURST_DEFAULT_JPEG_QUALITY));
 }
 
 function normalizeBurstMaxEffectiveFps(value) {
@@ -1626,6 +1149,8 @@ function normalizeSettings(base) {
   out.diffEnabled = out.diffEnabled !== false;
   out.redactEnabled = out.redactEnabled !== false;
   out.redactLoginUsernames = out.redactLoginUsernames !== false;
+  out.screenshotRedactionMode = normalizeScreenshotRedactionMode(out.screenshotRedactionMode);
+  out.secureAtRestMode = !!out.secureAtRestMode;
   out.captureMode = out.captureMode === "clicks" ? "clicks" : "all";
   out.activeTabOnly = out.activeTabOnly !== false;
   out.autoPauseOnIdle = !!out.autoPauseOnIdle;
@@ -1669,6 +1194,116 @@ function getEffectiveSettings(base = settings) {
   };
 }
 
+function shouldCaptureScreenshotPixels(base = settings) {
+  const normalized = normalizeSettings(base || settings);
+  if (normalized.secureAtRestMode) return false;
+  return normalized.screenshotRedactionMode !== "omit";
+}
+
+function screenshotSuppressionReason(base = settings) {
+  const normalized = normalizeSettings(base || settings);
+  if (normalized.secureAtRestMode) return "secure-at-rest";
+  if (normalized.screenshotRedactionMode === "omit") return "redaction-policy";
+  return "not-needed";
+}
+
+function getExtensionSessionStorageArea() {
+  const area = browser && browser.storage ? browser.storage.session : null;
+  if (!area || typeof area.get !== "function" || typeof area.set !== "function") return null;
+  return area;
+}
+
+function sanitizeEventForSecurePersistence(ev) {
+  if (!ev || typeof ev !== "object") return ev;
+  const out = { ...ev };
+  out.screenshot = null;
+  out.screenshotRef = null;
+  out.screenshotHash = null;
+  out.screenshotSkipped = true;
+  out.screenshotSkipReason = "secure-at-rest";
+  if (out.annotation && typeof out.annotation === "object" && out.annotation.imageDataUrl) {
+    out.annotation = { ...out.annotation, imageDataUrl: null };
+  }
+  out.sectionAudioRef = null;
+  out.sectionAudioMeta = null;
+  out.sectionTextRef = null;
+  out.sectionTextMeta = null;
+  out.burstAudioRef = null;
+  out.burstAudioMeta = null;
+  out.burstTextRef = null;
+  out.burstTextMeta = null;
+  return out;
+}
+
+function sanitizeReportsForSecurePersistence(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((report) => {
+    if (!report || typeof report !== "object") return report;
+    const out = { ...report };
+    if (Array.isArray(report.events)) {
+      out.events = report.events.map(sanitizeEventForSecurePersistence);
+    } else {
+      out.events = [];
+    }
+    return out;
+  });
+}
+
+function buildReportsMeta() {
+  reportsMetaNonce += 1;
+  return { writer: "background", nonce: reportsMetaNonce };
+}
+
+async function purgeFrameSpoolForSecureAtRest(reason) {
+  if (!(await ensureFrameSpoolReady())) return;
+  try {
+    await frameSpool.waitUntilIdle({ timeoutMs: 3000 });
+    await syncFrameSpoolReportRefs(reason);
+    if (sessionId) {
+      await frameSpool.removeSessionRefs(sessionId);
+    }
+    await runFrameSpoolGc(reason, { activeSessionIds: [], orphanMaxAgeMs: 0 });
+  } catch (err) {
+    bgWarn("frame-spool:secure-purge-failed", { reason, error: formatError(err) });
+  }
+}
+
+async function writePersistedState(payload, context = "persist") {
+  const normalizedSettings = normalizeSettings((payload && payload.settings) || settings);
+  const normalizedPayload = { ...payload, settings: normalizedSettings, reportsMeta: buildReportsMeta() };
+  const secureAtRestMode = !!normalizedSettings.secureAtRestMode;
+  if (!secureAtRestMode) {
+    await browser.storage.local.set(normalizedPayload);
+    return { area: "local", secureAtRestMode: false };
+  }
+  const sessionArea = getExtensionSessionStorageArea();
+  if (sessionArea) {
+    await sessionArea.set(normalizedPayload);
+    await browser.storage.local.set({
+      isRecording: !!payload.isRecording,
+      isPaused: !!payload.isPaused,
+      events: [],
+      settings: normalizedSettings,
+      reports: [],
+      reportsMeta: buildReportsMeta(),
+      sessionId: payload.sessionId || null
+    });
+    return { area: "session", secureAtRestMode: true };
+  }
+  // Without storage.session, secure mode keeps events/reports memory-only.
+  bgWarn("secure-at-rest:fallback-local-skeleton", { context });
+  await browser.storage.local.set({
+    isRecording: !!payload.isRecording,
+    isPaused: !!payload.isPaused,
+    events: [],
+    settings: normalizedSettings,
+    reports: [],
+    reportsMeta: buildReportsMeta(),
+    sessionId: payload.sessionId || null
+  });
+  return { area: "local-skeleton", secureAtRestMode: true };
+}
+
 function isHotkeyBurstModeActive() {
   return !!(isRecording && burstHotkeyModeActive && !stopInProgress);
 }
@@ -1710,7 +1345,7 @@ function stopContinuousBurstCaptureLoop(reason) {
     clearTimeout(burstContinuousTimer);
     burstContinuousTimer = null;
   }
-  burstContinuousInFlight = false;
+  // burstContinuousInFlight is owned by the in-flight tick; its finally clears it.
   burstLoopActive = false;
   burstLastLoopPauseReason = normalizeBurstLoopPauseReason(reason);
   bgLog("burst-loop:stopped", { reason, isRecording, burstHotkeyModeActive });
@@ -1757,6 +1392,8 @@ function getBurstCaptureFailureBackoffMs(frameMs) {
 
 async function runContinuousBurstCaptureTick() {
   burstContinuousTimer = null;
+  const tickRunId = burstRunId;
+  const tickSessionId = sessionId;
   const effectiveSettings = getEffectiveSettings();
   const configuredFps = getHotkeyBurstFps();
   let governedFps = configuredFps;
@@ -1777,7 +1414,8 @@ async function runContinuousBurstCaptureTick() {
     return;
   }
 
-  burstContinuousInFlight = true;
+  const ownedTickSeq = ++burstContinuousTickSeq;
+  burstContinuousInFlight = ownedTickSeq;
   let nextDelayMs = frameMs;
   let stopReason = "toggle-off";
   let shouldStopLoop = false;
@@ -1817,6 +1455,12 @@ async function runContinuousBurstCaptureTick() {
     if (!isHotkeyBurstModeActive() || isPaused) {
       shouldStopLoop = true;
       stopReason = "toggle-off";
+      return;
+    }
+    if (!shouldCaptureScreenshotPixels(effectiveSettings)) {
+      burstLoopActive = false;
+      burstLastLoopPauseReason = screenshotSuppressionReason(effectiveSettings);
+      nextDelayMs = Math.max(frameMs, BURST_BACKOFF_BACKPRESSURE_MIN_MS);
       return;
     }
 
@@ -1904,6 +1548,12 @@ async function runContinuousBurstCaptureTick() {
       burstSynthetic: true,
       clickUiUpdated: true
     });
+    if (screenshotInline) {
+      const compacted = compactBurstScreenshotsIfNeeded();
+      if (compacted && compacted.removed > 0) {
+        bgLog("burst-loop:compacted-inline-fallback", compacted);
+      }
+    }
     maybePersistBurstLoopState();
     burstLoopActive = true;
     burstLastFrameAtMs = Date.now();
@@ -1911,11 +1561,19 @@ async function runContinuousBurstCaptureTick() {
     const tickElapsedMs = Date.now() - tickStartedAt;
     nextDelayMs = Math.max(0, frameMs - tickElapsedMs);
   } finally {
-    burstContinuousInFlight = false;
-    if (isHotkeyBurstModeActive() && !shouldStopLoop) {
-      scheduleContinuousBurstCaptureTick(nextDelayMs);
-    } else {
-      stopContinuousBurstCaptureLoop(stopReason);
+    const ownsFlight = burstContinuousInFlight === ownedTickSeq;
+    if (ownsFlight) burstContinuousInFlight = false;
+    const staleRun = burstRunId !== tickRunId || sessionId !== tickSessionId;
+    if (!staleRun) {
+      if (isHotkeyBurstModeActive() && !shouldStopLoop) {
+        scheduleContinuousBurstCaptureTick(nextDelayMs);
+      } else {
+        stopContinuousBurstCaptureLoop(stopReason);
+      }
+    } else if (ownsFlight && isHotkeyBurstModeActive()) {
+      // Burst mode was toggled off/on while this tick was in flight; hand off
+      // scheduling to the new run instead of continuing the stale chain.
+      ensureContinuousBurstCaptureLoop("stale-tick-handoff");
     }
   }
 }
@@ -2072,16 +1730,11 @@ function maybePersistBurstLoopState() {
 }
 
 async function persist() {
-  await browser.storage.local.set({
-    isRecording,
-    isPaused,
-    events,
-    settings,
-    reports,
-    sessionId,
+  await writePersistedState({
+    isRecording, isPaused, events, settings, reports, sessionId,
     recordingTabSelection: getRecordingTabSelectionArray(),
     recordingScopeEnforced: !!recordingScopeEnforced
-  });
+  }, "persist");
 }
 
 async function persistSafe(context) {
@@ -2094,9 +1747,34 @@ async function persistSafe(context) {
   }
 }
 
+function cancelPendingRecordEventPersist(reason) {
+  if (!recordEventPersistTimer) return;
+  clearTimeout(recordEventPersistTimer);
+  recordEventPersistTimer = null;
+  bgLog("record-event:persist-coalesce-cancelled", { reason });
+}
+
+async function persistRecordEventCoalesced() {
+  const now = Date.now();
+  const elapsed = now - recordEventPersistLastAtMs;
+  if (elapsed >= RECORD_EVENT_PERSIST_MIN_INTERVAL_MS) {
+    recordEventPersistLastAtMs = now;
+    return await persistSafe("record-event");
+  }
+  if (!recordEventPersistTimer) {
+    recordEventPersistTimer = setTimeout(() => {
+      recordEventPersistTimer = null;
+      if (!isRecording) return;
+      recordEventPersistLastAtMs = Date.now();
+      persistSafe("record-event:trailing").catch(() => {});
+    }, Math.max(50, RECORD_EVENT_PERSIST_MIN_INTERVAL_MS - elapsed));
+  }
+  return { ok: true, coalesced: true };
+}
+
 async function persistReportsSafe(context) {
   try {
-    await browser.storage.local.set({ reports });
+    await writePersistedState({ isRecording, isPaused, events, settings, reports, sessionId }, context || "persist-reports");
     return { ok: true };
   } catch (e) {
     bgWarn("persist-reports-failed", { context: context || "unknown", error: formatError(e) });
@@ -2105,7 +1783,9 @@ async function persistReportsSafe(context) {
 }
 
 async function loadPersisted() {
-  const stored = await browser.storage.local.get([
+  // Purge diagnostics persisted by the removed mic-proxy subsystem.
+  try { await browser.storage.local.remove("__uiRecorderMicDiag"); } catch (_) {}
+  const storedLocal = await browser.storage.local.get([
     "isRecording",
     "isPaused",
     "events",
@@ -2114,9 +1794,32 @@ async function loadPersisted() {
     "sessionId",
     "recordingTabSelection",
     "recordingScopeEnforced",
-    TAB_SCOPE_WATCH_ENABLED_KEY,
-    MIC_DIAG_STORAGE_KEY
+    TAB_SCOPE_WATCH_ENABLED_KEY
   ]);
+  let stored = storedLocal;
+  if (storedLocal.settings) settings = { ...settings, ...storedLocal.settings };
+  settings = normalizeSettings(settings);
+  if (settings.secureAtRestMode) {
+    const sessionArea = getExtensionSessionStorageArea();
+    if (sessionArea) {
+      try {
+        const storedSession = await sessionArea.get([
+          "isRecording",
+          "isPaused",
+          "events",
+          "settings",
+          "reports",
+          "sessionId"
+        ]);
+        if (storedSession && typeof storedSession === "object") {
+          stored = { ...storedLocal, ...storedSession };
+          if (storedSession.settings) settings = normalizeSettings({ ...settings, ...storedSession.settings });
+        }
+      } catch (e) {
+        bgWarn("loadPersisted:session-read-failed", { error: formatError(e) });
+      }
+    }
+  }
   isRecording = !!stored.isRecording;
   isPaused = !!stored.isPaused;
   events = Array.isArray(stored.events) ? stored.events : [];
@@ -2152,10 +1855,11 @@ async function loadPersisted() {
     updatedAtMs: Date.now(),
     source: null,
     lastError: null,
+    drainOutcome: null,
     droppedBurstFrames: 0
   };
   resetBurstPerf();
-  micDiagBuffer = pruneMicDiagBuffer(stored[MIC_DIAG_STORAGE_KEY]);
+  await recoverPendingStopSnapshot();
   if (await ensureFrameSpoolReady()) {
     await syncFrameSpoolReportRefs("load-persisted");
     setTimeout(() => {
@@ -2268,6 +1972,15 @@ async function debouncedScreenshot() {
 }
 
 async function maybeScreenshot(e) {
+  const effectiveSettings = getEffectiveSettings();
+  if (!shouldCaptureScreenshotPixels(effectiveSettings)) {
+    return {
+      screenshot: null,
+      screenshotHash: null,
+      skipped: true,
+      reason: screenshotSuppressionReason(effectiveSettings)
+    };
+  }
   const hotkeyBurstActive = isHotkeyBurstModeActive();
   const force = !!(e && e.forceScreenshot);
 
@@ -2277,7 +1990,7 @@ async function maybeScreenshot(e) {
   const redacted = shot.dataUrl;
   const redactedHash = stableHash(redacted);
 
-  if (!hotkeyBurstActive && !force && settings.diffEnabled && events.length > 0) {
+  if (!hotkeyBurstActive && !force && effectiveSettings.diffEnabled && events.length > 0) {
     for (let i = events.length - 1; i >= 0; i--) {
       if (events[i].screenshotHash) {
         if (events[i].screenshotHash === redactedHash) {
@@ -2299,7 +2012,11 @@ async function appendLifecycleScreenshotEventToSession(sessionState, kind, sourc
   const lifecycleKind = kind === "stop" ? "stop" : "start";
   let tab = null;
   const effective = normalizeSettings(sessionState.snapshotSettings || getEffectiveSettings());
-  const opts = options && typeof options === "object" ? options : {};
+  const opts = options && typeof options === "object" ? { ...options } : {};
+  if (!shouldCaptureScreenshotPixels(effective)) {
+    opts.capture = false;
+    if (!opts.skipReason) opts.skipReason = screenshotSuppressionReason(effective);
+  }
   try {
     if (effective.activeTabOnly) {
       const tabIdRaw = Number(opts.tabId);
@@ -2448,9 +2165,22 @@ async function saveReportSnapshotDetached(snapshot, options = {}) {
     settings: { ...resolvedSettings },
     events: pruneInputSteps(sourceEvents.slice(0), resolvedSettings)
   };
+  if (opts.titleSuffix) {
+    report.title = `${String(report.title || "").trim()} ${String(opts.titleSuffix)}`.trim();
+  }
   reports.unshift(report);
   const droppedReports = reports.slice(3);
   reports = reports.slice(0, 3);
+
+  const persisted = await persistReportsSafe(opts.reason || "snapshot");
+  if (!persisted.ok) {
+    // Storage still lists the previous reports; keep their frames until a persist succeeds.
+    bgWarn("saveReportSnapshot:persist-failed-skipping-gc", {
+      reportId: report.id,
+      reason: opts.reason || "snapshot"
+    });
+    return { saved: true, persisted: false, reportId: report.id, prunedEventCount: report.events.length };
+  }
 
   if (await ensureFrameSpoolReady()) {
     try {
@@ -2479,7 +2209,7 @@ async function saveReportSnapshotDetached(snapshot, options = {}) {
     prunedEventCount: report.events.length,
     reportCount: reports.length
   });
-  return { saved: true, reportId: report.id, prunedEventCount: report.events.length };
+  return { saved: true, persisted: true, reportId: report.id, prunedEventCount: report.events.length };
 }
 
 async function saveReportSnapshot(snapshotSettings) {
@@ -2489,6 +2219,57 @@ async function saveReportSnapshot(snapshotSettings) {
     snapshotSettings: snapshotSettings || getEffectiveSettings()
   }, { reason: "snapshot" });
   return !!result.saved;
+}
+
+function getPendingStopSnapshotArea(snapshotSettings) {
+  const normalized = normalizeSettings(snapshotSettings || settings);
+  // Secure mode: salvage only to the memory-only session area; without it, skip salvage.
+  if (!normalized.secureAtRestMode) return browser.storage.local;
+  return getExtensionSessionStorageArea();
+}
+
+async function writePendingStopSnapshot(payload, snapshotSettings, context) {
+  try {
+    const area = getPendingStopSnapshotArea(snapshotSettings);
+    if (!area) return false;
+    await area.set({ [PENDING_STOP_SNAPSHOT_KEY]: payload });
+    return true;
+  } catch (e) {
+    bgWarn("stop-salvage:write-failed", { context, error: formatError(e) });
+    return false;
+  }
+}
+
+async function removePendingStopSnapshot(snapshotSettings, context) {
+  try {
+    const area = getPendingStopSnapshotArea(snapshotSettings);
+    if (area) await area.remove(PENDING_STOP_SNAPSHOT_KEY);
+  } catch (e) {
+    bgWarn("stop-salvage:cleanup-failed", { context, error: formatError(e) });
+  }
+}
+
+async function recoverPendingStopSnapshot() {
+  try {
+    const area = getPendingStopSnapshotArea(settings);
+    if (!area) return;
+    const stored = await area.get(PENDING_STOP_SNAPSHOT_KEY);
+    const pending = stored && stored[PENDING_STOP_SNAPSHOT_KEY];
+    if (!pending || typeof pending !== "object") return;
+    const pendingSessionId = String(pending.sessionId || "").trim();
+    const alreadySaved = reports.some((r) => r && r.sessionId && r.sessionId === pendingSessionId);
+    if (!alreadySaved && Array.isArray(pending.events) && pending.events.length) {
+      await saveReportSnapshotDetached({
+        sessionId: pendingSessionId,
+        events: pending.events,
+        snapshotSettings: pending.settings || settings
+      }, { reason: "stop-salvage-recovery", titleSuffix: "(recovered)" });
+      bgLog("stop-salvage:recovered", { sessionId: pendingSessionId, eventCount: pending.events.length });
+    }
+    await area.remove(PENDING_STOP_SNAPSHOT_KEY);
+  } catch (e) {
+    bgWarn("stop-salvage:recovery-failed", { error: formatError(e) });
+  }
 }
 
 function queueStopFinalizationJob(job) {
@@ -2508,34 +2289,36 @@ function queueStopFinalizationJob(job) {
 async function runStopFinalizationJob(job) {
   if (!job || typeof job !== "object") return { ok: false, saved: false, persisted: false, ignored: true };
   const jobId = String(job.jobId || newStopFinalizationJobId());
-  setStopFinalizationState({
+  // Only patch the shared state while this job is still the newest enqueued one.
+  const applyJobState = (patch) => {
+    if (stopFinalizationState.jobId !== jobId) return;
+    setStopFinalizationState(patch);
+  };
+  applyJobState({
     active: true,
-    jobId,
     phase: "queued",
     startedAtMs: Date.now(),
     source: String(job.source || ""),
     lastError: null
   });
   try {
-    setStopFinalizationState({ phase: "draining" });
+    applyJobState({ phase: "draining" });
     if (await ensureFrameSpoolReady()) {
       try {
+        const drained = await frameSpool.waitUntilIdle({ timeoutMs: STOP_FINALIZATION_DRAIN_TIMEOUT_MS });
         const queueState = getFrameSpoolQueueState();
-        const drained = !!queueState
-          ? (
-            (Number(queueState.captureQueue) || 0) === 0
-            && (Number(queueState.processQueue) || 0) === 0
-            && (Number(queueState.writeQueue) || 0) === 0
-          )
-          : true;
         updateWriteQueueHighWater(queueState);
+        applyJobState({ drainOutcome: drained ? "drained" : "timeout" });
         bgLog("frame-spool:stop-drain", { jobId, drained, queueState });
+        if (!drained) {
+          bgWarn("frame-spool:stop-drain-timeout", { jobId, timeoutMs: STOP_FINALIZATION_DRAIN_TIMEOUT_MS, queueState });
+        }
       } catch (err) {
         bgWarn("frame-spool:stop-drain-failed", { jobId, error: formatError(err) });
       }
     }
 
-    setStopFinalizationState({ phase: "snapshot" });
+    applyJobState({ phase: "snapshot" });
     const stopCapture = job.stopCapture && typeof job.stopCapture === "object" ? job.stopCapture : {};
     await appendLifecycleScreenshotEventToSession(
       {
@@ -2561,12 +2344,15 @@ async function runStopFinalizationJob(job) {
       snapshotSettings: job.snapshotSettings || getEffectiveSettings()
     }, {
       reason: `stop-finalization:${jobId}`,
-      onPhase: (phase) => setStopFinalizationState({ phase })
+      onPhase: (phase) => applyJobState({ phase })
     });
 
-    setStopFinalizationState({ phase: "persist" });
+    applyJobState({ phase: "persist" });
     const persisted = await persistReportsSafe(`stop-finalization:${jobId}`);
-    setStopFinalizationState({
+    if (persisted.ok) {
+      await removePendingStopSnapshot(job.snapshotSettings, `stop-finalization:${jobId}`);
+    }
+    applyJobState({
       active: false,
       phase: "done",
       source: String(job.source || ""),
@@ -2586,7 +2372,7 @@ async function runStopFinalizationJob(job) {
   } catch (err) {
     const message = formatError(err);
     bgWarn("stop-finalization:error", { jobId, error: message });
-    setStopFinalizationState({
+    applyJobState({
       active: false,
       phase: "error",
       source: String(job.source || ""),
@@ -2845,6 +2631,7 @@ async function stopRecordingInternal(source) {
     const detachedSessionId = String(sessionId || "").trim();
     const detachedEvents = Array.isArray(events) ? events : [];
     const detachedTabSelection = getRecordingTabSelectionArray();
+    const detachedStartedAtMs = recordingStartedAtMs;
     const queueStateAtStop = getFrameSpoolQueueState();
     updateWriteQueueHighWater(queueStateAtStop);
     const queuePressureLevelAtStop = getFrameSpoolBackpressureLevel(queueStateAtStop);
@@ -2880,6 +2667,7 @@ async function stopRecordingInternal(source) {
     clearActiveCaptureTarget("stop");
     resetScreenshotState();
     setBadge("").catch(() => {});
+    cancelPendingRecordEventPersist("stop-recording");
     persistSafe("stop-recording:phase-a")
       .then((persistResult) => {
         if (!persistResult || !persistResult.ok) {
@@ -2911,8 +2699,17 @@ async function stopRecordingInternal(source) {
         startedAtMs: Date.now(),
         source: String(source || ""),
         lastError: null,
+        drainOutcome: null,
         droppedBurstFrames: Number(burstPerf.droppedFrames) || 0
       });
+      if (detachedEvents.length) {
+        await writePendingStopSnapshot({
+          sessionId: detachedSessionId,
+          events: detachedEvents,
+          settings: snapshotSettings,
+          startedAtMs: detachedStartedAtMs
+        }, snapshotSettings, "stop-recording");
+      }
       queueStopFinalizationJob({
         jobId: finalizationJobId,
         source: String(source || ""),
@@ -3007,13 +2804,11 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
   }
 
   if (typeof msgType === "string" && msgType.startsWith("SECTION_MIC_")) {
-    if (msgType.startsWith("SECTION_MIC_PROXY_") && msgType !== "SECTION_MIC_PROXY_STATUS") {
-      await sweepMicProxySessions("runtime:mic-capture-removed");
-    }
-    return buildMicProxyFailure(
-      "mic-capture-removed",
-      "Live microphone capture has been removed from this extension build. Use audio-file transcription in the report editor."
-    );
+    return {
+      ok: false,
+      reason: "mic-capture-removed",
+      error: "Live microphone capture has been removed from this extension build. Use audio-file transcription in the report editor."
+    };
   }
 
   try {
@@ -3055,8 +2850,15 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     }
 
     if (msgType === "UPDATE_SETTINGS") {
+      const wasSecureAtRestMode = !!normalizeSettings(settings).secureAtRestMode;
       settings = { ...settings, ...(msg.settings || {}) };
       settings = normalizeSettings(settings);
+      const secureAtRestJustEnabled = !wasSecureAtRestMode && !!settings.secureAtRestMode;
+      if (secureAtRestJustEnabled) {
+        events = events.map(sanitizeEventForSecurePersistence);
+        reports = sanitizeReportsForSecurePersistence(reports);
+        bgLog("secure-at-rest:enabled-purge", { eventCount: events.length, reportCount: reports.length });
+      }
       if (settings.activeTabOnly) {
         if (isRecording) {
           await refreshActiveCaptureTarget("settings:update");
@@ -3072,6 +2874,9 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         try { await browser.idle.setDetectionInterval(Math.max(15, settings.idleThresholdSec || 60)); } catch (_) {}
       }
       const persisted = await persistSafe("update-settings");
+      if (secureAtRestJustEnabled) {
+        await purgeFrameSpoolForSecureAtRest("secure-at-rest:enabled");
+      }
       const effectiveSettings = getEffectiveSettings();
       if (!persisted.ok) return { ok: false, settings: effectiveSettings, persisted: false, burstHotkeyModeActive };
       return { ok: true, settings: effectiveSettings, burstHotkeyModeActive };
@@ -3166,376 +2971,6 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     if (msgType === "OPEN_DOCS") { await browser.tabs.create({ url: browser.runtime.getURL("docs.html") }); return { ok: true }; }
     if (msgType === "OPEN_PRINTABLE_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?print=1&idx=0" }); return { ok: true }; }
 
-    if (msgType === "SECTION_MIC_PROXY_PREPARE" || msgType === "SECTION_MIC_PROXY_START") {
-      await sweepMicProxySessions("runtime:prepare");
-      const ownerTab = sender && sender.tab ? sender.tab : null;
-      if (!ownerTab || typeof ownerTab.id !== "number") {
-        return buildMicProxyFailure("no-owner-tab", "Site microphone proxy requires an extension report tab context.");
-      }
-      await clearMicProxySessionsForOwner(ownerTab.id, "runtime:prepare:replace", true);
-      const targetTab = await resolveMicProxyTargetTab(ownerTab);
-      if (!targetTab || typeof targetTab.id !== "number") {
-        return buildMicProxyFailure(
-          MIC_PROXY_REASON.NO_ELIGIBLE_TAB,
-          "No eligible workflow tab was found in Firefox. Activate a website workflow tab, then retry."
-        );
-      }
-      let injected = false;
-      try {
-        injected = await withTimeout(
-          ensureContentScriptInTab(targetTab.id, "section-mic-proxy-prepare"),
-          SECTION_MIC_PROXY_INJECT_TIMEOUT_MS,
-          "Timed out while preparing the workflow tab for site microphone capture."
-        );
-      } catch (err) {
-        return buildMicProxyFailure(
-          MIC_PROXY_REASON.PREPARE_TIMEOUT,
-          String((err && err.message) || "Timed out while preparing workflow tab microphone capture.")
-        );
-      }
-      if (!injected) {
-        return buildMicProxyFailure(
-          MIC_PROXY_REASON.TARGET_NOT_INJECTABLE,
-          "Unable to access the selected workflow tab for site microphone capture."
-        );
-      }
-      const sessionId = newMicProxySessionId();
-      const session = {
-        sessionId,
-        ownerTabId: ownerTab.id,
-        ownerWindowId: typeof ownerTab.windowId === "number" ? ownerTab.windowId : null,
-        targetTabId: targetTab.id,
-        targetWindowId: typeof targetTab.windowId === "number" ? targetTab.windowId : null,
-        targetTabUrl: String(targetTab.url || ""),
-        mimeType: "audio/webm",
-        state: MIC_PROXY_STATE.AWAITING_USER_START,
-        reason: "",
-        error: "",
-        createdAtMs: Date.now(),
-        updatedAtMs: Date.now(),
-        startedAtMs: 0
-      };
-      micProxySessions.set(sessionId, session);
-      micProxyOwnerSessionByTabId.set(ownerTab.id, sessionId);
-      rememberUsableWebTab(targetTab, "runtime:prepare");
-      logMicDiag("background", "mic-proxy-prepared", {
-        sessionId,
-        requestId,
-        ownerTabId: session.ownerTabId,
-        targetTabId: session.targetTabId,
-        state: session.state
-      });
-      let armResponse = null;
-      try {
-        armResponse = await withTimeout(
-          browser.tabs.sendMessage(targetTab.id, {
-            type: "UIR_SECTION_MIC_PROXY_SHOW_ARM",
-            sessionId,
-            maxDurationMs: SECTION_MIC_PROXY_MAX_DURATION_MS,
-            maxBytes: SECTION_MIC_PROXY_MAX_BYTES,
-            armExpiresInMs: MIC_PROXY_ARM_EXPIRY_MS,
-            requestId
-          }, { frameId: 0 }),
-          MIC_PROXY_PREPARE_TIMEOUT_MS,
-          "Timed out while waiting for workflow tab microphone arm prompt."
-        );
-      } catch (err) {
-        const reason = err && err.uiRecorderTimeout ? MIC_PROXY_REASON.PREPARE_TIMEOUT : MIC_PROXY_REASON.PROXY_START_FAILED;
-        const error = String((err && err.message) || "Failed to arm workflow tab microphone capture.");
-        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
-        await clearMicProxySession(sessionId, "runtime:prepare:arm-error", false);
-        return buildMicProxyFailure(reason, error);
-      }
-      if (armResponse && armResponse.ok === false) {
-        const reason = String(armResponse.reason || MIC_PROXY_REASON.PROXY_START_FAILED);
-        const error = String(armResponse.error || "Workflow tab rejected microphone arm request.");
-        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
-        await clearMicProxySession(sessionId, "runtime:prepare:arm-rejected", false);
-        return buildMicProxyFailure(reason, error);
-      }
-      scheduleMicProxyArmExpiry(sessionId);
-      return buildMicProxyStatusPayload(session);
-    }
-
-    if (msgType === "SECTION_MIC_PROXY_STATUS") {
-      await sweepMicProxySessions("runtime:status");
-      const ownerTab = sender && sender.tab ? sender.tab : null;
-      if (!ownerTab || typeof ownerTab.id !== "number") {
-        return buildMicProxyFailure("no-owner-tab", "Site microphone proxy status requires a report tab context.");
-      }
-      const requestedSessionId = String(msg.sessionId || "").trim();
-      const session = requestedSessionId
-        ? micProxySessions.get(requestedSessionId)
-        : getMicProxySessionForOwner(ownerTab.id);
-      if (!session) {
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
-      }
-      if (session.ownerTabId !== ownerTab.id) {
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Site microphone session belongs to a different report tab.");
-      }
-      return buildMicProxyStatusPayload(session);
-    }
-
-    if (msgType === "SECTION_MIC_PROXY_START_CONFIRM") {
-      const sessionId = String(msg.sessionId || "").trim();
-      if (!sessionId) {
-        return buildMicProxyFailure("session-id-required", "Missing site microphone session id.");
-      }
-      const session = micProxySessions.get(sessionId);
-      if (!session) {
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
-      }
-      const senderTab = sender && sender.tab ? sender.tab : null;
-      if (!senderTab || typeof senderTab.id !== "number" || senderTab.id !== session.targetTabId) {
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Mic start confirmation came from an unexpected workflow tab.");
-      }
-      const currentState = normalizeMicProxyState(session.state);
-      if (currentState === MIC_PROXY_STATE.RECORDING) {
-        return buildMicProxyStatusPayload(session);
-      }
-      if (currentState !== MIC_PROXY_STATE.AWAITING_USER_START && currentState !== MIC_PROXY_STATE.STARTING) {
-        return buildMicProxyFailure(
-          MIC_PROXY_REASON.SESSION_STATE_INVALID,
-          "Site microphone session is not awaiting a workflow-tab start click."
-        );
-      }
-      setMicProxySessionState(session, MIC_PROXY_STATE.STARTING, { reason: "", error: "" });
-      scheduleMicProxyStartConfirmTimeout(sessionId);
-      return buildMicProxyStatusPayload(session);
-    }
-
-    if (msgType === "SECTION_MIC_PROXY_TAB_EVENT") {
-      const eventType = String(msg.event || "").trim().toLowerCase();
-      const sessionId = String(msg.sessionId || "").trim();
-      if (!sessionId) {
-        return buildMicProxyFailure("session-id-required", "Missing site microphone session id.");
-      }
-      const session = micProxySessions.get(sessionId);
-      if (!session) {
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
-      }
-      const senderTab = sender && sender.tab ? sender.tab : null;
-      if (!senderTab || typeof senderTab.id !== "number" || senderTab.id !== session.targetTabId) {
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Mic proxy tab event came from an unexpected workflow tab.");
-      }
-      if (senderTab && senderTab.url) {
-        session.targetTabUrl = String(senderTab.url || session.targetTabUrl || "");
-      }
-      const eventReason = String(msg.reason || "");
-      const eventError = String(msg.error || "");
-      const eventBackend = String(msg.backend || "");
-      const eventStage = String(msg.stage || "");
-      logMicDiag("content", `mic-proxy-tab-event:${eventType || "unknown"}`, {
-        sessionId,
-        ownerTabId: session.ownerTabId,
-        targetTabId: session.targetTabId,
-        state: session.state,
-        reason: eventReason,
-        durationMs: Number(msg.durationMs) || 0,
-        deviceCount: Number(msg.deviceCount),
-        errorName: String(msg.errorName || eventBackend || ""),
-        errorCode: String(msg.errorCode || eventStage || "")
-      });
-      if (eventType === "arm-shown") {
-        if (normalizeMicProxyState(session.state) === MIC_PROXY_STATE.NONE) {
-          setMicProxySessionState(session, MIC_PROXY_STATE.AWAITING_USER_START, { reason: "", error: "" });
-        }
-        return buildMicProxyStatusPayload(session);
-      }
-      if (eventType === "start-clicked") {
-        setMicProxySessionState(session, MIC_PROXY_STATE.STARTING, { reason: "", error: "" });
-        scheduleMicProxyStartConfirmTimeout(sessionId);
-        return buildMicProxyStatusPayload(session);
-      }
-      if (eventType === "recording-started") {
-        session.mimeType = String(msg.mimeType || session.mimeType || "audio/webm");
-        setMicProxySessionState(session, MIC_PROXY_STATE.RECORDING, { reason: "", error: "" });
-        await sendMicProxyHidePrompt(session.targetTabId, sessionId, "recording-started");
-        return buildMicProxyStatusPayload(session);
-      }
-      if (eventType === "recording-failed") {
-        const failureReason = eventReason || MIC_PROXY_REASON.PROXY_START_FAILED;
-        const failureError = eventError || "Workflow tab microphone capture failed.";
-        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, {
-          reason: failureReason,
-          error: failureError
-        });
-        await sendMicProxyHidePrompt(session.targetTabId, sessionId, failureReason);
-        return buildMicProxyStatusPayload(session);
-      }
-      if (eventType === "stopped") {
-        setMicProxySessionState(session, MIC_PROXY_STATE.STOPPING, { reason: "", error: "" });
-        return buildMicProxyStatusPayload(session);
-      }
-      if (eventType === "discarded") {
-        setMicProxySessionState(session, MIC_PROXY_STATE.NONE, {
-          reason: eventReason || "discarded",
-          error: ""
-        });
-        await sendMicProxyHidePrompt(session.targetTabId, sessionId, eventReason || "discarded");
-        return buildMicProxyStatusPayload(session);
-      }
-      if (eventType === "expired") {
-        setMicProxySessionState(session, MIC_PROXY_STATE.EXPIRED, {
-          reason: eventReason || MIC_PROXY_REASON.ARM_EXPIRED,
-          error: eventError || "Workflow tab microphone start prompt expired."
-        });
-        await sendMicProxyHidePrompt(session.targetTabId, sessionId, eventReason || MIC_PROXY_REASON.ARM_EXPIRED);
-        return buildMicProxyStatusPayload(session);
-      }
-      return buildMicProxyStatusPayload(session);
-    }
-
-    if (msgType === "SECTION_MIC_PROXY_STOP") {
-      await sweepMicProxySessions("runtime:stop");
-      const ownerTab = sender && sender.tab ? sender.tab : null;
-      const requestedSessionId = String(msg.sessionId || "").trim();
-      if (!requestedSessionId) {
-        return buildMicProxyFailure("session-id-required", "Missing site microphone session id.");
-      }
-      const session = micProxySessions.get(requestedSessionId);
-      if (!session) {
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_NOT_FOUND, "Site microphone session was not found.");
-      }
-      if (!ownerTab || typeof ownerTab.id !== "number" || session.ownerTabId !== ownerTab.id) {
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Site microphone session belongs to a different report tab.");
-      }
-      const currentState = normalizeMicProxyState(session.state);
-      if (currentState === MIC_PROXY_STATE.FAILED || currentState === MIC_PROXY_STATE.EXPIRED) {
-        return buildMicProxyFailure(
-          session.reason || MIC_PROXY_REASON.PROXY_STOP_FAILED,
-          session.error || "Site microphone session is not in a stoppable state."
-        );
-      }
-      if (currentState !== MIC_PROXY_STATE.RECORDING && currentState !== MIC_PROXY_STATE.STOPPING) {
-        return buildMicProxyFailure(
-          MIC_PROXY_REASON.SESSION_STATE_INVALID,
-          "Site microphone session is not recording."
-        );
-      }
-      setMicProxySessionState(session, MIC_PROXY_STATE.STOPPING, { reason: "", error: "" });
-      let stopResponse = null;
-      try {
-        stopResponse = await withTimeout(
-          browser.tabs.sendMessage(session.targetTabId, {
-            type: "UIR_SECTION_MIC_PROXY_STOP",
-            sessionId: requestedSessionId
-          }, { frameId: 0 }),
-          SECTION_MIC_PROXY_STOP_RESPONSE_TIMEOUT_MS,
-          "Timed out while waiting for workflow tab microphone stop response."
-        );
-      } catch (err) {
-        const reason = err && err.uiRecorderTimeout ? "proxy-stop-timeout" : MIC_PROXY_REASON.PROXY_STOP_FAILED;
-        const error = String((err && err.message) || "Site microphone stop failed.");
-        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
-        return buildMicProxyFailure(reason, error);
-      }
-      if (!stopResponse || !stopResponse.ok) {
-        const reason = String((stopResponse && stopResponse.reason) || MIC_PROXY_REASON.PROXY_STOP_FAILED);
-        const error = String((stopResponse && stopResponse.error) || "Site microphone stop failed.");
-        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
-        return buildMicProxyFailure(reason, error);
-      }
-      await clearMicProxySession(requestedSessionId, "runtime:stop:done", false);
-      return {
-        ok: true,
-        bytes: stopResponse.bytes,
-        mimeType: String(stopResponse.mimeType || "audio/webm"),
-        durationMs: Number(stopResponse.durationMs) || 0,
-        byteLength: Number(stopResponse.byteLength) || 0
-      };
-    }
-
-    if (msgType === "SECTION_MIC_PROXY_DISCARD") {
-      await sweepMicProxySessions("runtime:discard");
-      const ownerTab = sender && sender.tab ? sender.tab : null;
-      const requestedSessionId = String(msg.sessionId || "").trim();
-      const session = requestedSessionId
-        ? micProxySessions.get(requestedSessionId)
-        : (ownerTab && typeof ownerTab.id === "number" ? getMicProxySessionForOwner(ownerTab.id) : null);
-      if (!session) return { ok: true };
-      if (!ownerTab || typeof ownerTab.id !== "number" || session.ownerTabId !== ownerTab.id) {
-        await clearMicProxySession(session.sessionId, "runtime:discard:mismatch", false);
-        return buildMicProxyFailure(MIC_PROXY_REASON.SESSION_OWNER_MISMATCH, "Site microphone session belongs to a different report tab.");
-      }
-      setMicProxySessionState(session, MIC_PROXY_STATE.STOPPING, { reason: "", error: "" });
-      let discardResponse = null;
-      try {
-        discardResponse = await withTimeout(
-          browser.tabs.sendMessage(session.targetTabId, {
-            type: "UIR_SECTION_MIC_PROXY_DISCARD",
-            sessionId: session.sessionId
-          }, { frameId: 0 }),
-          SECTION_MIC_PROXY_DISCARD_RESPONSE_TIMEOUT_MS,
-          "Timed out while waiting for workflow tab microphone discard response."
-        );
-      } catch (err) {
-        const reason = err && err.uiRecorderTimeout ? "proxy-discard-timeout" : MIC_PROXY_REASON.PROXY_DISCARD_FAILED;
-        const error = String((err && err.message) || "Site microphone discard failed.");
-        setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, { reason, error });
-        await clearMicProxySession(session.sessionId, "runtime:discard:error", true);
-        return buildMicProxyFailure(reason, error);
-      }
-      await clearMicProxySession(session.sessionId, "runtime:discard:done", false);
-      if (discardResponse && discardResponse.ok) return { ok: true };
-      return buildMicProxyFailure(
-        discardResponse && discardResponse.reason ? discardResponse.reason : MIC_PROXY_REASON.PROXY_DISCARD_FAILED,
-        discardResponse && discardResponse.error ? discardResponse.error : "Site microphone discard failed."
-      );
-    }
-
-    if (msgType === "SECTION_MIC_DIAG_LOG") {
-      const action = String(msg.action || "get").trim().toLowerCase();
-      if (action === "clear") {
-        micDiagBuffer = [];
-        if (micDiagPersistTimer) {
-          clearTimeout(micDiagPersistTimer);
-          micDiagPersistTimer = null;
-        }
-        await browser.storage.local.set({ [MIC_DIAG_STORAGE_KEY]: [] });
-        return { ok: true, cleared: true, count: 0 };
-      }
-      if (action === "append") {
-        appendMicDiag({
-          source: String(msg.source || "report"),
-          event: String(msg.event || "custom"),
-          sessionId: String(msg.sessionId || ""),
-          requestId: Number(msg.requestId) || requestId,
-          ownerTabId: msg.ownerTabId,
-          targetTabId: msg.targetTabId,
-          frameId: msg.frameId,
-          state: msg.state,
-          reason: msg.reason,
-          durationMs: msg.durationMs,
-          deviceCount: msg.deviceCount,
-          consentState: msg.consentState,
-          errorName: msg.errorName,
-          errorCode: msg.errorCode
-        });
-        return { ok: true };
-      }
-      const rawLimit = Number(msg.limit);
-      const limit = Number.isFinite(rawLimit)
-        ? Math.max(1, Math.min(MIC_DIAG_MAX_ENTRIES, Math.round(rawLimit)))
-        : Math.min(120, MIC_DIAG_MAX_ENTRIES);
-      const filterSessionId = String(msg.sessionId || "").trim();
-      const filterSource = String(msg.source || "").trim().toLowerCase();
-      micDiagBuffer = pruneMicDiagBuffer(micDiagBuffer);
-      let entries = micDiagBuffer;
-      if (filterSessionId) {
-        entries = entries.filter((entry) => String(entry && entry.sessionId || "") === filterSessionId);
-      }
-      if (filterSource) {
-        entries = entries.filter((entry) => String(entry && entry.source || "").toLowerCase() === filterSource);
-      }
-      const resultEntries = entries.slice(-limit);
-      return {
-        ok: true,
-        count: resultEntries.length,
-        entries: resultEntries
-      };
-    }
-
     if (msgType === "RECORD_EVENT") {
       activeRecordEvents++;
       const startedAt = Date.now();
@@ -3580,14 +3015,15 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         if (e && e.burstBypassUiProbe) cleaned.burstBypassUiProbe = true;
         delete cleaned.typedValue;
 
-        const includeScreenshot = hotkeyBurstActive
-          ? false
-          : (
+        const screenshotsAllowed = shouldCaptureScreenshotPixels(effectiveSettings);
+        const includeScreenshot = screenshotsAllowed && !hotkeyBurstActive
+          ? (
             ["change","input","submit","outcome","note"].includes(e.type)
             || (e.type === "click" && (!!e.forceScreenshot || !!e.clickUiUpdated))
             || (e.type === "nav" && (!effectiveSettings.activeTabOnly || !!e.forceScreenshot))
             || (e.type === "ui-change" && !!e.forceScreenshot)
-          );
+          )
+          : false;
         if (hotkeyBurstActive && includeScreenshot) cleaned.burstCaptureForced = true;
         if (includeScreenshot) {
           const shot = await maybeScreenshot(e);
@@ -3601,7 +3037,11 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           cleaned.screenshotRef = null;
           cleaned.screenshotHash = null;
           cleaned.screenshotSkipped = true;
-          cleaned.screenshotSkipReason = hotkeyBurstActive ? "gif-loop-owned" : "not-needed";
+          if (!screenshotsAllowed) {
+            cleaned.screenshotSkipReason = screenshotSuppressionReason(effectiveSettings);
+          } else {
+            cleaned.screenshotSkipReason = hotkeyBurstActive ? "gif-loop-owned" : "not-needed";
+          }
         }
 
         if (!senderMatchesRecordingScope(senderTab, effectiveSettings)) {
@@ -3635,7 +3075,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         if (compacted && compacted.removed > 0) {
           bgLog("record-event:compacted", compacted);
         }
-        const persisted = await persistSafe("record-event");
+        const persisted = await persistRecordEventCoalesced();
         if (!persisted.ok || eventType === "submit") {
           bgLog("record-event:done", { requestId, eventType, persisted: persisted.ok, eventCount: events.length });
         }
@@ -3668,18 +3108,29 @@ browser.idle.onStateChanged.addListener(async (state) => {
 });
 
 browser.storage.onChanged.addListener(async (changes, areaName) => {
-  if (areaName !== "local") return;
+  if (areaName !== "local" && areaName !== "session") return;
   if (changes.reports) {
-    reports = Array.isArray(changes.reports.newValue) ? changes.reports.newValue : [];
-    scheduleFrameSpoolMaintenance("storage:reports", 900);
+    const reportsWriter = changes.reportsMeta && changes.reportsMeta.newValue
+      ? String(changes.reportsMeta.newValue.writer || "")
+      : "";
+    const areaAccepted = areaName === "session"
+      || !settings.secureAtRestMode
+      || !getExtensionSessionStorageArea();
+    if (reportsWriter !== "background" && areaAccepted) {
+      reports = Array.isArray(changes.reports.newValue) ? changes.reports.newValue : [];
+      scheduleFrameSpoolMaintenance(`storage:${areaName}:reports`, 900);
+    }
   }
   if (changes.settings && changes.settings.newValue) {
-    settings = normalizeSettings({ ...settings, ...changes.settings.newValue });
+    if (areaName === "local" || (areaName === "session" && settings.secureAtRestMode)) {
+      settings = normalizeSettings({ ...settings, ...changes.settings.newValue });
+    }
   }
   if (Object.prototype.hasOwnProperty.call(changes, TAB_SCOPE_WATCH_ENABLED_KEY)) {
     tabScopeWatchEnabled = !!(changes[TAB_SCOPE_WATCH_ENABLED_KEY] && changes[TAB_SCOPE_WATCH_ENABLED_KEY].newValue);
     bgLog("tab-scope-watch:state", { enabled: tabScopeWatchEnabled });
   }
+  if (areaName !== "local") return;
   const stopChange = changes.__uiRecorderStopRequestTs;
   if (!stopChange) return;
 
@@ -3718,23 +3169,6 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
     }
     persistSafe("tabs:onRemoved:scope-update").catch(() => {});
   }
-  const sessionsToClear = [];
-  micProxySessions.forEach((session, sessionId) => {
-    if (!session || typeof session !== "object") return;
-    if (session.ownerTabId === tabId) {
-      sessionsToClear.push(String(sessionId));
-      return;
-    }
-    if (session.targetTabId === tabId) {
-      setMicProxySessionState(session, MIC_PROXY_STATE.FAILED, {
-        reason: MIC_PROXY_REASON.TAB_CONTEXT_UNAVAILABLE,
-        error: "Workflow tab closed during microphone capture."
-      });
-    }
-  });
-  for (const sessionId of sessionsToClear) {
-    await clearMicProxySession(sessionId, "tabs:onRemoved:owner", false);
-  }
   const windowsToDelete = [];
   lastUsableWebTabByWindow.forEach((entry, windowId) => {
     if (!entry || typeof entry !== "object") return;
@@ -3760,11 +3194,6 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     )
   );
   if (!targetUnavailable) return;
-  failMicProxySessionsForTargetTab(
-    tabId,
-    MIC_PROXY_REASON.TAB_CONTEXT_UNAVAILABLE,
-    "Workflow tab navigated or reloaded during microphone capture."
-  );
 });
 
 browser.tabs.onActivated.addListener(async (activeInfo) => {
@@ -3795,11 +3224,6 @@ browser.windows.onFocusChanged.addListener(async (windowId) => {
     if (isRecording && settings.activeTabOnly) clearActiveCaptureTarget("focus:none");
     return;
   }
-  try {
-    const tabs = await browser.tabs.query({ active: true, windowId });
-    const tab = tabs && tabs[0] ? tabs[0] : null;
-    if (tab) rememberUsableWebTab(tab, "windows:onFocusChanged");
-  } catch (_) {}
   if (isRecording && settings.activeTabOnly) {
     await refreshActiveCaptureTarget("focus-changed");
     if (activeCaptureTabId !== null) {
