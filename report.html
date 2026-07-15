@@ -151,7 +151,7 @@
               <span class="config-rail-summary-title settings-summary-title">Export and import</span>
               <span class="config-rail-summary-meta settings-summary-meta">Bundle</span>
             </summary>
-            <div class="config-rail-body settings-group-body toolbar toolbar-rail">
+            <div class="config-rail-body settings-group-body toolbar toolbar-rail" role="group" aria-label="Export actions">
               <button id="bundle" class="btn">Export HTML bundle</button>
               <button id="bundle-preview" class="btn ghost">Quick HTML preview</button>
               <button id="bundle-raw" class="btn">Export raw ZIP</button>
@@ -320,7 +320,7 @@
             </div>
           </details>
         </div>
-        <div id="import-status" class="hint"></div>
+        <div id="import-status" class="hint" role="status" aria-live="polite"></div>
         </div>
         </details>
         <nav class="report-nav-links report-nav-links-secondary">
@@ -334,7 +334,7 @@
       </div>
     </aside>
 
-    <main class="report-main report-workflow-main">
+    <main class="report-main report-workflow-main" aria-label="Report builder">
       <section class="report-section workflow-hero noprint">
         <div class="workflow-hero-title">Workflow center</div>
         <div class="workflow-hero-subtitle">Review interactions, burst playback, and final report composition on the right while tuning configuration in the left rail.</div>

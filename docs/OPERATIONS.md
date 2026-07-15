@@ -15,7 +15,9 @@ stateDiagram-v2
     [*] --> Idle
     Idle --> Recording : Start (popup) / Ctrl+Shift+Y
     Recording --> Paused : idle auto-pause / OS lock
+    Recording --> Paused : host permission revoked
     Paused --> Recording : activity / tab focus (resumeOnFocus)
+    Paused --> Recording : host permission re-granted (manual resume)
     Recording --> GraceStop : Ctrl+Shift+Y (badge REC+, 2s window)
     GraceStop --> Finalizing : 2s elapse / 2nd press (immediate)
     Recording --> Finalizing : Stop (popup, immediate)
@@ -23,6 +25,8 @@ stateDiagram-v2
     Finalizing --> Idle : error (report still persisted)
     Recording --> Recording : Ctrl+Alt+G toggles GIF burst mode
 ```
+
+- When paused for host-permission-revoked, the popup status reads `Paused: host permission revoked — re-enable in about:addons to resume`; `pauseLimitationReason` in GET_STATE is `host-permission-revoked` for the duration.
 
 ## Install & load
 
@@ -126,3 +130,5 @@ Rough sizing: a 1080p JPEG q75 burst frame is 150–400 KB → a 60 s burst at 1
 Follow `docs/AMO_SUBMISSION.md`: version bump, README/docs.html/CHANGELOG sync, `node --check` on all five JS files, `npx --yes web-ext lint --source-dir .` (expect 0/0/0), package XPI + source ZIP into `dist/`.
 
 Updated 2026-07-14: secure-at-rest caveats rewritten for purge-on-enable + skeleton fallback, import caps/modes updated (2 GiB, trim-at-import), troubleshooting rows for drain wait, crash salvage, and SPA nav poll, DEBUG_LOGS line ref fixed, salvage key added to storage table.
+
+Updated 2026-07-14: Tier-1 — lifecycle diagram now shows `Recording --> Paused : host permission revoked` and `Paused --> Recording : host permission re-granted (manual resume)`, plus a one-line note on the `host-permission-revoked` popup status and `pauseLimitationReason`.

@@ -130,6 +130,13 @@ check("7", "buildReportsMeta nonce increments", meta2.nonce > meta1.nonce, `${me
 // §9.4 — persist coalescing constant + trailing-timer behavior
 check("9", "RECORD_EVENT persist interval = 1500ms", BG.__BG.RECORD_EVENT_PERSIST_MIN_INTERVAL_MS === 1500, String(BG.__BG.RECORD_EVENT_PERSIST_MIN_INTERVAL_MS));
 
+// T1.1 — host-permission grant/revoke reactivity (static grep against background.js)
+const bgjs = fs.readFileSync(path.join(REPO, "background.js"), "utf8");
+check("T1.1", "permissions.onRemoved listener registered", /browser\.permissions\.onRemoved\?\.addListener|browser\.permissions\.onRemoved\.addListener/.test(bgjs));
+check("T1.1", "permissions.onAdded listener registered", /browser\.permissions\.onAdded\?\.addListener|browser\.permissions\.onAdded\.addListener/.test(bgjs));
+check("T1.1", "onRemoved pauses with host-permission-revoked reason", /pauseRecording\(\s*["']host-permission-revoked["']\s*\)/.test(bgjs));
+check("T1.1", "GET_STATE surfaces pauseLimitationReason", /pauseLimitationReason:\s*pauseLimitationReason/.test(bgjs));
+
 console.log("\n=== Harness B: report.js (builder/import/export) ===");
 const RPT = loadContext(["report.js"], {
   epilogue: "globalThis.__RPT = { MAXB: RAW_IMPORT_ZIP_MAX_BYTES, MAXE: RAW_IMPORT_ZIP_MAX_ENTRIES, " +
@@ -228,6 +235,88 @@ function runStatic() {
   check("7", "exported CSP is default-src 'none'", /default-src 'none'/.test(rjs));
   check("7", "report.js stamps writer:\"report\"", /writer:\s*["']report["']/.test(rjs));
   check("7", "preview iframe sandboxed allow-scripts", /id="export-preview-frame"[^>]*sandbox="allow-scripts"/.test(rhtml) || /sandbox="allow-scripts"/.test(rhtml));
+
+  // T1.2 — TUNING.md line-ref drift detector shipped as a preflight script
+  const drift = path.join(REPO, "docs", "verify-tuning-refs.js");
+  check("T1.2", "verify-tuning-refs.js present", fs.existsSync(drift) && fs.readFileSync(drift, "utf8").includes("extractRefs"));
+
+  // T1.3 — ZIP export streams parts through Blob instead of concatenating into a giant Uint8Array
+  check("T1.3", "report.js no longer defines concatBytes", !/function\s+concatBytes\s*\(/.test(rjs));
+  const bszMatch = rjs.match(/function buildStoredZip\([^)]*\)\s*\{[\s\S]*?\n\}/);
+  check("T1.3", "buildStoredZip body located", !!bszMatch);
+  if (bszMatch) {
+    const body = bszMatch[0];
+    check("T1.3", "buildStoredZip returns a Blob of parts", /return\s+new\s+Blob\(/.test(body) && /application\/zip/.test(body));
+    check("T1.3", "buildStoredZip no longer calls concatBytes", !/concatBytes\(/.test(body));
+  }
+
+  // T1.4 — capture-phase paste listener with content-side redaction
+  check("T1.4", "content.js registers capture-phase paste listener",
+    /document\.addEventListener\(\s*["']paste["'][\s\S]*?\n\s*\},\s*true\s*\)/.test(cjs));
+  const pasteBlock = cjs.match(/document\.addEventListener\(\s*["']paste["']([\s\S]*?)\n\s*\},\s*true\s*\)/);
+  check("T1.4", "paste handler body located", !!pasteBlock);
+  if (pasteBlock) {
+    const body = pasteBlock[1];
+    check("T1.4", "paste listener gated on trust", /isTrustedUserEvent\s*\(/.test(body));
+    check("T1.4", "paste listener consumes rate budget", /consumeEventRateBudget\(\s*["']paste["']\s*\)/.test(body));
+    check("T1.4", "paste listener does not preventDefault", !/preventDefault\s*\(/.test(body));
+    check("T1.4", "paste listener does not stopPropagation", !/stopPropagation\s*\(/.test(body));
+    check("T1.4", "paste event payload uses [REDACTED CLIPBOARD] sentinel", /\[REDACTED CLIPBOARD\]/.test(body));
+  }
+  check("T1.4", "paste rate-limit tier declared", /paste\s*:\s*\{\s*windowMs/.test(cjs));
+
+  // T1.5 — additive a11y markup pass (labels/roles/live regions), no logic change
+  const phtml = fs.readFileSync(path.join(REPO, "popup.html"), "utf8");
+  const pjs = fs.readFileSync(path.join(REPO, "popup.js"), "utf8");
+  const popupAriaCount = (phtml.match(/aria-[a-z]+=/g) || []).length;
+  const reportAriaCount = (rhtml.match(/aria-[a-z]+=/g) || []).length;
+  check("T1.5", "popup.html carries >=8 aria-* attributes", popupAriaCount >= 8, "count=" + popupAriaCount);
+  check("T1.5", "report.html carries >=5 aria-* attributes", reportAriaCount >= 5, "count=" + reportAriaCount);
+  check("T1.5", "popup #status has aria-live polite", /id="status"[^>]*aria-live="polite"/.test(phtml));
+  check("T1.5", "popup #burst-mode-chip drops aria-live storm", !/id="burst-mode-chip"[^>]*aria-live=/.test(phtml));
+  check("T1.5", "popup #spool-runtime drops aria-live storm", !/id="spool-runtime"[^>]*aria-live=/.test(phtml));
+  check("T1.5", "popup #tab-scope-list uses role=group (not listbox)", /id="tab-scope-list"[^>]*role="group"/.test(phtml) && !/id="tab-scope-list"[^>]*role="listbox"/.test(phtml));
+  check("T1.5", "popup.js renderTabScopeList no longer sets role=option", !/setAttribute\(\s*["']role["']\s*,\s*["']option["']\s*\)/.test(pjs));
+  check("T1.5", "popup.js renderTabScopeList no longer sets aria-selected", !/setAttribute\(\s*["']aria-selected["']/.test(pjs));
+  check("T1.5", "report.html #import-status has role=status", /id="import-status"[^>]*role="status"/.test(rhtml));
+  check("T1.5", "report.js audio-status template has role=status", /section-text-audio-status[^"]*"[^>]*role="status"/.test(rjs));
+
+  // Behavioral: load content.js into a sandbox and exercise redactPasteText via the test hook.
+  const contentSandbox = Object.assign({
+    console, Math, JSON, Date, Array, Object, String, Number, Boolean,
+    Set, Map, WeakMap, WeakSet, Promise, RegExp, Error, TypeError, Symbol,
+    parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent,
+    setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {}, queueMicrotask,
+    browser: automock(), document: automock(), navigator: { userAgent: "node", language: "en" },
+    location: { href: "https://example.com/x" }, addEventListener: () => {},
+    history: { pushState: () => {}, replaceState: () => {} },
+    performance: { now: () => 0 }, MutationObserver: function () { return automock(); }
+  });
+  contentSandbox.self = contentSandbox; contentSandbox.window = contentSandbox; contentSandbox.globalThis = contentSandbox;
+  vm.createContext(contentSandbox);
+  vm.runInContext(cjs, contentSandbox, { filename: "content.js" });
+  const hooks = contentSandbox.__uiRecorderContentTestHooks;
+  check("T1.4", "content test hooks exposed", !!(hooks && hooks.redactPasteText && Array.isArray(hooks.PASTE_SECRET_REGEXES) && hooks.PASTE_MAX_BYTES > 0));
+  if (hooks && hooks.redactPasteText) {
+    const rp = hooks.redactPasteText;
+    const rTok = rp("api_token=hunter2xyz");
+    check("T1.4", "paste token=value redacted", rTok.redacted === true && /\[REDACTED\]/.test(rTok.value) && !/hunter2xyz/.test(rTok.value), JSON.stringify(rTok));
+    const rPw = rp("password: hunter2secret trailing");
+    check("T1.4", "paste password:value redacted", rPw.redacted === true && /\[REDACTED\]/.test(rPw.value) && !/hunter2secret/.test(rPw.value), JSON.stringify(rPw));
+    const rPem = rp("a -----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE----- b");
+    check("T1.4", "paste PEM block redacted", rPem.redacted === true && /\[REDACTED CERTIFICATE OR KEY BLOCK\]/.test(rPem.value) && !/MIIB/.test(rPem.value), JSON.stringify(rPem).slice(0, 80));
+    const rHex = rp("fingerprint DEADBEEFCAFE0123456789ABCDEF01234567 end");
+    check("T1.4", "paste long-hex redacted", rHex.redacted === true && /\[REDACTED\]/.test(rHex.value) && !/DEADBEEFCAFE0123456789ABCDEF01234567/.test(rHex.value), JSON.stringify(rHex));
+    const rClean = rp("hello world");
+    check("T1.4", "paste clean text untouched", rClean.redacted === false && rClean.value === "hello world" && rClean.reason === "", JSON.stringify(rClean));
+    const rOver = rp("@".repeat(hooks.PASTE_MAX_BYTES + 128));
+    check("T1.4", "paste oversize truncated", rOver.reason === "paste-oversize" && rOver.value.length === hooks.PASTE_MAX_BYTES && rOver.redacted === false, JSON.stringify({ reason: rOver.reason, len: rOver.value.length, red: rOver.redacted }));
+    const pathological = "-----BEGIN".repeat(6500);
+    const benchStart = Date.now();
+    const rPath = rp(pathological);
+    const benchMs = Date.now() - benchStart;
+    check("T1.4", "paste pem-block regex bounded (<50ms on pathological input)", benchMs < 50 && rPath && typeof rPath.value === "string", "elapsedMs=" + benchMs);
+  }
 
   console.log(`\n================  RESULT: ${pass} passed, ${fail} failed  ================`);
   if (fail) { console.log("\nFailures:"); fails.forEach((f) => console.log("  - " + f)); process.exit(1); }

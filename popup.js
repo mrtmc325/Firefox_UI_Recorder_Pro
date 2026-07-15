@@ -483,11 +483,16 @@ async function refresh() {
     : 0;
   const isFinalizing = !!stopFinalization.active;
   const finalizationPhase = String(stopFinalization.phase || "idle");
+  const limitationReason = String(st.pauseLimitationReason || "").trim();
   const statusText = st.isRecording
     ? (
       pendingStop
         ? `Stopping in ${pendingSeconds.toFixed(1)}s...`
-        : (st.isPaused ? "Paused" : (burstMode ? "Recording... (GIF Capture)" : "Recording..."))
+        : (st.isPaused
+          ? (limitationReason === "host-permission-revoked"
+            ? "Paused: host permission revoked — re-enable in about:addons to resume."
+            : "Paused")
+          : (burstMode ? "Recording... (GIF Capture)" : "Recording..."))
     )
     : (isFinalizing ? `Finalizing... (${finalizationPhase})` : "Idle");
   document.getElementById("status").textContent = statusText;

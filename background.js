@@ -60,6 +60,8 @@ let activeCaptureTabTitle = "";
 let activeCaptureUpdatedAt = 0;
 let recordingTabSelection = new Set();
 let recordingScopeEnforced = false;
+let pauseLimitationReason = "";
+let revokedOriginsWhileRecording = new Set();
 let tabScopeWatchEnabled = false;
 let tabScopeDraftWriteQueue = Promise.resolve();
 let burstHotkeyModeActive = false;
@@ -639,7 +641,8 @@ function stateSummary() {
     reportCount: reports.length,
     sessionId,
     tabSelectionCount: recordingTabSelection.size,
-    tabSelectionEnforced: !!recordingScopeEnforced
+    tabSelectionEnforced: !!recordingScopeEnforced,
+    pauseLimitationReason
   };
 }
 
@@ -2504,10 +2507,11 @@ function newSessionId() {
   return `sess_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function pauseRecording() {
+async function pauseRecording(reason = "") {
+  if (reason && !pauseLimitationReason) pauseLimitationReason = String(reason);
   if (!isRecording || isPaused) return;
   isPaused = true;
-  bgLog("pauseRecording");
+  bgLog("pauseRecording", { reason: pauseLimitationReason || "" });
   await persistSafe("pause");
   await setBadge("PAUS");
 }
@@ -2515,6 +2519,8 @@ async function pauseRecording() {
 async function resumeRecording() {
   if (!isRecording || !isPaused) return;
   isPaused = false;
+  pauseLimitationReason = "";
+  revokedOriginsWhileRecording = new Set();
   bgLog("resumeRecording");
   await persistSafe("resume");
   await setBadge("REC");
@@ -2834,6 +2840,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         recordingTabSelection: recordingTabSelectionList,
         recordingTabSelectionCount: recordingTabSelectionList.length,
         recordingScopeEnforced: !!recordingScopeEnforced,
+        pauseLimitationReason: pauseLimitationReason || "",
         burstHotkeyModeActive,
         burstRunTargetFps,
         burstLoopActive,
@@ -3106,6 +3113,68 @@ browser.idle.onStateChanged.addListener(async (state) => {
     await resumeRecording();
   }
 });
+
+if (browser.permissions && typeof browser.permissions.onRemoved?.addListener === "function") {
+  browser.permissions.onRemoved.addListener(async (perms) => {
+    try {
+      const origins = Array.isArray(perms && perms.origins) ? perms.origins : [];
+      if (!origins.length) return;
+      bgLog("permissions:onRemoved", { origins, isRecording, isPaused });
+      if (!isRecording) return;
+      const recordingOrigins = new Set();
+      const selectionTabIds = Array.from(recordingTabSelection.values());
+      if (selectionTabIds.length) {
+        for (const tabId of selectionTabIds) {
+          try {
+            const tab = await browser.tabs.get(tabId);
+            const pattern = getOriginPatternForUrl(tab && tab.url);
+            if (pattern) recordingOrigins.add(pattern);
+          } catch (_) {}
+        }
+      } else if (activeCaptureTabId !== null) {
+        try {
+          const tab = await browser.tabs.get(activeCaptureTabId);
+          const pattern = getOriginPatternForUrl(tab && tab.url);
+          if (pattern) recordingOrigins.add(pattern);
+        } catch (_) {}
+      }
+      const intersected = origins.filter((o) => typeof o === "string" && o && recordingOrigins.has(o));
+      if (!intersected.length) {
+        bgLog("permissions:onRemoved:ignored", { origins, recordingOrigins: Array.from(recordingOrigins) });
+        return;
+      }
+      for (const o of intersected) revokedOriginsWhileRecording.add(o);
+      await pauseRecording("host-permission-revoked");
+      await persistSafe("perms-revoked");
+    } catch (e) {
+      bgWarn("permissions:onRemoved:error", { error: formatError(e) });
+    }
+  });
+}
+
+if (browser.permissions && typeof browser.permissions.onAdded?.addListener === "function") {
+  browser.permissions.onAdded.addListener(async (perms) => {
+    try {
+      const origins = Array.isArray(perms && perms.origins) ? perms.origins : [];
+      if (!origins.length) return;
+      bgLog("permissions:onAdded", { origins, pauseLimitationReason });
+      if (pauseLimitationReason !== "host-permission-revoked") return;
+      const tracked = Array.from(revokedOriginsWhileRecording);
+      for (const r of tracked) {
+        try {
+          const granted = !!(await browser.permissions.contains({ origins: [r] }));
+          if (granted) revokedOriginsWhileRecording.delete(r);
+        } catch (_) {}
+      }
+      if (revokedOriginsWhileRecording.size === 0) {
+        pauseLimitationReason = "";
+        await persistSafe("perms-restored");
+      }
+    } catch (e) {
+      bgWarn("permissions:onAdded:error", { error: formatError(e) });
+    }
+  });
+}
 
 browser.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName !== "local" && areaName !== "session") return;

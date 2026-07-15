@@ -8,7 +8,7 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.17.0. Ships the completed security hardening pass described below, halves the default burst JPEG quality (75 → 38) to keep exported bundles small, and retains the burst-playback stability work from v1.16.0 (stable contain-fit export rendering, deterministic autoplay resume, and context-aware multi-tab cursor trails).</p>
+    <p>Version 1.18.0. Adds Tier-1 enhancements on top of the v1.17.0 remediation baseline: reactive pause on host-permission revoke (`browser.permissions.onRemoved`/`onAdded`), clipboard-paste secret interception during recording, a Blob-of-parts ZIP export path with fail-loud non-64 guards, a screen-reader accessibility label pass, and a TUNING.md drift detector wired into the release preflight.</p>
 
     <h2>Security &amp; Privacy Hardening (current build)</h2>
     <ul>
@@ -21,7 +21,7 @@
       <li>The deprecated microphone-capture subsystem is fully removed; residual mic requests are rejected with <code>mic-capture-removed</code>.</li>
     </ul>
 
-    <h2>Version Notes (v1.17.0)</h2>
+    <h2>Version Notes (v1.18.0)</h2>
     <ul>
       <li>Popup header version badge now resolves directly from extension manifest version to prevent stale hardcoded values after releases.</li>
       <li>Exported carousel right rail now uses <strong>Workflow Queue</strong> naming consistently.</li>

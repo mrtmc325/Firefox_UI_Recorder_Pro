@@ -4,7 +4,7 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 
 ## Context
 
-- Two tuning surfaces exist: **user settings** (popup UI, persisted in the `settings` storage key, normalized/clamped in `normalizeSettings` background.js:852-892) and **code constants** (edit the source, reload the extension).
+- Two tuning surfaces exist: **user settings** (popup UI, persisted in the `settings` storage key, normalized/clamped in `normalizeSettings` background.js:1148-1188) and **code constants** (edit the source, reload the extension).
 - Settings not exposed in the popup can be changed programmatically via an `UPDATE_SETTINGS` runtime message or by editing the stored `settings` object.
 - Guiding rule: the burst/spool pipeline is self-governing (backpressure tiers). Prefer adjusting budgets and caps over disabling governors.
 - After changing any constant: reload the extension (`about:debugging` → Reload) and re-run the smoke test in `docs/OPERATIONAL_TEST.md`.
@@ -20,12 +20,12 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 | Page watch + interval | `pageWatchEnabled` = true, `pageWatchMs` = 500 | background.js:26-27 | MutationObserver poll for `ui-change` steps. 500–1200 for SPAs, 1500–3000 for long sessions; ≥10000 disables forced ui-change screenshots entirely. Auto-off in burst mode. |
 | Redact sensitive text | `redactEnabled` = true | background.js:14 | Applies `redactRules` regex list (background.js:36-47) to event text at record time. Text-only. |
 | Redact usernames on login pages | `redactLoginUsernames` = true | background.js:15 | Adds username-field redaction on login-like pages. |
-| Screenshot redaction policy | `screenshotRedactionMode` = "none" | background.js:16, 820-825 | "omit" suppresses ALL screenshot pixel capture (steps, lifecycle, burst; burst loop pauses with reason "redaction policy"). Fails closed: an unrecognized stored value normalizes to "omit". Use for sensitive workflows where text-only steps suffice. |
-| Secure-at-rest mode | `secureAtRestMode` = false | background.js:17, 978-1012 | Routes events/reports to memory-only `storage.session` (skeleton in local) and suppresses all screenshot capture. Purge-on-enable: enabling strips screenshot pixels/refs from in-memory events and all reports, then GCs unreferenced spool media with no age gate (background.js:2483-2506, 964-976) — destructive to existing report screenshots. Fallback on old Firefox: settings-only local skeleton (events/reports memory-only). |
+| Screenshot redaction policy | `screenshotRedactionMode` = "none" | background.js:16, 1116-1121 | "omit" suppresses ALL screenshot pixel capture (steps, lifecycle, burst; burst loop pauses with reason "redaction policy"). Fails closed: an unrecognized stored value normalizes to "omit" (`normalizeScreenshotRedactionMode`). Use for sensitive workflows where text-only steps suffice. |
+| Secure-at-rest mode | `secureAtRestMode` = false | background.js:17, 1148-1188 | Routes events/reports to memory-only `storage.session` (skeleton in local) and suppresses all screenshot capture. Purge-on-enable: enabling strips screenshot pixels/refs from in-memory events and all reports, then GCs unreferenced spool media with no age gate (background.js:2860-2867, 1260-1272) — destructive to existing report screenshots. Fallback on old Firefox: settings-only local skeleton (events/reports memory-only). |
 | Auto-pause on idle + threshold | `autoPauseOnIdle` = false, `idleThresholdSec` = 60 | background.js:21-22 | Threshold floor 15 s (browser-enforced, triple-clamped). Pair with resume-on-focus. |
 | Auto-resume on tab focus | `resumeOnFocus` = true | background.js:23 | Also resumes from idle pause. |
 | Prune noisy input steps | `pruneInputs` = true | background.js:24 | Merges same-field input/change events within `pruneWindowMs` at report-snapshot time. |
-| GIF capture FPS | `hotkeyBurstFps` = 5 | background.js:28, 827-831 | Only 5/10/15 accepted; anything else snaps to 5. Effective FPS is further capped by stability mode and pressure tiers. |
+| GIF capture FPS | `hotkeyBurstFps` = 5 | background.js:28, 1123-1127 | Only 5/10/15 accepted (`normalizeHotkeyBurstFps`); anything else snaps to 5. Effective FPS is further capped by stability mode and pressure tiers. |
 
 ## 2. Hidden settings (not in popup; set via UPDATE_SETTINGS)
 
@@ -34,7 +34,7 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 | `screenshotMinIntervalMs` | 800 | background.js:11 | Window during which the previous shot is reused. Raise to cut `captureVisibleTab` load on chatty pages. |
 | `pruneWindowMs` | 1200 (min 100) | background.js:25 | Input-merge window. Too high merges distinct edits. |
 | `hotkeyBurstImageFormat` | "jpeg" | background.js:29 | PNG balloons spool bytes; keep JPEG for bursts. |
-| `hotkeyBurstJpegQuality` | 38 (clamp 20–95) | background.js:30 | Halved from 75 to keep exported bundles small (a burst-heavy report at q75 easily exceeds 400 MB). Stability mode still hard-caps at 75 (background.js:1388), so raising above 75 has no effect while stability is on. >85 triggers backpressure sooner. |
+| `hotkeyBurstJpegQuality` | 38 (clamp 20–95) | background.js:30 | Halved from 75 to keep exported bundles small (a burst-heavy report at q75 easily exceeds 400 MB). Stability mode still hard-caps at 75 (background.js:1684), so raising above 75 has no effect while stability is on. >85 triggers backpressure sooner. |
 | `burstStabilityMode` | true | background.js:31 | Reliability-first governor. Disable only for short bursts on fast machines. |
 | `burstMaxEffectiveFps` | 10 (clamp 4–15) | background.js:32 | Primary stability lever; with stability on, a 15 FPS selection is capped to 10. |
 | `redactRules` | 9 regexes | background.js:36-47 | Shared-secret/password/psk/token/PEM/private-key/CN-DN/fingerprint/long-hex patterns. Extend rather than remove. |
@@ -50,12 +50,12 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 | Backpressure pause floor | 180 ms | background.js:135 | Minimum loop delay under severe pressure/policy suppression. |
 | Cursor sample max age | 1400 ms | background.js:136 | Must exceed ~2 frame periods at min FPS; too high draws stale cursor markers. |
 | Stop-lifecycle capture timeout | 600 ms | background.js:137 | Raise if stop screenshots often report `capture-timeout`. |
-| Stop-drain timeout | 15000 ms | background.js:138 | Stop finalization waits this long for the spool to go idle before snapshotting (`drainOutcome` drained/timeout). Raise for very large write backlogs on slow disks. |
+| Stop-drain timeout | 15000 ms (`STOP_FINALIZATION_DRAIN_TIMEOUT_MS`) | background.js:146, 2311-2314 | Stop finalization waits this long for the spool to go idle before snapshotting (`drainOutcome` drained/timeout). Raise for very large write backlogs on slow disks. |
 | RECORD_EVENT persist coalesce interval | 1500 ms | background.js:139, 1460-1476 | Minimum spacing between per-event storage writes; a trailing flush catches the last event, cancelled on stop. Raising increases the data-loss window on crash; lowering restores write amplification. |
-| Queue depth caps (capture/process/write) | 6 / 12 / 18 | background.js:148-150 | Hitting any = severe. Raise `writeQueueMax` first. Hard enqueue overflow at 4× captureQueueMax (frame_spool.js:1033). |
+| Queue depth caps (capture/process/write) | 6 / 12 / 18 | background.js:156-158 | Hitting any = severe. Raise `writeQueueMax` first. Hard enqueue overflow at 4× `captureQueueMax` (frame_spool.js:1033). |
 | Queue byte caps (capture/process/write) | 12 / 24 / 24 MB | background.js:151-153 | ~150–400 KB per 1080p JPEG q75 frame. Shrink on low-RAM machines; enlarging delays, not prevents, severe pressure. |
 | Backpressure thresholds | severe ≥0.9; high ≥0.72 bytes / ≥0.75 depth; moderate ≥0.45 / 0.5 | frame_spool.js:365-367 **and** background.js:270-272 | Two copies — tune both together or they disagree. |
-| Decode worker | disabled (`decodeWorkerEnabled:false`), 1 worker, batch 1 | background.js:154-157 | Enable only if inline decode is a measured bottleneck; 3 consecutive worker errors permanently fall back inline (frame_spool.js:20). |
+| Decode worker | disabled (`decodeWorkerEnabled:false`), 1 worker, batch 1 | background.js:162-164 | Enable only if inline decode is a measured bottleneck; 3 consecutive worker errors (`DECODE_WORKER_ERROR_THRESHOLD`) permanently fall back inline (frame_spool.js:20). |
 | Collector pacing | yield 0 ms, write batch 2 | frame_spool.js:22-24 | Set yields to 2–5 ms if the background page janks during heavy bursts; batch >4 risks long IDB transactions. |
 | Pump stall retry | `PUMP_STALL_RETRY_MS` = 12 ms | frame_spool.js:25 | Timer fallback when a pump pass makes no forward progress (microtask rescheduling is progress-gated). Raise only if idle-burst CPU is a measured concern; lowering approaches the event-loop starvation bug this fixes. |
 | Burst persist throttle | max(2500 ms, 20 frame periods) | background.js:1421 | Lowering multiplies storage.local write churn. |
@@ -77,9 +77,9 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 | Knob | Value | Location | Guidance |
 |---|---|---|---|
 | Event rate limits | click 36/3s · input 96/3s · change 48/3s · submit 16/3s · keydown(Enter) 64/3s · mousemove 260/2s · nav 30/3s | content.js:36-44 | Fixed-window (≤2× at boundary), per-frame buckets. Raise `click` if rapid legit clicking drops steps; don't cut `input` below ~60. |
-| Trusted-event gate | `isTrusted === true` | content.js:75-77 | Do not remove — anti-forgery control from the security audit. Note: JS-dispatched automation events are intentionally not recorded. |
+| Trusted-event gate | `isTrusted === true` | content.js:118-119 | Do not remove — anti-forgery control from the security audit. Note: JS-dispatched automation events are intentionally not recorded. |
 | Input debounce | 350 ms (burst: 1000/fps, min 16 ms) | content.js:996, 70-73 | Idle time after last keystroke before an input step emits. |
-| Click UI probe | 450 ms (clamp 50–3000), URL poll 60 ms | content.js:32, 894 | Wait for DOM/URL reaction before `clickUiUpdated` verdict; slow SPAs may need 800–1000 ms. Adds latency to every non-burst click. |
+| Click UI probe | 450 ms (`CLICK_UI_PROBE_MS`, clamp 50–3000), URL poll 60 ms | content.js:32, 900-937, 1180 | Wait for DOM/URL reaction (`detectClickUiUpdateWithin`) before `clickUiUpdated` verdict; slow SPAs may need 800–1000 ms. Adds latency to every non-burst click. |
 | Nav URL poll | 1100 ms | content.js:394 | Top-frame-only interval that turns SPA route changes (pushState routes included) into nav steps — the history wrappers are Xray-invisible to page scripts, so this poll is the real mechanism. Lower for snappier SPA nav steps at the cost of per-tab timer churn. |
 | ui-change floor | 1500 ms | content.js:27 | Hard minimum between page-watch step emissions. |
 | Forced-screenshot formula | max(4567.38 ms, pageWatchMs × 1.34562); off at pageWatchMs ≥ 10000 | content.js:28-30 | Empirically tuned magic numbers; raise multiplier/floor to reduce screenshot volume on churny pages. |
@@ -130,7 +130,7 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 
 | Knob | Value | Location | Guidance |
 |---|---|---|---|
-| `DEBUG_LOGS` (background) | false | background.js:110 | `bgWarn` always prints; flip for verbose tracing. |
+| `DEBUG_LOGS` (background) | false | background.js:116 | `bgWarn` always prints; flip for verbose tracing. |
 | `POPUP_DEBUG` | false | popup.js:1 | Popup console diagnostics. |
 | Popup poll interval | 1200 ms | popup.js:327-329 | Snappier chips vs message traffic. |
 | GET_STATE log sampling | 1 in 50 | background.js:2432 | Debug-only. |
@@ -142,8 +142,9 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 - **Burst capture stutters / frames dropped:** check popup "Spool runtime" line. If pressure ≥ high: lower `hotkeyBurstFps` to 5, keep JPEG q75, raise `writeQueueMax` to 24 and write byte cap to 32 MB. Confirm `droppedFrames` stops climbing.
 - **Too many screenshots on dynamic pages:** raise `screenshotDebounceMs` to 1200, `pageWatchMs` to 1500+, or set page watch ≥ 10000 to disable forced ui-change shots.
 - **Steps missing during automation-driven flows:** expected — synthetic events fail the `isTrusted` gate. Drive the flow with real input or a WebDriver that emits trusted events.
-- **Report opens right after stop and misses tail burst frames:** stop finalization now drains the spool for up to 15 s before snapshotting (background.js:1995), so this should be rare; if it still occurs (drain timed out — check `drainOutcome`), reopen the report (refs retry) or raise the `waitForFrame` timeout (frame_spool.js:1305).
-- **Disk usage too high:** lower `FRAME_SPOOL_BYTE_CAP` (both copies: background.js:131, report.js:90) and delete old reports — GC reclaims orphaned media on the next maintenance pass (24 h age gate applies).
+- **Report opens right after stop and misses tail burst frames:** stop finalization now drains the spool for up to 15 s before snapshotting (background.js:2311-2314), so this should be rare; if it still occurs (drain timed out — check `drainOutcome`), reopen the report (refs retry) or raise the `waitForFrame` timeout (frame_spool.js:1301).
+- **Disk usage too high:** lower `FRAME_SPOOL_BYTE_CAP` (both copies: background.js:139, report.js:90) and delete old reports — GC reclaims orphaned media on the next maintenance pass (24 h age gate applies).
 - **Redaction misses fields on exotic pages:** add phrases to `SENSITIVE_KEYWORDS` (content.js:8-19) and/or regexes to `redactRules` (background.js:36-47); verify with a test recording, and consider `screenshotRedactionMode: omit` since pixels are never text-redacted.
 
 Updated 2026-07-14: all file:line references re-verified against the current tree, import caps retuned (2 GiB/60k/512 MiB), secure-at-rest row rewritten for purge-on-enable, retention row trims at import, new rows for persist coalescing, pump stall retry, nav URL poll, and stop-drain timeout, tail-frame recipe updated for the 15 s drain.
+Updated 2026-07-14: post-remediation line-ref sweep — normalizeSettings/normalizeScreenshotRedactionMode/normalizeHotkeyBurstFps, secureAtRestMode purge blocks, JPEG stability cap, stop-drain constant, writeQueueMax/decodeWorker frame_spool refs, isTrusted gate, click-UI probe (added `CLICK_UI_PROBE_MS`/`detectClickUiUpdateWithin` anchors + URL-poll site), `DEBUG_LOGS`, and `FRAME_SPOOL_BYTE_CAP` all repointed to their post-v1.16.5/v1.17.0 lines; drift detector runs clean (0 stale of 207 refs).

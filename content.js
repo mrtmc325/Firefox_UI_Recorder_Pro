@@ -40,8 +40,51 @@
     submit: { windowMs: 3000, max: 16 },
     keydown: { windowMs: 3000, max: 64 },
     mousemove: { windowMs: 2000, max: 260 },
-    nav: { windowMs: 3000, max: 30 }
+    nav: { windowMs: 3000, max: 30 },
+    paste: { windowMs: 3000, max: 12 }
   });
+  const PASTE_MAX_BYTES = 65536;
+  // Content-side capture-time paste redaction. Background.js:36 redactRules stays the
+  // authoritative post-hoc set; this is a deliberate mirror so a secret is never handed
+  // to the recorder pipeline in the clear even for one message.
+  const PASTE_SECRET_REGEXES = Object.freeze([
+    { name: "shared-secret", re: /(shared\s*secret\s*[:=]\s*)([^\s]+)/gi, replace: "$1[REDACTED]" },
+    { name: "password", re: /(password\s*[:=]\s*)([^\s]+)/gi, replace: "$1[REDACTED]" },
+    { name: "psk", re: /(psk\s*[:=]\s*)([^\s]+)/gi, replace: "$1[REDACTED]" },
+    { name: "token", re: /(token\s*[:=]\s*)([^\s]+)/gi, replace: "$1[REDACTED]" },
+    { name: "private-key", re: /(private\s*key\s*[:=]\s*)([^\s]+)/gi, replace: "$1[REDACTED]" },
+    { name: "pem-block", re: /-----BEGIN[^\n]{0,120}-----\r?\n[\s\S]{0,32768}?\r?\n-----END[^\n]{0,120}-----/g, replace: "[REDACTED CERTIFICATE OR KEY BLOCK]" },
+    { name: "long-hex", re: /\b[A-F0-9]{32,}\b/gi, replace: "[REDACTED]" },
+    { name: "long-blob", re: /[A-Za-z0-9+/=]{180,}/g, replace: "[REDACTED BLOB]" }
+  ]);
+  function redactPasteText(raw) {
+    try {
+      let value = String(raw == null ? "" : raw);
+      let truncated = false;
+      if (value.length > PASTE_MAX_BYTES) {
+        value = value.slice(0, PASTE_MAX_BYTES);
+        truncated = true;
+      }
+      let firstHit = "";
+      for (const rule of PASTE_SECRET_REGEXES) {
+        const before = value;
+        value = value.replace(rule.re, rule.replace);
+        if (value !== before && !firstHit) firstHit = rule.name;
+      }
+      if (firstHit) return { value, redacted: true, reason: firstHit };
+      if (truncated) return { value, redacted: false, reason: "paste-oversize" };
+      return { value, redacted: false, reason: "" };
+    } catch (_) {
+      return { value: "", redacted: true, reason: "paste-error" };
+    }
+  }
+  try {
+    globalThis.__uiRecorderContentTestHooks = {
+      redactPasteText,
+      PASTE_SECRET_REGEXES: PASTE_SECRET_REGEXES.map((r) => r.re.source),
+      PASTE_MAX_BYTES
+    };
+  } catch (_) {}
   const ACTION_HINTS = [
     { key: "save", words: ["save", "apply", "update"] },
     { key: "next", words: ["next", "continue"] },
@@ -1019,6 +1062,58 @@
     const el = e.target;
     if (!isTextInputLike(el)) return;
     scheduleInputEvent(el);
+  }, true);
+
+  // Paste capture: read-only. Never preventDefault / stopPropagation — the page's paste flow
+  // is untouched. clipboardData is inspected on the recorder's own event stream only, and
+  // any known-secret shape is replaced with "[REDACTED CLIPBOARD]" before RECORD_EVENT.
+  document.addEventListener("paste", async (e) => {
+    if (!isTrustedUserEvent(e)) return;
+    if (!consumeEventRateBudget("paste")) return;
+    let raw = "";
+    try {
+      raw = (e.clipboardData && typeof e.clipboardData.getData === "function")
+        ? String(e.clipboardData.getData("text") || "")
+        : "";
+    } catch (_) { return; }
+    if (!raw) return;
+
+    let st;
+    try { st = await getState(); } catch (_) { return; }
+    if (!st || !st.isRecording) return;
+    if (st.settings && st.settings.captureMode === "clicks") return;
+
+    const target = e.target || null;
+    const label = getLabelFor(target);
+    const human = humanize(target);
+    const login = findLoginContext();
+    const redaction = collectSensitiveRectsWithFrame();
+    const isSensitiveTarget = isSensitiveField(target) || hasSensitiveKeyword(label);
+    let result;
+    if (isSensitiveTarget) {
+      result = { value: "[REDACTED CLIPBOARD]", redacted: true, reason: "paste-sensitive-field" };
+    } else {
+      result = redactPasteText(raw);
+      if (result.redacted) result.value = "[REDACTED CLIPBOARD]";
+    }
+    await sendEvent({
+      type: "paste",
+      url: location.href,
+      tag: (target && target.tagName) || "",
+      id: (target && target.id) || "",
+      label: isSensitiveTarget ? "[REDACTED]" : label,
+      human,
+      value: result.value,
+      valueLength: result.redacted ? 0 : raw.length,
+      redacted: !!result.redacted,
+      redactionReason: result.reason || "",
+      pageIsLogin: login.isLogin,
+      redactRects: redaction.rects,
+      frameIsTop: redaction.frameIsTop,
+      frameOffsetKnown: redaction.frameOffsetKnown,
+      devicePixelRatio: window.devicePixelRatio || 1,
+      forceScreenshot: false
+    });
   }, true);
 
   document.addEventListener("mousemove", (e) => {

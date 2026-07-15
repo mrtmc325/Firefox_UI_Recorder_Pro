@@ -14,11 +14,12 @@ One-line summary: Repeatable acceptance test that proves the recorder, privacy c
 cd /Users/tristan/Firefox_UI_Recorder_Pro
 node --check background.js && node --check content.js && node --check frame_spool.js \
   && node --check frame_spool_worker.js && node --check popup.js && node --check report.js
+node docs/verify-tuning-refs.js  # TUNING.md line refs still resolve against source
 python3 -c "import json; json.load(open('manifest.json')); print('manifest ok')"
 npx --yes web-ext lint --source-dir .
 ```
 
-Pass: all `node --check` silent; lint reports 0 errors / 0 warnings / 0 notices.
+Pass: all `node --check` silent; `verify-tuning-refs.js` prints `0 stale`; lint reports 0 errors / 0 warnings / 0 notices; and `node docs/verify-tuning-refs.js` exits 0 (no stale TUNING.md line references).
 
 ## 2. Install & shell
 
@@ -50,6 +51,7 @@ Pass: all `node --check` silent; lint reports 0 errors / 0 warnings / 0 notices.
 | 4.1 | Record a login form (test page with `type=password` + username), submit | Password/username values appear as `[REDACTED]` in the report; single canonical submit step |
 | 4.2 | Type a long base64-ish blob (>180 chars) into a field | Value stored as `[REDACTED BLOB]` |
 | 4.3 | Record a page containing "API key"/"secret" labeled fields | Field values redacted via keyword match |
+| 4.4 | Paste `api_token=hunter2` into a text field during recording; then paste `hello world` into another field; stop; open report | Secret paste event stores value as `[REDACTED CLIPBOARD]` with a `redactionReason` set; non-secret paste records the value unmodified |
 
 ## 5. Screenshot privacy policies
 
@@ -62,6 +64,7 @@ Pass: all `node --check` silent; lint reports 0 errors / 0 warnings / 0 notices.
 | 5.5 | Restart Firefox with secure mode on | Prior secure-mode report is gone (session storage cleared); settings (incl. the mode itself) survive |
 | 5.6 | Disable secure mode; record; verify screenshots return | Normal screenshot capture resumes |
 | 5.7 | Purge-on-enable: with secure mode off, record a flow with screenshots and stop; then enable `Secure-at-rest mode` | Screenshots disappear from existing reports (report renders text-only steps) and unreferenced spooled frames are purged |
+| 5.8 | Host-permission revoke: start recording on a granted origin; go to `about:addons` → the extension → Permissions → revoke the origin | Popup status reads `Paused: host permission revoked — re-enable in about:addons to resume`; GET_STATE returns `pauseLimitationReason: "host-permission-revoked"`; regrant the origin → status reverts to normal (resume remains user-initiated) |
 
 ## 6. GIF burst pipeline
 
@@ -132,10 +135,16 @@ Coverage: isInjectableTabUrl http/https allowlist (§3), text redaction rules + 
 | 6 GIF burst | | | MANUAL PENDING | Requires live capture + popup diagnostics |
 | 8 Narration & STT | | | MANUAL PENDING | Requires OpenAI key + Firefox consent UI |
 
-Harness run 2026-07-14: **60 assertions, 60 passed, 0 failed.**
+Harness run 2026-07-14: **≥94 passed, 0 failed** (assertion count grows as coverage expands; floor tracks the current Tier-1 additions — paste-clipboard redaction, host-permission auto-pause coverage, ZIP-export streaming guard, and aria/aria-live popup labels).
 
 Failures: file with reproduction steps against the relevant subsystem (see [DESIGN.md](DESIGN.md) component map; tuning levers in [TUNING.md](TUNING.md); diagnostics reference in [OPERATIONS.md](OPERATIONS.md)).
 
 Updated 2026-07-14: added automated harness section + first results run (§1 PASS; §3/4/5/7 code-level PASS, §9 partial; §2/6/8 manual-pending).
 
 Updated 2026-07-14: added SPA-nav (3.8), bfcache (3.9), secure purge-on-enable (5.7), reports race (7.8), persist coalescing (9.4); 7.4 expects trim-at-import notice; 7.5 reworded for the 2 GiB cap and audio magic-byte sniffing.
+
+Updated 2026-07-14: Tier-1 additions —
+- §1 preflight now includes `node docs/verify-tuning-refs.js` (must exit 0).
+- §4.4 added: paste-clipboard secret interception (`[REDACTED CLIPBOARD]`) and non-secret passthrough.
+- §5.8 added: host-permission revoke reactive pause and regrant clear.
+- Harness assertion count restated as a floor (`≥94 passed`) so incremental additions no longer force doc edits.

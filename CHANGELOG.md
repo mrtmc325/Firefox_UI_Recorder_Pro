@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.18.0 - 2026-07-14
+
+### Added
+- Screen-reader accessibility pass on the popup: aria-labels on cards and icon-only buttons, aria-live on genuine status regions (record status, stop-finalization phase, loop reason), plus role/aria annotations on the tab-scope list. Report page picks up matching labels on landmark controls (T1.5).
+- Clipboard-paste secret interception: while recording, pasted values are inspected in the content script and their serialized value replaced with `[REDACTED CLIPBOARD]` before the event enters the RECORD_EVENT stream. Matches the same redaction rule shapes background.js already uses for typed-in text. Page's own clipboard is not touched (T1.4).
+- Preflight check: `node docs/verify-tuning-refs.js` verifies every `file.js:N` reference in docs/TUNING.md still resolves to a real identifier at the referenced line, and fails release preflight on drift (T1.2). Added to docs/OPERATIONAL_TEST.md §1.
+
+### Security
+- Reactive pause on host-permission revoke: when the user revokes a granted origin in `about:addons` mid-recording, `browser.permissions.onRemoved` fires, the recorder pauses, and `pauseLimitationReason: "host-permission-revoked"` is exposed via GET_STATE and surfaced in the popup status. Regranting via `permissions.onAdded` (with `permissions.contains()` coverage check for wildcard/broader grants) clears the flag; resume remains user-initiated (T1.1).
+
+### Changed
+- Raw ZIP export streams parts through `new Blob([...parts], {type: "application/zip"})` instead of concatenating into a single Uint8Array first — cuts peak-memory pressure on large-report exports. Retains a fail-loud guard for archives that exceed ZIP-non-64 offset/entry limits (T1.3).
+
+### Documentation
+- `docs/DESIGN.md`, `docs/OPERATIONS.md`, `docs/TUNING.md` synced to reflect Tier-1 additions (paste listener as the seventh capture-phase listener; host-permission auto-pause transition on the lifecycle diagram; paste rate limit and redaction cap entries in the tuning table).
+
 ## v1.17.0 - 2026-07-14
 
 ### Security

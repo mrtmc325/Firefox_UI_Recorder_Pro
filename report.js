@@ -1504,18 +1504,6 @@ function toDosDateTime(value) {
   };
 }
 
-function concatBytes(parts) {
-  let total = 0;
-  parts.forEach((part) => { total += part.length; });
-  const out = new Uint8Array(total);
-  let offset = 0;
-  parts.forEach((part) => {
-    out.set(part, offset);
-    offset += part.length;
-  });
-  return out;
-}
-
 function buildStoredZip(entries) {
   const localParts = [];
   const centralParts = [];
@@ -1569,6 +1557,18 @@ function buildStoredZip(entries) {
   });
 
   const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const ZIP_UINT32_MAX = 0xFFFFFFFF;
+  const ZIP_UINT16_MAX = 0xFFFF;
+  if (
+    localOffset > ZIP_UINT32_MAX - 22 ||
+    centralSize > ZIP_UINT32_MAX ||
+    entries.length > ZIP_UINT16_MAX
+  ) {
+    const totalBytes = localOffset + centralSize + 22;
+    throw new Error(
+      `buildStoredZip: archive exceeds ZIP (non-64) limits (${totalBytes} bytes / ${entries.length} entries) — ZIP64 not supported`
+    );
+  }
   const end = new Uint8Array(22);
   const endView = new DataView(end.buffer);
   endView.setUint32(0, 0x06054b50, true);
@@ -1580,7 +1580,7 @@ function buildStoredZip(entries) {
   endView.setUint32(16, localOffset, true);
   endView.setUint16(20, 0, true);
 
-  return concatBytes([...localParts, ...centralParts, end]);
+  return new Blob([...localParts, ...centralParts, end], { type: "application/zip" });
 }
 
 function parseStoredZip(buffer, options = {}) {
@@ -4742,7 +4742,7 @@ function buildExportHtml(report, options = {}) {
     <button type="button" class="viewer-player-btn viewer-fullscreen-btn" data-viewer-action="toggle-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen"><span class="viewer-icon viewer-icon-fullscreen" data-viewer-role="fullscreen-icon" aria-hidden="true"></span></button>
   </div>
   ${audioSummary ? `<div class="section-text-audio-meta">${escapeHtml(audioSummary)}</div>` : ""}
-  <div class="section-text-audio-status" data-audio-role="status">${escapeHtml(audioStatusText)}</div>
+  <div class="section-text-audio-status" data-audio-role="status" role="status" aria-live="polite">${escapeHtml(audioStatusText)}</div>
   <audio data-audio-role="source" data-audio-duration-ms="${safeAudioDurationMs}" preload="metadata" src="${escapedAudioSrc}"></audio>
 </div>`;
     return `<div class="viewer-cc-bar${hasPayload || ref ? "" : " viewer-cc-empty"}" id="${safeId}" data-caption-role="panel">

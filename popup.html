@@ -6,7 +6,7 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="popup">
-  <header class="app-header">
+  <header class="app-header" role="banner">
     <div class="brand">
       <div class="logo-dot" aria-hidden="true"></div>
       <div>
@@ -17,7 +17,7 @@
     <div class="version" id="app-version">v...</div>
   </header>
 
-  <section class="card actions">
+  <section class="card actions" aria-label="Recording controls">
     <div class="action-row">
       <button id="start" class="btn primary">Start</button>
       <button id="stop" class="btn ghost">Stop</button>
@@ -30,7 +30,7 @@
     </div>
   </section>
 
-  <section class="card settings-card">
+  <section class="card settings-card" aria-label="Capture settings">
     <div class="card-title">Settings</div>
 
     <details class="settings-group settings-group-scope">
@@ -41,7 +41,7 @@
       <div class="settings-group-body">
         <div class="row row-tab-scope">
           Tab selection
-          <div class="tab-scope-actions">
+          <div class="tab-scope-actions" aria-label="Tab scope actions">
             <button id="tab-scope-select-active" class="btn subtle btn-small" type="button">Active</button>
             <button id="tab-scope-select-all" class="btn ghost btn-small" type="button">All</button>
             <button id="tab-scope-clear" class="btn ghost btn-small" type="button">Clear</button>
@@ -49,9 +49,9 @@
             <button id="tab-scope-watch" class="btn ghost btn-small" type="button">Watch Off</button>
           </div>
         </div>
-        <div id="tab-scope-list" class="tab-scope-list"></div>
-        <div id="tab-scope-meta" class="hint">Select one or more tabs before starting capture.</div>
-        <div id="tab-scope-status" class="hint"></div>
+        <div id="tab-scope-list" class="tab-scope-list" role="group" aria-label="Recordable tabs" aria-describedby="tab-scope-meta"></div>
+        <div id="tab-scope-meta" class="hint" aria-live="polite">Select one or more tabs before starting capture.</div>
+        <div id="tab-scope-status" class="hint" aria-live="polite"></div>
       </div>
     </details>
 
@@ -149,8 +149,8 @@
           GIF Loop
           <span id="burst-loop-chip" class="burst-mode-chip">Loop: Idle</span>
         </div>
-        <div id="burst-loop-reason" class="hint">Loop state updates while recording.</div>
-        <div id="stop-finalization" class="hint">Stop finalization: idle</div>
+        <div id="burst-loop-reason" class="hint" aria-live="polite">Loop state updates while recording.</div>
+        <div id="stop-finalization" class="hint" aria-live="polite">Stop finalization: idle</div>
         <div id="burst-perf" class="hint">Capture ok/fail: 0/0 | Dropped: 0 | Backpressure pauses: 0 | Avg cap/spool: 0.0ms/0.0ms | Queue high-water: 0</div>
         <div id="spool-runtime" class="hint">Spool: depth 0 | bytes 0.00MB | pressure healthy | mode inline-safe | safety cap off</div>
         <label class="row">
@@ -177,9 +177,9 @@
     </details>
   </section>
 
-  <footer class="statusbar">
-    <div class="status" id="status">Idle</div>
-    <div class="status" id="count"></div>
+  <footer class="statusbar" role="contentinfo">
+    <div class="status" id="status" role="status" aria-live="polite">Idle</div>
+    <div class="status" id="count" role="status"></div>
   </footer>
 
   <script src="popup.js"></script>
