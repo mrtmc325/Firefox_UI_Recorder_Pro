@@ -66,7 +66,13 @@ Use the following in AMO reviewer notes:
    - `storage`: reports/settings/state persistence.
    - `downloads`: report export.
    - `idle`: optional auto-pause behavior.
-   - `<all_urls>`: content capture across visited sites while recording.
+   - `<all_urls>` (optional_permissions): content capture across visited sites while recording. Not granted at install; the user selects tab origins from the popup **Recording Scope** at start time and Firefox prompts to grant those specific host origins.
+   - No `web_accessible_resources`: the extension pages (`report.html`, `docs.html`) are opened via `runtime.getURL` in extension-owned tabs and are not reachable from web content.
+   - No `match_about_blank`.
+5. **Sender validation**: `START_RECORDING` messages are rejected unless they originate from the extension's own runtime.
+6. **Trusted-event gating**: the content script only records events with `isTrusted === true`, with per-event-type rate limits against synthetic event floods.
+7. **Data-at-rest options**: users can toggle `Secure-at-rest mode` (memory-only session storage; disables screenshot capture) and `Screenshot redaction policy: Omit all screenshots` from the popup.
+8. **OpenAI API key**: kept in the report tab's session storage only (cleared on tab close, never persisted to disk, never included in exports).
 
 ## 6. Packaging Steps
 

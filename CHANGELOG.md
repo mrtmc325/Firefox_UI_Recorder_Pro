@@ -4,6 +4,45 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.17.0 - 2026-07-14
+
+### Security
+- Removed the deprecated live-microphone proxy subsystem end-to-end (background/content dead code); legacy `SECTION_MIC_*` runtime messages receive a stable rejection.
+- OpenAI API key is session-only: held in the report tab's `sessionStorage`, cleared when the tab closes, legacy persisted `localStorage` copy migrated and deleted on page load. The key dialog no longer pre-fills the existing key and requires explicit confirmation to clear it.
+- Capture listeners now record trusted user events only (`isTrusted`) with per-event-type rate limits against synthetic event floods.
+- Removed `web_accessible_resources` — the extension pages (`report.html`, `docs.html`) are opened via `runtime.getURL` in extension-owned tabs, not from web content, so the exposure was unnecessary.
+- Raw ZIP import hardening: Store-only parser with archive/entry-count/per-entry caps sized to round-trip the extension's own exports (2 GiB / 60,000 entries / 512 MiB per entry), path-traversal/duplicate/NUL entry rejection, image and audio MIME allow-lists with magic-byte content sniffing, upload byte caps (2 MiB text, 24 MiB audio) enforced on restored section text/audio, and skipped-entry counts surfaced in the import status.
+- Exported standalone HTML now ships a restrictive Content-Security-Policy meta (defense-in-depth for the third-party viewing surface); the builder's quick-preview iframe is sandboxed (`allow-scripts`, opaque origin — no extension-storage access from preview content).
+
+### Added
+- Screenshot redaction policy setting: `Capture screenshots` (default) or `Omit all screenshots` (suppresses every screenshot pixel path: step, lifecycle, and burst capture).
+- Secure-at-rest mode: recorder state/reports persist to memory-only `browser.storage.session` (screenshot-free skeleton in `storage.local`); all screenshot capture is suppressed; enabling the mode purges screenshot pixels already at rest (in-memory events/reports, persisted state, and unreferenced frame-spool media); section text/audio persistence is blocked while active; Firefox builds without `storage.session` fall back to a screenshot-free local skeleton.
+- Stop finalization now drains the frame spool (bounded 15 s `waitUntilIdle`) before snapshotting and records the drain outcome in diagnostics.
+- Pending-stop snapshot salvage: if the browser/extension restarts during stop finalization, the detached session is recovered on next startup as a "(recovered)" report.
+- Project documentation set under `docs/` — `DESIGN.md` (architecture), `OPERATIONS.md` (runbook), `TUNING.md` (tunable knobs), `OPERATIONAL_TEST.md` (acceptance test), and `optest.js` (60-assertion headless behavioral harness against the shipped source).
+
+### Changed
+- Report storage writes are stamped with a writer marker (`reportsMeta`): the background ignores its own `storage.onChanged` echoes, and the report editor merges by report id before saving — an open report tab can no longer overwrite a recording finalized after the tab loaded.
+- Per-event state persistence is coalesced (at most one full-state write per 1.5 s with a guaranteed trailing flush), eliminating unbounded `storage.local` write amplification during event-heavy recordings.
+- Report retention (3 most recent) is now also enforced at ZIP import time with a visible notice, instead of silently on the next recording save.
+- Default burst JPEG quality halved from 75 to 38 (clamp floor 60 → 20) so exported bundles from burst-heavy recordings stay under practical share sizes.
+- `isInjectableTabUrl` uses an http/https allowlist matching the manifest scheme grant.
+- An unrecognized stored `screenshotRedactionMode` value now fails closed to `omit` instead of open to `none`.
+- Report-page frame-spool GC now protects the active recording session's frames and skips the pass entirely when recorder state cannot be read.
+- Store-listing description updated to reflect text redaction plus optional screenshot omission (`"configurable redaction"`).
+
+### Fixed
+- Frame-spool pump could spin on back-to-back microtasks and starve the background event loop (hang) under sustained burst load with inline decode; the pump is now progress-gated and retries on a 12 ms timer when stalled.
+- Retention rollover deleted the dropped report's frames before the new reports list was persisted; persistence now happens first and GC is skipped when it fails.
+- Burst frames falling back inline (frame spool unavailable) are now bounded by burst screenshot compaction instead of growing without limit.
+- Rapid GIF-hotkey off/on could spawn overlapping burst capture loops; ticks now own the loop through run tokens and stale ticks abort without rescheduling.
+- Overlapping stop → start → stop sequences no longer corrupt stop-finalization diagnostics (state patches are per-job guarded).
+- SPA route changes (`history.pushState`/`replaceState`) were never captured — content-script history wrappers are invisible to page scripts in Firefox; navigation is now detected by a top-frame URL poll.
+- Back/forward (bfcache) restores no longer permanently disable page watch, and a cancelled `beforeunload` no longer tears it down.
+
+### Documentation
+- README, `docs.html`, `PRIVACY.md`, `docs/AMO_SUBMISSION.md`, `README.txt`, and popup hint/label text synced to the remediated behavior.
+
 ## v1.16.5 - 2026-03-19
 
 ### Changed

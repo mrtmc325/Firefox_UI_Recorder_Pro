@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.16.5
+# UI Workflow Recorder Pro (Firefox) v1.17.0
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.16.4`
+- Version: `1.17.0`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -221,11 +221,15 @@ Expected behavior:
 - Live microphone recording is intentionally disabled in this release.
 
 ## Privacy
-- Data remains local in browser storage.
+- Data remains local in browser storage (or memory-only `browser.storage.session` when Secure-at-rest mode is enabled).
+- Host permissions are optional: recording asks for per-origin `http/https` access from the popup **Recording Scope** at start time, not at install time.
 - No external API/network service calls are required for core capture/export features.
-- OpenAI cloud narration is optional and only used when selected in the builder with an API key and granted Firefox website content permission.
+- OpenAI cloud narration is optional and only used when selected in the builder with an API key and granted Firefox website content permission. The API key lives in the report tab's session storage only — cleared on tab close, never persisted to disk, never embedded in exports.
 - OpenAI speech-to-text is optional and uses the same API key/permission gate with manual audio-file upload from the section editor.
-- Redaction applies to report text fields; screenshots are not masked automatically.
+- Text redaction applies to report text fields. Screenshots can be omitted entirely via `Screenshot redaction policy: Omit all screenshots`, and Secure-at-rest mode additionally suppresses all screenshot capture.
+- Content script records only trusted user events (synthetic/scripted events are ignored) with per-event-type rate limits.
+- Raw ZIP import enforces strict size, entry-count, path-safety, and image/audio magic-byte checks; caps are sized to accept anything the extension itself can export.
+- Exported standalone HTML ships with a restrictive Content-Security-Policy meta tag (defense-in-depth for the third-party viewing surface).
 
 ## Publishing to AMO
 - AMO submission checklist and reviewer notes template: `docs/AMO_SUBMISSION.md`
