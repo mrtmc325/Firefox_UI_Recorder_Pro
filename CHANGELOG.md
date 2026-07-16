@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.19.0 - 2026-07-16
+
+### Security
+- Encrypted-at-rest report vault (opt-in, PBKDF2-SHA-256 600k iterations → AES-GCM-256, per-report 16-byte salt / 12-byte IV, envelope v1); vault-locked state hard-refuses to overwrite encrypted reports with plaintext or placeholders (data-loss safeguard).
+- OpenAI API key session vault: a non-extractable WebCrypto AES-GCM session key wraps the API key before it lands in tab sessionStorage; encrypted key is decrypted on demand and never surfaces to logs, exports, or the diagnostics ring.
+- Cross-frame redaction-rect handshake tightened: `FRAME_ASSIGN` requires `ev.source === window.parent`; `FRAME_RECTS` requires the source window to resolve to a known child iframe via `findChildIframeElementByWindow`; caches are keyed by verified iframe identity rather than attacker-supplied `frameId`; responses target `ev.origin` exactly instead of `"*"`. Page-world scripts can no longer forge assign or overwrite sibling redaction rects.
+- Custom redaction rules with in-popup editor: user-supplied regexes layered ON TOP of the built-in rules (never replacing). Each candidate is ReDoS-probed against a battery of ~4 KB pathological samples (multiple character classes) with a 50 ms per-sample compile budget; the runtime redactor additionally enforces a 25 ms per-rule wall-clock budget and skips (never hangs on) a rule that overruns.
+- Ed25519-signed HTML exports (opt-in): report tab generates an ephemeral WebCrypto Ed25519 keypair, signs the canonicalized export body, embeds signature + public key as versioned HTML comments (`UIRPRO-SIGNATURE-V1:` / `UIRPRO-PUBKEY-V1:`), and emits a self-contained offline `verify.html` alongside.
+- Iframe redaction-rect coordinates propagate top-frame offsets across the frame tree — closes the second DESIGN.md open question.
+
+### Added
+- Report retention exposed as a popup setting (`reportRetention`, default 3, clamp 1–10) — closes the first DESIGN.md open question. Enforced in `saveReportSnapshotDetached` and at raw-ZIP import time.
+- Runtime-toggleable `debugLogsEnabled` under the popup Advanced group. The diagnostics ring capture is always populated; the flag only gates console emission.
+- Bounded in-memory diagnostics ring (500 entries) with a PII-key sanitizer (`/origin|host|url|apikey|token|password|secret/i` → `[STRIPPED]`). New `GET_DIAGNOSTICS` runtime message returns the ring; popup "Copy diagnostics" button copies the sanitized JSON — no auto-upload.
+- Live redaction tester panel in the popup: Test button runs the same pipeline (built-in + saved custom rules) against paste input with zero storage side effects.
+- Manual redact-before-export tool in the report editor: user-drawn rectangles destructively overwrite source pixels (with confirm gate), the frame hash is re-computed, and exports carry no trace of the redacted regions. Annotation-mode select labels the option as "Redact (destructive)".
+- Schema-versioned migration table: `SETTINGS_SCHEMA_VERSION` and `REPORTS_SCHEMA_VERSION` are stamped on every persisted write; a stored earlier version triggers registered migrations on load. Ships v1 baseline with an empty registry (mechanism only, ready for future bumps).
+
+### Fixed
+- Vault-mode `saveReports` no longer silently downgrades to plaintext on WebCrypto failure or on unlock-cancel — it refuses the write and surfaces the error. Vault-locked placeholders never reach storage: raw envelopes are preserved via a `rawReportEnvelopesById` Map populated at load and substituted at write.
+- Passphrase input and both new redaction textareas have accessible names via `aria-labelledby`; passphrase dialog now populates an `role="alert"` error region with remaining-attempt count; annotation-mode `<select>` labeled.
+- `render()` no longer double-computes the view model when calling `updateAux()` — updateAux accepts a pre-built view and skips redundant `buildVisibleViewModel` / `buildBurstInsertionPlan` work on the full-render path.
+- Diagnostics ring "N loaded" counter no longer re-announces on every 1.2 s refresh (change-detected write; `aria-live` dropped from the informational span).
+
+### Documentation
+- `docs/DESIGN.md`, `docs/TUNING.md`, `docs/OPERATIONS.md` synced to Tier-2 additions; both DESIGN.md open questions resolved and moved to a "Confirmed defaults" section. TUNING.md gains a §9 "Encrypted-at-rest vault" section and a §10 "Signed exports" section, plus new rows for the diagnostics ring and schema versions.
+
+### Known deferred (integration branch, not shipped in v1.19.0)
+- Tier-2 Batches 2B (recording presets, rename/delete reports, undo stack, coalesced editor saves, storage quota preflight, cross-report search, step tags, report + section templates, Markdown/plain-text export, JSON Schema doc for the raw ZIP bundle, Playwright test-scaffold emitter, extended optest coverage, version-migration fixture, web-ext-run + eslint dev tooling) and 2D (vector annotations design doc, render/updateAux split follow-up, precomputed search haystack) — built in per-item worktrees during the workflow but not merged due to overlapping edits on `popup.js`/`report.js`/`docs/optest.js`. Preserved under the `enhance/tier-2-2026-07-15` branch's git-worktree list for follow-up integration.
+
 ## v1.18.0 - 2026-07-14
 
 ### Added

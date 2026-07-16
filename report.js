@@ -119,6 +119,7 @@ const SECTION_TRANSCRIPTION_OPENAI_MAX_BYTES = 24 * 1024 * 1024;
 const SECTION_NARRATION_OPENAI_MAX_CHARS = 12000;
 const SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE = "__uiRecorderNarrationOpenAiApiKeySession";
 const SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE = "__uiRecorderNarrationOpenAiApiKey";
+const SECTION_NARRATION_OPENAI_API_KEY_ENC_SESSION_STORAGE = "__uiRecorderNarrationOpenAiApiKeySessionEnc";
 const SECTION_DESCRIPTION_MAX_CHARS = 200;
 const SECTION_NARRATION_OPENAI_VOICES = Object.freeze([
   "alloy",
@@ -2076,6 +2077,161 @@ function el(tag, cls, text) {
   return n;
 }
 
+// T2C.7: Passphrase-derived vault for encrypted-at-rest reports.
+// PBKDF2-HMAC-SHA256 with 600000 iterations (per CLAUDE.md KDF policy) derives an
+// AES-GCM-256 key from the user passphrase + per-report salt. Ciphertext lives in
+// browser.storage.local; session key is memory-only in this report-page context.
+//
+// Envelope shape (per report):
+//   { id, createdAt, title, sessionId, encryptedVaultV: 1,
+//     kdf: "PBKDF2-SHA256", kdfIter: 600000, alg: "AES-GCM",
+//     salt: <b64 16>, iv: <b64 12>, ct: <b64 JSON(report)> }
+//
+// Documented incomplete edges (opt-in / smallest-slice ship):
+//  1. IndexedDB frame spool payloads (screenshot bytes) are NOT vault-encrypted.
+//     Use secureAtRestMode alongside vault mode for maximum on-disk minimization.
+//  2. Reports written by background stop-finalization land in plaintext because the
+//     service worker does not hold the session key. Opening the report page while
+//     vault mode is on and re-saving migrates them.
+//  3. No bulk "re-save all" button — plaintext reports remain plaintext until saved.
+const ENCRYPTED_VAULT_ENVELOPE_V = 1;
+const ENCRYPTED_VAULT_KDF_ITERATIONS = 600000;
+const ENCRYPTED_VAULT_SALT_BYTES = 16;
+const ENCRYPTED_VAULT_IV_BYTES = 12;
+let encryptedVaultSessionKey = null;
+let encryptedVaultLastSalt = null;
+let encryptedVaultUnavailableWarned = false;
+// T2C.7 remediation: retain the raw encrypted envelope for every envelope we
+// load, keyed by report id. saveReports uses this to re-emit the original
+// envelope for any report whose in-memory copy is a "vault unlock failed"
+// placeholder — writing the placeholder object would clobber real ciphertext.
+const rawReportEnvelopesById = new Map();
+
+function encryptedVaultHasSubtle() {
+  try {
+    return !!(typeof crypto !== "undefined" && crypto && crypto.subtle && crypto.getRandomValues);
+  } catch (_) { return false; }
+}
+
+function encryptedVaultB64Encode(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+
+function encryptedVaultB64Decode(str) {
+  const bin = atob(String(str || ""));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function encryptedVaultIsEnvelope(v) {
+  return !!(v && typeof v === "object"
+    && v.encryptedVaultV === ENCRYPTED_VAULT_ENVELOPE_V
+    && v.alg === "AES-GCM" && v.kdf === "PBKDF2-SHA256"
+    && typeof v.salt === "string" && typeof v.iv === "string" && typeof v.ct === "string");
+}
+
+async function encryptedVaultDeriveKey(passphrase, saltBytes) {
+  if (!encryptedVaultHasSubtle()) throw new Error("WebCrypto unavailable");
+  const pw = new TextEncoder().encode(String(passphrase || ""));
+  const material = await crypto.subtle.importKey(
+    "raw", pw, { name: "PBKDF2" }, false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: saltBytes, iterations: ENCRYPTED_VAULT_KDF_ITERATIONS, hash: "SHA-256" },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encryptedVaultUnlockWithPassphrase(passphrase, saltBytes) {
+  const salt = saltBytes || crypto.getRandomValues(new Uint8Array(ENCRYPTED_VAULT_SALT_BYTES));
+  const key = await encryptedVaultDeriveKey(passphrase, salt);
+  encryptedVaultSessionKey = key;
+  encryptedVaultLastSalt = salt;
+  return { key, salt };
+}
+
+function encryptedVaultLock() {
+  encryptedVaultSessionKey = null;
+  encryptedVaultLastSalt = null;
+}
+
+function encryptedVaultIsUnlocked() { return !!encryptedVaultSessionKey; }
+
+async function encryptedVaultEncryptReport(report) {
+  if (!encryptedVaultSessionKey) throw new Error("vault-not-unlocked");
+  const salt = encryptedVaultLastSalt || crypto.getRandomValues(new Uint8Array(ENCRYPTED_VAULT_SALT_BYTES));
+  const iv = crypto.getRandomValues(new Uint8Array(ENCRYPTED_VAULT_IV_BYTES));
+  const plaintext = new TextEncoder().encode(JSON.stringify(report || {}));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, encryptedVaultSessionKey, plaintext));
+  return {
+    id: report && report.id ? report.id : null,
+    createdAt: report && report.createdAt ? report.createdAt : null,
+    sessionId: report && report.sessionId ? report.sessionId : null,
+    title: report && report.title ? report.title : null,
+    encryptedVaultV: ENCRYPTED_VAULT_ENVELOPE_V,
+    kdf: "PBKDF2-SHA256",
+    kdfIter: ENCRYPTED_VAULT_KDF_ITERATIONS,
+    alg: "AES-GCM",
+    salt: encryptedVaultB64Encode(salt),
+    iv: encryptedVaultB64Encode(iv),
+    ct: encryptedVaultB64Encode(ct)
+  };
+}
+
+async function encryptedVaultDecryptReport(envelope) {
+  if (!encryptedVaultSessionKey) throw new Error("vault-not-unlocked");
+  const iv = encryptedVaultB64Decode(envelope.iv);
+  const ct = encryptedVaultB64Decode(envelope.ct);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, encryptedVaultSessionKey, ct);
+  const json = new TextDecoder().decode(pt);
+  return JSON.parse(json);
+}
+
+async function encryptedVaultSettingEnabled() {
+  try {
+    const stored = await browser.storage.local.get(["settings"]);
+    return !!(stored && stored.settings && stored.settings.encryptedAtRestVaultEnabled);
+  } catch (_) { return false; }
+}
+
+function encryptedVaultShowPassphrasePrompt(saltHintB64) {
+  return new Promise((resolve) => {
+    let dlg = document.getElementById("vault-passphrase-dialog");
+    if (!dlg) {
+      dlg = document.createElement("dialog");
+      dlg.id = "vault-passphrase-dialog";
+      dlg.innerHTML = ""
+        + '<form method="dialog" style="padding:16px;max-width:420px;font-family:system-ui;">'
+        + '<h3 id="vault-passphrase-title" style="margin:0 0 8px;">Unlock encrypted report vault</h3>'
+        + '<p id="vault-passphrase-desc" style="margin:0 0 12px;font-size:13px;">Enter the passphrase used to encrypt your reports. Session-only; never stored.</p>'
+        + '<input id="vault-passphrase-input" type="password" autocomplete="current-password" aria-labelledby="vault-passphrase-title vault-passphrase-desc" style="width:100%;padding:8px;box-sizing:border-box;" />'
+        + '<div id="vault-passphrase-error" style="color:#b91c1c;font-size:12px;margin-top:6px;display:none;"></div>'
+        + '<menu style="margin:12px 0 0;padding:0;display:flex;gap:8px;justify-content:flex-end;list-style:none;">'
+        + '<button value="cancel">Cancel</button>'
+        + '<button id="vault-passphrase-ok" value="ok">Unlock</button>'
+        + '</menu>'
+        + '</form>';
+      document.body.appendChild(dlg);
+    }
+    const input = dlg.querySelector("#vault-passphrase-input");
+    const err = dlg.querySelector("#vault-passphrase-error");
+    if (input) input.value = "";
+    if (err) { err.style.display = "none"; err.textContent = ""; }
+    if (typeof dlg.showModal === "function") dlg.showModal();
+    else dlg.setAttribute("open", "");
+    dlg.addEventListener("close", function once() {
+      dlg.removeEventListener("close", once);
+      resolve({ passphrase: dlg.returnValue === "ok" ? (input && input.value) || "" : null, salt: saltHintB64 });
+    }, { once: true });
+  });
+}
+
 function reportIdentityKey(entry) {
   if (!entry || typeof entry !== "object") return "";
   const id = String(entry.id || "").trim();
@@ -2096,15 +2252,42 @@ async function saveReports(reports) {
     const key = reportIdentityKey(entry);
     return key && !knownKeys.has(key);
   });
-  const mergedReports = unknownNewer.length ? [...unknownNewer, ...pageReports] : pageReports;
+  // T2C.7 remediation: never emit "vault unlock failed" placeholder objects —
+  // substitute the raw envelope we captured at load time so ciphertext survives
+  // a save cycle when the user could not unlock the vault this session.
+  const preservedMerged = mergedReports.map((r) => {
+    if (r && r.vaultUnlockFailed) {
+      const raw = rawReportEnvelopesById.get(r.id);
+      if (raw && encryptedVaultIsEnvelope(raw)) return raw;
+    }
+    return r;
+  });
+  // T2C.7: wrap reports in AES-GCM envelopes when vault mode is on AND the
+  // session key is unlocked. Reports already in envelope form pass through.
+  const vaultOn = await encryptedVaultSettingEnabled();
+  const vaultUnlocked = encryptedVaultIsUnlocked();
+  // Vault mode on but locked: refuse the write instead of silently
+  // downgrading to plaintext (would leak clear-text reports to storage).
+  if (vaultOn && !vaultUnlocked) {
+    throw new Error("vault-locked: encrypted vault is enabled but not unlocked; save refused to prevent plaintext write");
+  }
+  let writeReports = preservedMerged;
+  if (vaultOn && vaultUnlocked) {
+    writeReports = [];
+    for (const r of preservedMerged) {
+      if (encryptedVaultIsEnvelope(r)) { writeReports.push(r); continue; }
+      // Rethrow on any per-report encrypt failure — never fall back to plaintext.
+      writeReports.push(await encryptedVaultEncryptReport(r));
+    }
+  }
   const reportsMeta = { writer: "report", nonce: Date.now() };
   if (storageContext.secureAtRestMode && storageContext.areaName === "session") {
-    await storageContext.area.set({ reports: mergedReports, reportsMeta });
+    await storageContext.area.set({ reports: writeReports, reportsMeta });
     await browser.storage.local.set({ reports: [], reportsMeta });
   } else if (storageContext.secureAtRestMode) {
-    await browser.storage.local.set({ reports: sanitizeReportsForSecurePersistence(mergedReports), reportsMeta });
+    await browser.storage.local.set({ reports: sanitizeReportsForSecurePersistence(writeReports), reportsMeta });
   } else {
-    await browser.storage.local.set({ reports: mergedReports, reportsMeta });
+    await browser.storage.local.set({ reports: writeReports, reportsMeta });
   }
   scheduleFrameSpoolSync(mergedReports, 450);
 }
@@ -2168,7 +2351,84 @@ async function resolveReportStorageContext() {
 async function loadReportsFromStorage() {
   const storageContext = await resolveReportStorageContext();
   const stored = await storageContext.area.get(["reports"]);
-  const reports = Array.isArray(stored && stored.reports) ? stored.reports : [];
+  const rawReports = Array.isArray(stored && stored.reports) ? stored.reports : [];
+  // T2C.7: if any envelope is encrypted, prompt for the passphrase once and try to
+  // decrypt. Reports that fail decrypt are surfaced as placeholder entries so the
+  // list still renders. Plaintext reports pass through untouched.
+  const envelopeIdxs = [];
+  rawReports.forEach((r, i) => {
+    if (encryptedVaultIsEnvelope(r)) {
+      envelopeIdxs.push(i);
+      // T2C.7 remediation: retain the raw envelope keyed by both the envelope
+      // id (when present) and the placeholder-fallback id, so saveReports can
+      // re-emit it if the in-memory copy is a vault-unlock-failed placeholder.
+      const rid = r && r.id;
+      if (rid) rawReportEnvelopesById.set(rid, r);
+      rawReportEnvelopesById.set(`enc-${i}`, r);
+    }
+  });
+  if (!envelopeIdxs.length) return { reports: rawReports, storageContext };
+  const firstEnv = rawReports[envelopeIdxs[0]];
+  const saltHint = firstEnv && firstEnv.salt;
+  const reports = rawReports.slice();
+  if (!encryptedVaultHasSubtle()) {
+    if (!encryptedVaultUnavailableWarned) {
+      encryptedVaultUnavailableWarned = true;
+      console.warn("ui-recorder: WebCrypto unavailable — encrypted reports cannot be decrypted");
+    }
+    envelopeIdxs.forEach((i) => {
+      reports[i] = { id: rawReports[i].id || `enc-${i}`, title: rawReports[i].title || "[Encrypted report]", createdAt: rawReports[i].createdAt, sessionId: rawReports[i].sessionId, events: [], vaultUnlockFailed: true, vaultUnlockReason: "webcrypto-unavailable" };
+    });
+    return { reports, storageContext };
+  }
+  // Reuse unlocked session key if present; otherwise prompt.
+  let unlocked = encryptedVaultIsUnlocked();
+  let attempts = 0;
+  while (!unlocked && attempts < 3) {
+    attempts += 1;
+    let promptResult = null;
+    try { promptResult = await encryptedVaultShowPassphrasePrompt(saltHint); } catch (_) { promptResult = null; }
+    if (!promptResult || !promptResult.passphrase) break;
+    try {
+      const saltBytes = saltHint ? encryptedVaultB64Decode(saltHint) : null;
+      await encryptedVaultUnlockWithPassphrase(promptResult.passphrase, saltBytes);
+      // Validate with a trial decrypt of the first envelope.
+      await encryptedVaultDecryptReport(firstEnv);
+      unlocked = true;
+      // T2C.7 remediation: clear any previous error text on success.
+      try {
+        const errEl = document.getElementById("vault-passphrase-error");
+        if (errEl) { errEl.textContent = ""; errEl.style.display = "none"; errEl.removeAttribute("role"); }
+      } catch (_) {}
+    } catch (err) {
+      encryptedVaultLock();
+      console.warn("ui-recorder: vault unlock attempt failed", err && err.message);
+      // T2C.7 remediation: surface incorrect-passphrase feedback in the dialog
+      // instead of leaving the pre-created error element permanently hidden.
+      try {
+        const errEl = document.getElementById("vault-passphrase-error");
+        if (errEl) {
+          const remaining = Math.max(0, 3 - attempts);
+          errEl.textContent = `Incorrect passphrase — ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`;
+          errEl.style.display = "block";
+          errEl.setAttribute("role", "alert");
+        }
+      } catch (_) {}
+    }
+  }
+  if (!unlocked) {
+    envelopeIdxs.forEach((i) => {
+      reports[i] = { id: rawReports[i].id || `enc-${i}`, title: rawReports[i].title || "[Encrypted report]", createdAt: rawReports[i].createdAt, sessionId: rawReports[i].sessionId, events: [], vaultUnlockFailed: true, vaultUnlockReason: "passphrase" };
+    });
+    return { reports, storageContext };
+  }
+  for (const i of envelopeIdxs) {
+    try {
+      reports[i] = await encryptedVaultDecryptReport(rawReports[i]);
+    } catch (err) {
+      reports[i] = { id: rawReports[i].id || `enc-${i}`, title: rawReports[i].title || "[Encrypted report]", createdAt: rawReports[i].createdAt, sessionId: rawReports[i].sessionId, events: [], vaultUnlockFailed: true, vaultUnlockReason: "decrypt-error" };
+    }
+  }
   return { reports, storageContext };
 }
 
@@ -4124,7 +4384,10 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
     lastPoint: null,
     pendingUndoSnapshot: null,
     strokeChanged: false,
-    history: []
+    history: [],
+    // Tier-2 remediation: destructive redact prompts once per editor session
+    // (not per rectangle). Set true after the first confirm; teardown resets it.
+    redactConfirmed: false
   };
   let persistTimer = null;
 
@@ -4242,9 +4505,9 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
       previewCtx.fillText("T", Math.min(canvas.width - 8, x + 8), Math.max(12, y - 8));
       return;
     }
-    if (state.mode === "obfuscate") {
+    if (state.mode === "obfuscate" || state.mode === "redact") {
       const size = 14;
-      previewCtx.strokeStyle = "rgba(15, 23, 42, 0.45)";
+      previewCtx.strokeStyle = state.mode === "redact" ? "rgba(220, 38, 38, 0.7)" : "rgba(15, 23, 42, 0.45)";
       previewCtx.setLineDash([3, 2]);
       previewCtx.strokeRect(x - size / 2, y - size / 2, size, size);
       previewCtx.setLineDash([]);
@@ -4293,12 +4556,13 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
       drawSizeLabel(currentX, currentY, w, h);
       return;
     }
-    if (state.mode === "obfuscate") {
+    if (state.mode === "obfuscate" || state.mode === "redact") {
       const rect = normalizeObfuscateRect(state.startX, state.startY, currentX, currentY);
-      previewCtx.fillStyle = "rgba(15, 23, 42, 0.18)";
+      const isRedact = state.mode === "redact";
+      previewCtx.fillStyle = isRedact ? "rgba(0, 0, 0, 0.85)" : "rgba(15, 23, 42, 0.18)";
       previewCtx.fillRect(rect.left, rect.top, rect.width, rect.height);
       previewCtx.setLineDash([5, 3]);
-      previewCtx.strokeStyle = "rgba(15, 23, 42, 0.65)";
+      previewCtx.strokeStyle = isRedact ? "rgba(220, 38, 38, 0.9)" : "rgba(15, 23, 42, 0.65)";
       previewCtx.lineWidth = 1.4;
       previewCtx.strokeRect(rect.left, rect.top, rect.width, rect.height);
       previewCtx.setLineDash([]);
@@ -4397,6 +4661,67 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
     };
   }
 
+  // T2C.4 — destructive manual redaction. Overwrites source pixels in ev.screenshot
+  // (not just an overlay), recomputes ev.screenshotHash, and records the rect in
+  // ev.redactionRects so raw-ZIP re-import round-trips the manual edits.
+  function fnv1aRawHex(input) {
+    const text = String(input || "");
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16);
+  }
+
+  function applyDestructiveRedaction(x1, y1, x2, y2) {
+    if (!screenshotImg) return false;
+    const displayRect = normalizeObfuscateRect(x1, y1, x2, y2);
+    if (displayRect.width <= 0 || displayRect.height <= 0) return false;
+    const natW = Number(screenshotImg.naturalWidth) || canvas.width;
+    const natH = Number(screenshotImg.naturalHeight) || canvas.height;
+    if (!(natW > 0) || !(natH > 0)) return false;
+    const scaleX = natW / (canvas.width || natW);
+    const scaleY = natH / (canvas.height || natH);
+    const nx = Math.max(0, Math.min(natW, Math.floor(displayRect.left * scaleX)));
+    const ny = Math.max(0, Math.min(natH, Math.floor(displayRect.top * scaleY)));
+    const nw = Math.max(1, Math.min(natW - nx, Math.ceil(displayRect.width * scaleX)));
+    const nh = Math.max(1, Math.min(natH - ny, Math.ceil(displayRect.height * scaleY)));
+
+    let mergedDataUrl = "";
+    try {
+      const off = document.createElement("canvas");
+      off.width = natW;
+      off.height = natH;
+      const octx = off.getContext("2d");
+      if (!octx) return false;
+      octx.drawImage(screenshotImg, 0, 0, natW, natH);
+      octx.fillStyle = "#000";
+      octx.fillRect(nx, ny, nw, nh);
+      mergedDataUrl = off.toDataURL("image/png");
+      off.width = 1;
+      off.height = 1;
+    } catch (_) { return false; }
+    if (!mergedDataUrl) return false;
+
+    ev.screenshot = mergedDataUrl;
+    ev.screenshotRef = null;
+    ev.screenshotSkipped = false;
+    ev.screenshotHash = fnv1aRawHex(mergedDataUrl);
+    if (!Array.isArray(ev.redactionRects)) ev.redactionRects = [];
+    ev.redactionRects.push({ x: nx, y: ny, w: nw, h: nh, ts: Date.now() });
+
+    // Paint an opaque black rect on the annotation canvas at display coords so the
+    // user sees the redaction immediately; teardown's flatten pass will collapse it
+    // harmlessly onto pixels that are already black.
+    ctx.save();
+    ctx.fillStyle = "#000";
+    ctx.fillRect(displayRect.left, displayRect.top, displayRect.width, displayRect.height);
+    ctx.restore();
+    screenshotImg.src = mergedDataUrl;
+    return true;
+  }
+
   function applyObfuscationOverlay(x1, y1, x2, y2) {
     const rect = normalizeObfuscateRect(x1, y1, x2, y2);
     const { left, top, width, height } = rect;
@@ -4451,7 +4776,7 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
       state.strokeChanged = drawStrokeSegment(ctx, point, dot, state.mode, false) || state.strokeChanged;
       return;
     }
-    if (state.mode === "rect" || state.mode === "outline" || state.mode === "obfuscate") {
+    if (state.mode === "rect" || state.mode === "outline" || state.mode === "obfuscate" || state.mode === "redact") {
       drawShapePreview(point.x, point.y);
     }
   };
@@ -4475,7 +4800,7 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
       return;
     }
 
-    if (state.mode === "rect" || state.mode === "outline" || state.mode === "obfuscate") {
+    if (state.mode === "rect" || state.mode === "outline" || state.mode === "obfuscate" || state.mode === "redact") {
       drawShapePreview(point.x, point.y);
     }
   };
@@ -4519,6 +4844,24 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
       const undoSnapshot = state.pendingUndoSnapshot || snapshotState();
       changed = applyObfuscationOverlay(state.startX, state.startY, point.x, point.y);
       if (changed) pushUndoSnapshot(undoSnapshot);
+    } else if (state.mode === "redact") {
+      // Destructive: no undo snapshot pushed (undoing would resurrect the removed pixels).
+      // Tier-2 remediation: gate the first destructive redaction of each editor
+      // session behind an explicit confirm; skip subsequent rectangles.
+      if (!state.redactConfirmed) {
+        const ok = window.confirm("Destructive redaction — pixels in this screenshot will be permanently overwritten. Continue?");
+        if (!ok) {
+          state.drawing = false;
+          state.lastPoint = null;
+          state.pendingUndoSnapshot = null;
+          state.strokeChanged = false;
+          clearPreview();
+          renderCursorIfNeeded();
+          return;
+        }
+        state.redactConfirmed = true;
+      }
+      changed = applyDestructiveRedaction(state.startX, state.startY, point.x, point.y);
     } else if (state.mode === "text") {
       const undoSnapshot = state.pendingUndoSnapshot || snapshotState();
       const text = window.prompt("Text:");
@@ -7053,6 +7396,120 @@ async function buildExportHtmlAsync(report, options = {}) {
   return buildExportHtml(report, { ...opts, frameDataUrls, sectionTextByDocId, sectionAudioByDocId });
 }
 
+// 2C.6 — Ed25519-signed HTML export + companion verifier page (opt-in).
+// Key material lives only in this report tab's memory (session-scoped). The
+// public key is displayed to the user for out-of-band sharing; the private key
+// is generated non-extractable-for-export-outside-this-session and never persisted.
+const EXPORT_SIG_MARKER_PREFIX = "UIRPRO-SIGNATURE-V1:";
+const EXPORT_PUBKEY_MARKER_PREFIX = "UIRPRO-PUBKEY-V1:";
+const EXPORT_SIG_STRIP_RE = /<!--\s*UIRPRO-(?:SIGNATURE|PUBKEY)-V1:[^>]*-->\s*/g;
+let exportSigningKeyPairPromise = null;
+
+function exportSigningWebCryptoAvailable() {
+  return typeof crypto !== "undefined" && crypto && crypto.subtle
+    && typeof crypto.subtle.generateKey === "function"
+    && typeof crypto.subtle.sign === "function"
+    && typeof crypto.subtle.exportKey === "function";
+}
+
+function bytesToBase64ForExportSig(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+async function getExportSigningKeyPair() {
+  if (!exportSigningWebCryptoAvailable()) {
+    throw new Error("WebCrypto unavailable; cannot sign export.");
+  }
+  if (!exportSigningKeyPairPromise) {
+    exportSigningKeyPairPromise = (async () => {
+      const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+      const rawPk = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+      return {
+        publicKey: kp.publicKey,
+        privateKey: kp.privateKey,
+        publicKeyBase64: bytesToBase64ForExportSig(rawPk)
+      };
+    })().catch((err) => { exportSigningKeyPairPromise = null; throw err; });
+  }
+  return exportSigningKeyPairPromise;
+}
+
+function stripExportSignatureComments(html) {
+  return String(html || "").replace(EXPORT_SIG_STRIP_RE, "");
+}
+
+async function signExportHtml(html) {
+  const kp = await getExportSigningKeyPair();
+  const canonical = stripExportSignatureComments(html);
+  const bodyBytes = new TextEncoder().encode(canonical);
+  const sigBuf = await crypto.subtle.sign({ name: "Ed25519" }, kp.privateKey, bodyBytes);
+  const signatureBase64 = bytesToBase64ForExportSig(new Uint8Array(sigBuf));
+  const suffix = `\n<!-- ${EXPORT_SIG_MARKER_PREFIX} ${signatureBase64} -->\n<!-- ${EXPORT_PUBKEY_MARKER_PREFIX} ${kp.publicKeyBase64} -->\n`;
+  return { signedHtml: canonical + suffix, publicKeyBase64: kp.publicKeyBase64, signatureBase64 };
+}
+
+function buildExportVerifierPageHtml() {
+  // Self-contained standalone page. Air-gap-safe: system fonts, no external
+  // assets, no network fetches. Uses only WebCrypto Ed25519 to verify offline.
+  const csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none';";
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="${csp}" />
+<title>UI Recorder Pro - Signed export verifier</title>
+<style>
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;margin:2rem auto;max-width:44rem;padding:0 1rem;color:#111;background:#fafafa;}
+h1{font-size:1.25rem;margin:0 0 .75rem;}
+p{line-height:1.5;margin:.5rem 0;}
+label{display:block;font-weight:600;margin:.5rem 0 .25rem;}
+input[type=file]{font-family:inherit;}
+textarea{width:100%;min-height:5rem;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem;box-sizing:border-box;}
+.result{margin-top:1rem;padding:.75rem 1rem;border-radius:6px;font-weight:600;}
+.pass{background:#e6f4ea;color:#137333;border:1px solid #b7dfbf;}
+.fail{background:#fce8e6;color:#a50e0e;border:1px solid #f2b8b5;}
+.info{background:#e8f0fe;color:#174ea6;border:1px solid #c6dafc;}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem;word-break:break-all;}
+</style></head>
+<body>
+<h1>Signed export verifier</h1>
+<p>Open a UI Recorder Pro HTML report that was exported with the "Sign export with session key" option. This page verifies the embedded Ed25519 signature entirely offline.</p>
+<label for="f">Report file</label>
+<input id="f" type="file" accept="text/html,.html,.htm" />
+<label for="pk">Expected public key (base64, optional)</label>
+<textarea id="pk" placeholder="Paste the public key you received out of band. If left empty, the key embedded in the file is used, which only confirms internal consistency."></textarea>
+<div id="out" class="result info">Awaiting file selection.</div>
+<script>
+(function(){
+  var SIG_RE=/<!--\\s*UIRPRO-SIGNATURE-V1:\\s*([A-Za-z0-9+/=]+)\\s*-->/;
+  var PK_RE=/<!--\\s*UIRPRO-PUBKEY-V1:\\s*([A-Za-z0-9+/=]+)\\s*-->/;
+  var STRIP_RE=/<!--\\s*UIRPRO-(?:SIGNATURE|PUBKEY)-V1:[^>]*-->\\s*/g;
+  var out=document.getElementById("out");
+  function setResult(cls,text){out.className="result "+cls;out.textContent=text;}
+  function b64ToBytes(b64){var s=atob(String(b64||"").replace(/\\s+/g,""));var a=new Uint8Array(s.length);for(var i=0;i<s.length;i++)a[i]=s.charCodeAt(i);return a;}
+  document.getElementById("f").addEventListener("change",async function(e){
+    var file=e.target.files&&e.target.files[0];if(!file){setResult("info","Awaiting file selection.");return;}
+    setResult("info","Reading file...");
+    try{
+      var txt=await file.text();
+      var sigM=txt.match(SIG_RE),pkM=txt.match(PK_RE);
+      if(!sigM||!pkM){setResult("fail","This file does not contain a UIRPRO-V1 signature block.");return;}
+      var embeddedPk=pkM[1].trim();
+      var expectedPkRaw=(document.getElementById("pk").value||"").replace(/\\s+/g,"");
+      var pkToUse=expectedPkRaw||embeddedPk;
+      var pkNote=expectedPkRaw?(expectedPkRaw===embeddedPk?" (matches embedded key)":" (differs from embedded key)"):" (from embedded key)";
+      var canonical=txt.replace(STRIP_RE,"");
+      if(!crypto||!crypto.subtle){setResult("fail","WebCrypto unavailable in this browser; cannot verify.");return;}
+      var pkKey=await crypto.subtle.importKey("raw",b64ToBytes(pkToUse),{name:"Ed25519"},false,["verify"]);
+      var ok=await crypto.subtle.verify({name:"Ed25519"},pkKey,b64ToBytes(sigM[1]),new TextEncoder().encode(canonical));
+      if(ok){setResult("pass","VALID: signature verifies with the supplied public key"+pkNote+".");}
+      else{setResult("fail","INVALID: signature does not verify with the supplied public key"+pkNote+".");}
+    }catch(err){setResult("fail","Verification failed: "+(err&&err.message||err));}
+  });
+})();
+</script></body></html>`;
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   const params = new URLSearchParams(location.search);
   const isPrint = params.get("print") === "1";
@@ -7465,6 +7922,91 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   let sectionNarrationOpenAiApiKey = "";
   let sectionNarrationOpenAiApiKeyLoaded = false;
+  // WebCrypto-wrapped session vault for the OpenAI API key. The AES-GCM key
+  // lives only in this closure variable — never in DOM storage — and is
+  // regenerated per tab session (page load). sessionStorage holds an encrypted
+  // blob so same-origin scripts cannot read the plaintext key.
+  let sectionNarrationOpenAiApiKeyVaultKey = null;
+  let sectionNarrationOpenAiApiKeyVaultUnavailable = false;
+  let sectionNarrationOpenAiApiKeyVaultWarned = false;
+
+  function sectionNarrationOpenAiVaultHasSubtle() {
+    try {
+      return !!(typeof crypto !== "undefined" && crypto && crypto.subtle
+        && typeof crypto.subtle.encrypt === "function"
+        && typeof crypto.subtle.decrypt === "function"
+        && typeof crypto.subtle.generateKey === "function"
+        && typeof crypto.getRandomValues === "function");
+    } catch (_) { return false; }
+  }
+
+  function sectionNarrationOpenAiVaultWarn(message) {
+    if (sectionNarrationOpenAiApiKeyVaultWarned) return;
+    sectionNarrationOpenAiApiKeyVaultWarned = true;
+    try { if (typeof console !== "undefined" && console && typeof console.warn === "function") console.warn(message); } catch (_) {}
+  }
+
+  async function sectionNarrationOpenAiVaultGetKey() {
+    if (sectionNarrationOpenAiApiKeyVaultKey) return sectionNarrationOpenAiApiKeyVaultKey;
+    if (sectionNarrationOpenAiApiKeyVaultUnavailable) return null;
+    if (!sectionNarrationOpenAiVaultHasSubtle()) {
+      sectionNarrationOpenAiApiKeyVaultUnavailable = true;
+      sectionNarrationOpenAiVaultWarn("ui-recorder: WebCrypto unavailable — OpenAI API key falling back to plain sessionStorage.");
+      return null;
+    }
+    try {
+      sectionNarrationOpenAiApiKeyVaultKey = await crypto.subtle.generateKey(
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"]
+      );
+      return sectionNarrationOpenAiApiKeyVaultKey;
+    } catch (_) {
+      sectionNarrationOpenAiApiKeyVaultUnavailable = true;
+      sectionNarrationOpenAiVaultWarn("ui-recorder: WebCrypto generateKey failed — OpenAI API key falling back to plain sessionStorage.");
+      return null;
+    }
+  }
+
+  function sectionNarrationOpenAiVaultB64Encode(bytes) {
+    let s = "";
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+  }
+
+  function sectionNarrationOpenAiVaultB64Decode(str) {
+    const bin = atob(str);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  async function sectionNarrationOpenAiVaultEncrypt(plaintext) {
+    const key = await sectionNarrationOpenAiVaultGetKey();
+    if (!key) return null;
+    try {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const enc = new TextEncoder().encode(plaintext);
+      const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc));
+      const combined = new Uint8Array(iv.length + ct.length);
+      combined.set(iv, 0);
+      combined.set(ct, iv.length);
+      return sectionNarrationOpenAiVaultB64Encode(combined);
+    } catch (_) { return null; }
+  }
+
+  async function sectionNarrationOpenAiVaultDecrypt(blob) {
+    const key = await sectionNarrationOpenAiVaultGetKey();
+    if (!key) return null;
+    try {
+      const combined = sectionNarrationOpenAiVaultB64Decode(blob);
+      if (combined.length < 13) return null;
+      const iv = combined.subarray(0, 12);
+      const ct = combined.subarray(12);
+      const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+      return new TextDecoder().decode(pt);
+    } catch (_) { return null; }
+  }
 
   function loadSectionNarrationOpenAiApiKey() {
     if (sectionNarrationOpenAiApiKeyLoaded) return sectionNarrationOpenAiApiKey;
@@ -7478,12 +8020,25 @@ document.addEventListener("DOMContentLoaded", async () => {
       const legacy = String(localStorage.getItem(SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE) || "").trim();
       if (!sectionNarrationOpenAiApiKey && legacy) {
         sectionNarrationOpenAiApiKey = legacy;
-        try {
-          sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE, sectionNarrationOpenAiApiKey);
-        } catch (_) {}
       }
       localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE);
     } catch (_) {}
+    // Any encrypted blob from a previous page load is undecryptable — the
+    // vault key was regenerated. Purge it up front. If the plaintext survived
+    // in the legacy sessionStorage slot, re-wrap it into the encrypted slot.
+    try { sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_ENC_SESSION_STORAGE); } catch (_) {}
+    if (sectionNarrationOpenAiApiKey && sectionNarrationOpenAiVaultHasSubtle()) {
+      const plaintext = sectionNarrationOpenAiApiKey;
+      (async () => {
+        const enc = await sectionNarrationOpenAiVaultEncrypt(plaintext);
+        if (enc) {
+          try {
+            sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_ENC_SESSION_STORAGE, enc);
+            sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE);
+          } catch (_) {}
+        }
+      })();
+    }
     return sectionNarrationOpenAiApiKey;
   }
 
@@ -7495,10 +8050,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     const next = String(value || "").trim();
     sectionNarrationOpenAiApiKey = next;
     sectionNarrationOpenAiApiKeyLoaded = true;
-    try {
-      if (!next) sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE);
-      else sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE, next);
-    } catch (_) {}
+    if (!next) {
+      try { sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE); } catch (_) {}
+      try { sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_ENC_SESSION_STORAGE); } catch (_) {}
+    } else if (sectionNarrationOpenAiVaultHasSubtle()) {
+      // Optimistic write: keep the previously-good slot until the async
+      // encrypt lands, then swap to the encrypted-only representation.
+      try { sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE, next); } catch (_) {}
+      (async () => {
+        const enc = await sectionNarrationOpenAiVaultEncrypt(next);
+        if (enc) {
+          try {
+            sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_ENC_SESSION_STORAGE, enc);
+            sessionStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE);
+          } catch (_) {}
+        } else {
+          sectionNarrationOpenAiVaultWarn("ui-recorder: WebCrypto encrypt failed — OpenAI API key left in plain sessionStorage.");
+        }
+      })();
+    } else {
+      sectionNarrationOpenAiVaultWarn("ui-recorder: WebCrypto unavailable — OpenAI API key stored in plain sessionStorage.");
+      try { sessionStorage.setItem(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE, next); } catch (_) {}
+    }
     try { localStorage.removeItem(SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE); } catch (_) {}
     return next;
   }
@@ -11082,16 +11655,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     }, 140);
   }
 
-  function updateAux(eventsOverride, burstsOverride, sourceEventsOverride) {
-    const sourceInput = Array.isArray(sourceEventsOverride)
-      ? sourceEventsOverride
-      : Array.isArray(eventsOverride)
-        ? eventsOverride
-        : getVisibleEvents();
-    const view = buildVisibleViewModel(sourceInput, burstsOverride);
-    const visibleEvents = Array.isArray(eventsOverride) ? eventsOverride : view.displayEvents;
+  // T2 perf remediation: accept a pre-built `view` (from render) so we don't
+  // rebuild the view model, click-burst list, and insertion plan a second time.
+  // When called with no args (side effects like save-then-refresh), rebuild.
+  function updateAux(viewInput, optionsInput) {
+    const options = optionsInput || {};
+    let view;
+    if (viewInput && typeof viewInput === "object" && !Array.isArray(viewInput)
+      && Array.isArray(viewInput.displayEvents)
+      && Array.isArray(viewInput.sourceEvents)
+      && Array.isArray(viewInput.bursts)) {
+      view = viewInput;
+    } else {
+      const sourceInput = Array.isArray(viewInput) ? viewInput : getVisibleEvents();
+      view = buildVisibleViewModel(sourceInput);
+    }
+    const visibleEvents = Array.isArray(options.visibleEventsOverride)
+      ? options.visibleEventsOverride
+      : view.displayEvents;
     const clickBursts = collectClickBursts(view.sourceEvents, view.bursts);
-    const burstInsertionPlan = buildBurstInsertionPlan(view.sourceEvents, visibleEvents, view.bursts);
+    const burstInsertionPlan = options.burstInsertionPlan
+      || buildBurstInsertionPlan(view.sourceEvents, visibleEvents, view.bursts);
     const timelineEvents = buildTimelineDisplayEvents(visibleEvents, burstInsertionPlan);
     updatePanelMeta(timelineEvents, clickBursts);
     renderHints(hints, visibleEvents, {
@@ -11156,7 +11740,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     const burstInsertionPlan = buildBurstInsertionPlan(view.sourceEvents, events, view.bursts);
     const eventPositionMap = new Map();
     report.events.forEach((item, pos) => eventPositionMap.set(item, pos));
-    updateAux(events, view.bursts, view.sourceEvents);
+    // T2 perf: hand the already-built view and burst plan to updateAux so it
+    // does not recompute buildVisibleViewModel / buildBurstInsertionPlan.
+    updateAux(view, { burstInsertionPlan });
     let renderedStepCounter = 0;
 
     const appendInlineBursts = (entries) => {
@@ -11736,10 +12322,11 @@ document.addEventListener("DOMContentLoaded", async () => {
           canvas.addEventListener("touchstart", markSessionDirty, true);
 
           mode = document.createElement("select");
-          ["pen","highlight","rect","outline","obfuscate","text"].forEach(m => {
+          mode.setAttribute("aria-label", "Annotation tool mode");
+          ["pen","highlight","rect","outline","obfuscate","redact","text"].forEach(m => {
             const opt = document.createElement("option");
             opt.value = m;
-            opt.textContent = m;
+            opt.textContent = m === "redact" ? "Redact (destructive)" : m;
             mode.appendChild(opt);
           });
           color = document.createElement("input");
@@ -12034,10 +12621,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     reports.unshift(importedReport);
-    const removedReportCount = reports.length > 3 ? reports.length - 3 : 0;
-    if (removedReportCount) reports.length = 3;
+    let retentionLimit = 3;
+    try {
+      const settingsStored = await browser.storage.local.get(["settings"]);
+      const raw = settingsStored && settingsStored.settings && settingsStored.settings.reportRetention;
+      retentionLimit = Math.min(10, Math.max(1, Math.round(Number(raw) || 3)));
+    } catch (_) {}
+    const removedReportCount = reports.length > retentionLimit ? reports.length - retentionLimit : 0;
+    if (removedReportCount) reports.length = retentionLimit;
     const retentionNote = removedReportCount
-      ? ` Retention keeps the 3 most recent reports; ${removedReportCount} older report(s) removed.`
+      ? ` Retention keeps the ${retentionLimit} most recent reports; ${removedReportCount} older report(s) removed.`
       : "";
     await saveReports(reports);
     setImportStatus(`Imported report with ${importedReport.events.length} steps.${skippedNote}${retentionNote}`, false);
@@ -12054,8 +12647,26 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
       }
       const html = await buildExportHtmlAsync(report);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const signCheckbox = document.getElementById("bundle-sign");
+      const signPubkeyEl = document.getElementById("bundle-sign-pubkey");
+      if (signCheckbox && signCheckbox.checked) {
+        let signed;
+        try {
+          signed = await signExportHtml(html);
+        } catch (err) {
+          setImportStatus(`Sign export failed: ${describeErrorMessage(err)}`, true);
+          return;
+        }
+        const filename = `ui-report-${stamp}.html`;
+        await downloadBlob(new Blob([signed.signedHtml], { type: "text/html" }), filename);
+        await downloadBlob(new Blob([buildExportVerifierPageHtml()], { type: "text/html" }), `verify-${stamp}.html`);
+        if (signPubkeyEl) signPubkeyEl.textContent = `Public key (share out of band): ${signed.publicKeyBase64}`;
+        setImportStatus(`Exported signed HTML bundle + verifier page. Public key: ${signed.publicKeyBase64}`, false);
+        return;
+      }
       const blob = new Blob([html], { type: "text/html" });
-      const filename = `ui-report-${new Date().toISOString().replace(/[:.]/g, "-")}.html`;
+      const filename = `ui-report-${stamp}.html`;
       await downloadBlob(blob, filename);
       setImportStatus(`Exported HTML bundle: ${filename}`, false);
     });

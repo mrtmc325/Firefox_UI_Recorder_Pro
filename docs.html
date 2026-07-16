@@ -8,7 +8,7 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.18.0. Adds Tier-1 enhancements on top of the v1.17.0 remediation baseline: reactive pause on host-permission revoke (`browser.permissions.onRemoved`/`onAdded`), clipboard-paste secret interception during recording, a Blob-of-parts ZIP export path with fail-loud non-64 guards, a screen-reader accessibility label pass, and a TUNING.md drift detector wired into the release preflight.</p>
+    <p>Version 1.19.0. Adds Tier-2 Batches 2A + 2C on top of v1.18.0: schema-versioned storage migrations, in-memory diagnostics ring with a "Copy diagnostics" popup button, runtime-toggleable debug logs, report retention as a user setting, WebCrypto-wrapped OpenAI session key, custom redaction rules (with ReDoS-safe compile probe + runtime per-rule budget) and a live tester UI, manual redact-before-export overlay, cross-frame iframe redaction-rect coordinates (source-window verified), Ed25519-signed HTML exports with offline verifier, and an opt-in encrypted-at-rest report vault (PBKDF2-SHA-256 600k → AES-GCM-256). Batches 2B (recording presets, cross-report search, templates, undo, Markdown export, etc.) and 2D (vector annotations, perf refactors) built in worktrees during the workflow and preserved on the integration branch for follow-up.</p>
 
     <h2>Security &amp; Privacy Hardening (current build)</h2>
     <ul>
@@ -21,7 +21,7 @@
       <li>The deprecated microphone-capture subsystem is fully removed; residual mic requests are rejected with <code>mic-capture-removed</code>.</li>
     </ul>
 
-    <h2>Version Notes (v1.18.0)</h2>
+    <h2>Version Notes (v1.19.0)</h2>
     <ul>
       <li>Popup header version badge now resolves directly from extension manifest version to prevent stale hardcoded values after releases.</li>
       <li>Exported carousel right rail now uses <strong>Workflow Queue</strong> naming consistently.</li>

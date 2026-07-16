@@ -150,7 +150,7 @@ if (secure && browser.storage.session) {
 | Malicious ZIP import (bombs, traversal, spoofed assets) | Medium | Low | Store-only parser, 2 GiB/60,000-entry/512 MiB-entry caps, path/duplicate/NUL rejection, ref re-validation, MIME allow-lists + magic-byte sniffing (frames and audio) |
 | Stored XSS in exported HTML opened by third parties | High | Low | `escapeHtml` on all interpolation, data-URL regex validation, `<`-escaped embedded JSON, restrictive CSP meta in exported HTML, sandboxed quick-preview iframe |
 | Secure-at-rest silently degrades on Firefox without `storage.session` | Low | Low | Skeleton-local fallback (settings only; events/reports memory-only); behavior documented in popup hint and OPERATIONS doc |
-| iframe redaction rects use wrong coordinates (`frameOffsetKnown` hardcoded) | Medium | Medium | Known limitation; text redaction still applies; documented — fix requires frame-offset plumbing |
+| iframe redaction rects use wrong coordinates | Medium | Low | T2C.5 — each frame runs a token-authenticated postMessage handshake (child posts `FRAME_HELLO`, parent replies with `FRAME_OFFSET_ASSIGN` using its own known offset + `iframe.getBoundingClientRect()`). Rects are translated to top-frame coords at source; token is a per-boot random from background delivered only via GET_STATE. Text redaction remains a belt on top. |
 | API key exposure | High | Low | Session-only storage, never persisted/exported/logged; user can clear via key prompt |
 
 ## Alternatives considered
@@ -161,10 +161,14 @@ if (secure && browser.storage.session) {
 - **Removing OpenAI integration** for a zero-egress build: rejected — narration/STT are opt-in, triple-gated, and baked audio keeps exported reports key-free; removal would delete a core authoring feature.
 - **Worker-pool decode fan-out** for burst frames: shipped but disabled after fan-out lockups on large data-URL payloads; inline-safe cooperative decode is the default, worker path kept behind a flag with error-threshold fallback.
 
+## Confirmed defaults
+
+- Report retention exposed as `settings.reportRetention` (default 3, clamp 1..10). Popup Privacy & Stability panel renders a number input; `normalizeSettings` clamps; `saveReportSnapshotDetached` and the report.js import path both read the setting instead of the hardcoded 3. Decision recorded 2026-07-15 — extending storage/spool footprint at higher values is a per-user opt-in and remains bounded by the hard cap.
+- iframe redaction-rect coordinates now flow through a token-authenticated frame-offset handshake (`content.js` T2C.5). Every content-script instance fetches a per-boot random `frameMsgToken` from background via GET_STATE; child frames post `FRAME_HELLO` up the parent chain and receive `FRAME_OFFSET_ASSIGN` with their offset relative to the top frame (parent computes `ownOffset + iframe.getBoundingClientRect()`); rects are translated to top-frame coordinates at source before they enter the RECORD_EVENT stream. Child frames also post periodic `FRAME_RECTS_REPORT` upward; the top frame caches (max 40 entries, 6 s TTL) and merges them into its own event-time redaction lists. All incoming messages are token-gated and length-capped; the token is never persisted and dies with the background page. Decision recorded 2026-07-15 — closes the former open question.
+
 ## Open questions
 
-- Should report retention (hardcoded 3, background.js:1858-1860) become a setting?
-- iframe redaction-rect coordinates (`collectSensitiveRectsWithFrame` hardcodes top-frame context): fix or document-only? Currently document-only.
+_(none currently open — see the Confirmed defaults section for resolved items.)_
 
 ## Out of scope
 
@@ -176,3 +180,5 @@ if (secure && browser.storage.session) {
 Updated 2026-07-14: content.js nav URL poll + bfcache resilience, background persist coalescing/drain wait/stop salvage, spool progress-gated pump, report import caps + writer-marker merge saves, exported-HTML CSP + sandboxed preview, secure-at-rest purge-on-enable decision recorded (open question resolved), risks table and sequence-of-work refreshed.
 
 Updated 2026-07-14: Tier-1 — seventh capture-phase listener (paste) with `[REDACTED CLIPBOARD]` interception, `EVENT_RATE_LIMITS` citation extended to content.js:36-45, background reactive host-permission-revoked auto-pause with `pauseLimitationReason` surfaced on GET_STATE.
+
+Updated 2026-07-15: Tier-2 build 2C.5 — iframe redaction-rect coordinate plumbing. `background.js` now generates a per-boot random `frameMsgToken` and returns it from GET_STATE. `content.js` runs a token-authenticated postMessage handshake (FRAME_HELLO / FRAME_OFFSET_ASSIGN) so each frame learns its offset relative to the top frame, translates its own sensitive-field rects into top-frame coordinates, and (from iframes) periodically publishes them upward via FRAME_RECTS_REPORT; the top frame merges cached child rects (max 40 entries / 6 s TTL) into every RECORD_EVENT redaction list. `frameOffsetKnown` is now truthful — false until the handshake resolves. Closes the last open question from 2026-07-14.

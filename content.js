@@ -716,9 +716,218 @@
     return rects.slice(0, 60);
   }
 
-  function collectSensitiveRectsWithFrame() {
-    return { rects: collectSensitiveRects(), frameIsTop: true, frameOffsetKnown: true };
+  // T2C.5 — frame offset plumbing so redaction rects reported from an iframe are in
+  // top-frame coordinates. Every content-script instance (top + child) fetches the shared
+  // token via GET_STATE; child frames post FRAME_HELLO to their parent, which computes
+  // the child offset (own offset + iframe getBoundingClientRect) and posts back
+  // FRAME_OFFSET_ASSIGN. Child frames periodically send FRAME_RECTS_REPORT (translated
+  // to top-frame coords) up the chain; the top frame caches them and merges on request.
+  const FRAME_MSG = Object.freeze({
+    hello: "__uir_frame_hello",
+    assign: "__uir_frame_assign",
+    rects: "__uir_frame_rects"
+  });
+  const FRAME_ID = (function () {
+    try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (_) {}
+    return "f-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  })();
+  const FRAME_RECTS_REPORT_INTERVAL_MS = 1750;
+  const FRAME_RECTS_TTL_MS = 6000;
+  const FRAME_HELLO_RETRY_MAX = 20;
+  const IS_TOP_FRAME = (function () { try { return window.top === window.self; } catch (_) { return false; } })();
+  let frameMsgToken = "";
+  let frameOffset = IS_TOP_FRAME ? { x: 0, y: 0 } : null;
+  let frameOffsetKnown = !!IS_TOP_FRAME;
+  // Origin of window.parent, learned from ev.origin on our own ASSIGN so subsequent
+  // outbound rects reports go over that exact origin instead of "*".
+  let parentOrigin = null;
+  const childRectsCache = new Map(); // synthetic-iframe-id -> { rects, ts }
+  // Synthetic per-iframe cache keys, so a page-world script in a child frame cannot
+  // spray forged frameIds and collide/overwrite legitimate entries. Keys are derived
+  // from the verified source iframe element, not from attacker-controlled payload.
+  const iframeSyntheticIds = new WeakMap();
+  let iframeSyntheticSeq = 0;
+  function getIframeCacheId(iframeEl) {
+    let id = iframeSyntheticIds.get(iframeEl);
+    if (!id) { id = "if-" + (++iframeSyntheticSeq); iframeSyntheticIds.set(iframeEl, id); }
+    return id;
   }
+
+  function isValidFrameToken(t) {
+    return !!(frameMsgToken && typeof t === "string" && t.length > 0 && t === frameMsgToken);
+  }
+
+  // targetOrigin defaults to "*" only for the initial HELLO (parent origin not yet
+  // known). Every response/report path passes the exact origin it learned from the
+  // inbound event so a page-world listener cannot silently receive the token.
+  function postFrameMessage(targetWindow, kind, payload, targetOrigin) {
+    if (!frameMsgToken || !targetWindow) return;
+    try {
+      const msg = Object.assign({ __uir: kind, token: frameMsgToken }, payload || {});
+      targetWindow.postMessage(msg, targetOrigin || "*");
+    } catch (_) {}
+  }
+
+  function findChildIframeElementByWindow(sourceWindow) {
+    if (!sourceWindow) return null;
+    try {
+      const list = document.getElementsByTagName("iframe");
+      for (let i = 0; i < list.length; i++) {
+        const el = list[i];
+        try { if (el.contentWindow === sourceWindow) return el; } catch (_) {}
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  async function ensureFrameMsgToken() {
+    if (frameMsgToken) return frameMsgToken;
+    try {
+      const st = await getState();
+      if (st && typeof st.frameMsgToken === "string" && st.frameMsgToken) {
+        frameMsgToken = String(st.frameMsgToken || "");
+      }
+    } catch (_) {}
+    return frameMsgToken;
+  }
+
+  function translateRectToTopFrame(rc) {
+    if (!rc || typeof rc !== "object") return rc;
+    const ox = frameOffset ? Number(frameOffset.x) || 0 : 0;
+    const oy = frameOffset ? Number(frameOffset.y) || 0 : 0;
+    const out = { x: (Number(rc.x) || 0) + ox, y: (Number(rc.y) || 0) + oy, w: Number(rc.w) || 0, h: Number(rc.h) || 0 };
+    return out;
+  }
+
+  function pruneChildRectsCache() {
+    const now = Date.now();
+    for (const [k, v] of childRectsCache) {
+      if (!v || (now - v.ts) > FRAME_RECTS_TTL_MS) childRectsCache.delete(k);
+    }
+    if (childRectsCache.size > 40) {
+      let oldestKey = null, oldestTs = Infinity;
+      for (const [k, v] of childRectsCache) {
+        if (v.ts < oldestTs) { oldestTs = v.ts; oldestKey = k; }
+      }
+      if (oldestKey !== null) childRectsCache.delete(oldestKey);
+    }
+  }
+
+  function collectCachedChildRects() {
+    if (!IS_TOP_FRAME) return [];
+    pruneChildRectsCache();
+    const out = [];
+    for (const v of childRectsCache.values()) {
+      if (!v || !Array.isArray(v.rects)) continue;
+      for (const r of v.rects) {
+        out.push(r);
+        if (out.length >= 120) return out;
+      }
+    }
+    return out;
+  }
+
+  function collectSensitiveRectsWithFrame() {
+    const own = collectSensitiveRects().map(translateRectToTopFrame);
+    const merged = IS_TOP_FRAME ? own.concat(collectCachedChildRects()) : own;
+    return {
+      rects: merged.slice(0, 80),
+      frameIsTop: !!IS_TOP_FRAME,
+      frameOffsetKnown: !!frameOffsetKnown
+    };
+  }
+
+  let frameHelloAttempts = 0;
+  let frameHelloTimerId = null;
+  function scheduleFrameHello() {
+    if (IS_TOP_FRAME || frameOffsetKnown) return;
+    if (frameHelloTimerId) return;
+    const fire = async () => {
+      frameHelloTimerId = null;
+      if (frameOffsetKnown) return;
+      if (frameHelloAttempts++ >= FRAME_HELLO_RETRY_MAX) return;
+      await ensureFrameMsgToken();
+      try { postFrameMessage(window.parent, FRAME_MSG.hello, { frameId: FRAME_ID }); } catch (_) {}
+      frameHelloTimerId = setTimeout(fire, 500 + frameHelloAttempts * 250);
+    };
+    frameHelloTimerId = setTimeout(fire, 200);
+  }
+
+  let rectsReportTimerId = null;
+  function scheduleRectsReport() {
+    if (IS_TOP_FRAME) return;
+    if (!frameOffsetKnown) return;
+    if (rectsReportTimerId) return;
+    const fire = () => {
+      rectsReportTimerId = null;
+      try {
+        const rects = collectSensitiveRects().map(translateRectToTopFrame);
+        if (rects.length) postFrameMessage(window.parent, FRAME_MSG.rects, { frameId: FRAME_ID, rects }, parentOrigin || "*");
+      } catch (_) {}
+      rectsReportTimerId = setTimeout(fire, FRAME_RECTS_REPORT_INTERVAL_MS);
+    };
+    rectsReportTimerId = setTimeout(fire, 400);
+  }
+
+  try {
+    window.addEventListener("message", (ev) => {
+      const d = ev && ev.data;
+      if (!d || typeof d !== "object") return;
+      const kind = d.__uir;
+      if (kind !== FRAME_MSG.hello && kind !== FRAME_MSG.assign && kind !== FRAME_MSG.rects) return;
+      if (!isValidFrameToken(d.token)) return;
+
+      if (kind === FRAME_MSG.hello) {
+        const iframeEl = findChildIframeElementByWindow(ev.source);
+        if (!iframeEl) return;
+        if (!frameOffsetKnown || !ev.source) return;
+        try {
+          const rc = iframeEl.getBoundingClientRect();
+          const childOffset = {
+            x: Math.round((frameOffset ? frameOffset.x : 0) + (rc.left || 0)),
+            y: Math.round((frameOffset ? frameOffset.y : 0) + (rc.top || 0))
+          };
+          postFrameMessage(ev.source, FRAME_MSG.assign, { frameId: d.frameId, offset: childOffset }, ev.origin);
+        } catch (_) {}
+      } else if (kind === FRAME_MSG.assign) {
+        // Only accept ASSIGN from our own parent window. A page-world script in a
+        // sibling iframe cannot satisfy ev.source === window.parent, so it cannot
+        // steer our reported frameOffset.
+        if (ev.source !== window.parent) return;
+        if (d.frameId !== FRAME_ID) return;
+        if (!d.offset || typeof d.offset !== "object") return;
+        parentOrigin = ev.origin || null;
+        frameOffset = { x: Math.round(Number(d.offset.x) || 0), y: Math.round(Number(d.offset.y) || 0) };
+        frameOffsetKnown = true;
+        if (frameHelloTimerId) { clearTimeout(frameHelloTimerId); frameHelloTimerId = null; }
+        scheduleRectsReport();
+      } else if (kind === FRAME_MSG.rects) {
+        if (!Array.isArray(d.rects) || typeof d.frameId !== "string") return;
+        // Verify the sender is actually a known child iframe of this document, not a
+        // page-world script that captured the token. This rejects forged rects
+        // regardless of what frameId string the payload claims.
+        const srcIframe = findChildIframeElementByWindow(ev.source);
+        if (!srcIframe) return;
+        const rects = d.rects.slice(0, 60).filter((r) => r && typeof r === "object");
+        if (IS_TOP_FRAME) {
+          // Key the cache by our own synthetic id for that iframe element, not by
+          // attacker-supplied d.frameId — so a compromised child can only overwrite
+          // its OWN cache slot, never a sibling's.
+          childRectsCache.set(getIframeCacheId(srcIframe), { rects, ts: Date.now() });
+          pruneChildRectsCache();
+        } else if (frameMsgToken) {
+          postFrameMessage(window.parent, FRAME_MSG.rects, { frameId: d.frameId, rects }, parentOrigin || "*");
+        }
+      }
+    }, true);
+  } catch (_) {}
+
+  // Kick off the frame handshake once we can reach background for the token.
+  setTimeout(() => {
+    ensureFrameMsgToken().then(() => {
+      if (!IS_TOP_FRAME) scheduleFrameHello();
+    }).catch(() => {});
+  }, 50);
 
   function classLooksHashed(cls) { return /^css-[a-z0-9]{4,}$/.test(cls) || /^x-auto-\d+/.test(cls) || /^x-auto-\d+__/.test(cls); }
 

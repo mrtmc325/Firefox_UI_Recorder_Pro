@@ -153,6 +153,11 @@
             </summary>
             <div class="config-rail-body settings-group-body toolbar toolbar-rail" role="group" aria-label="Export actions">
               <button id="bundle" class="btn">Export HTML bundle</button>
+              <label class="row">
+                <input id="bundle-sign" type="checkbox" />
+                Sign export with session key
+              </label>
+              <div id="bundle-sign-pubkey" class="hint" role="status" aria-live="polite"></div>
               <button id="bundle-preview" class="btn ghost">Quick HTML preview</button>
               <button id="bundle-raw" class="btn">Export raw ZIP</button>
               <button id="bundle-media" class="btn">Export section media ZIP</button>

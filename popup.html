@@ -27,6 +27,7 @@
       <button id="report" class="btn">Open report</button>
       <button id="export-pdf" class="btn">Print to PDF</button>
       <button id="docs" class="btn ghost">Docs</button>
+      <button id="copy-diagnostics" class="btn ghost" type="button" title="Copy in-memory diagnostics ring as JSON">Copy diagnostics</button>
     </div>
   </section>
 
@@ -117,6 +118,10 @@
           <input id="secure-at-rest" type="checkbox" />
         </label>
         <label class="row">
+          Encrypted-at-rest report vault (passphrase, opt-in)
+          <input id="vault-mode" type="checkbox" />
+        </label>
+        <label class="row">
           Auto-pause on idle
           <input id="auto-idle" type="checkbox" />
         </label>
@@ -132,6 +137,52 @@
           Prune noisy input steps
           <input id="prune-inputs" type="checkbox" />
         </label>
+        <label class="row">
+          Report retention (most recent)
+          <input id="report-retention" type="number" min="1" max="10" step="1" />
+        </label>
+        <div class="row" id="custom-redact-rules-label">
+          Custom redaction rules
+          <span class="hint" id="custom-redact-count">0 loaded</span>
+        </div>
+        <div class="hint">
+          One rule per line as <code>name: pattern</code>. Patterns are JS regex (matched case-insensitive, global). Layered on top of the built-in rules; never replaces them. Each pattern is ReDoS-probed at save.
+        </div>
+        <div class="row" style="display:block">
+          <textarea id="custom-redact-rules" aria-labelledby="custom-redact-rules-label" rows="5" spellcheck="false" placeholder="internal-ticket: INC[0-9]{6,}&#10;employee-id: EMP-[A-Z0-9]{4,}" style="width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px"></textarea>
+        </div>
+        <div class="action-row">
+          <button id="custom-redact-save" class="btn subtle btn-small" type="button">Save rules</button>
+          <button id="custom-redact-export" class="btn ghost btn-small" type="button">Export JSON</button>
+          <button id="custom-redact-import" class="btn ghost btn-small" type="button">Import JSON</button>
+          <input id="custom-redact-import-file" type="file" accept="application/json,.json" style="display:none" />
+        </div>
+        <div id="custom-redact-status" class="hint" aria-live="polite"></div>
+        <div class="row" id="redact-test-input-label">
+          Test redaction
+          <span class="hint">local only</span>
+        </div>
+        <div class="hint">
+          Paste a sample below and click Test. Runs the same pipeline (built-in + saved custom rules) with no storage side effects. Unsaved textarea changes above are not tested until saved.
+        </div>
+        <div class="row" style="display:block">
+          <textarea id="redact-test-input" aria-labelledby="redact-test-input-label" rows="3" spellcheck="false" placeholder="Paste sample text to test..." style="width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px"></textarea>
+        </div>
+        <div class="action-row">
+          <button id="redact-test-run" class="btn subtle btn-small" type="button">Test</button>
+          <button id="redact-test-clear" class="btn ghost btn-small" type="button">Clear</button>
+        </div>
+        <div id="redact-test-status" class="hint" aria-live="polite"></div>
+        <div id="redact-test-result" class="hint" style="display:none">
+          <div class="row" style="display:block">
+            <div class="hint">Output</div>
+            <pre id="redact-test-output" style="white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;margin:4px 0;padding:6px;border:1px solid rgba(127,127,127,0.3);border-radius:4px;max-height:160px;overflow:auto"></pre>
+          </div>
+          <div class="row" style="display:block">
+            <div class="hint">Rules matched (<span id="redact-test-match-count">0</span>)</div>
+            <ul id="redact-test-matches" style="margin:4px 0;padding-left:18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px"></ul>
+          </div>
+        </div>
       </div>
     </details>
 
@@ -161,6 +212,22 @@
             <option value="15">15 FPS</option>
           </select>
         </label>
+      </div>
+    </details>
+
+    <details class="settings-group">
+      <summary class="settings-summary">
+        <span class="settings-summary-title">Advanced</span>
+        <span class="settings-summary-meta">Diagnostics</span>
+      </summary>
+      <div class="settings-group-body">
+        <label class="row">
+          Verbose console logging (background)
+          <input id="debug-logs" type="checkbox" />
+        </label>
+        <div class="hint">
+          When on, the background page emits detailed [UIR BG ...] entries to the browser console. The in-memory diagnostics ring is always populated regardless of this toggle.
+        </div>
       </div>
     </details>
 

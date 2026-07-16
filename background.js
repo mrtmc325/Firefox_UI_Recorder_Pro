@@ -6,6 +6,16 @@ let isPaused = false;
 let events = [];
 let reports = [];
 let sessionId = null;
+// Per-boot random token shared with every injected content script (top + iframes) via
+// GET_STATE. Content scripts use it to authenticate cross-frame `window.postMessage`
+// traffic (frame offset handshake + rects reporting) — page scripts never see it because
+// they never receive a GET_STATE reply.
+const frameMsgToken = (function () {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch (_) {}
+  return "fmt-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+})();
 let settings = {
   screenshotDebounceMs: 900,
   screenshotMinIntervalMs: 800,
@@ -15,6 +25,7 @@ let settings = {
   redactLoginUsernames: true,
   screenshotRedactionMode: "none",
   secureAtRestMode: false,
+  encryptedAtRestVaultEnabled: false, // T2C.7 opt-in vault (see report.js encryptedVault*)
 
   captureMode: "all",
   activeTabOnly: true,
@@ -30,6 +41,7 @@ let settings = {
   hotkeyBurstJpegQuality: 38,
   burstStabilityMode: true,
   burstMaxEffectiveFps: 10,
+  debugLogsEnabled: false,
   clickBurstMarkerColor: "#2563eb",
   clickBurstMarkerStyle: "rounded-bold",
 
@@ -44,8 +56,26 @@ let settings = {
     { name: "cn-dn", pattern: "(\\bCN\\s*=\\s*)([^,\\n]+)", replace: "$1[REDACTED]" },
     { name: "sha-fingerprint", pattern: "\\b([A-F0-9]{2}:){15,}[A-F0-9]{2}\\b", replace: "[REDACTED FINGERPRINT]" },
     { name: "long-hex", pattern: "\\b[A-F0-9]{32,}\\b", replace: "[REDACTED]" }
-  ]
+  ],
+
+  // T2C.2: user-editable custom rules, layered ON TOP of the built-ins above.
+  // Each entry: { name, pattern, replace }. Compiled and ReDoS-probed at save time.
+  customRedactRules: []
 };
+
+const CUSTOM_REDACT_RULES_MAX = 32;
+const CUSTOM_REDACT_PROBE_BUDGET_MS = 50;
+// Kept for backward-compat with any external callers; the probe iterates
+// CUSTOM_REDACT_PROBE_SAMPLES below (~4KB each, multiple character classes).
+const CUSTOM_REDACT_PROBE_SAMPLE = "a".repeat(200) + "!";
+const CUSTOM_REDACT_PROBE_SAMPLES = [
+  "a".repeat(4096) + "!",
+  "0".repeat(4096) + "!",
+  "ab".repeat(2048) + "!",
+  "aA1".repeat(1365) + "!",
+  " ".repeat(4096) + "!"
+];
+const REDACT_RULE_RUNTIME_BUDGET_MS = 25;
 
 let lastShot = { ts: 0, hash: null, dataUrl: null };
 let pendingShotTimer = null;
@@ -113,7 +143,9 @@ let burstPerf = {
 };
 const burstCursorSamplesByTab = new Map();
 
-const DEBUG_LOGS = false;
+// DEBUG_LOGS: runtime-toggleable via settings.debugLogsEnabled (T2A.3).
+// The diagnostics ring still captures every bgLog/bgWarn regardless; this
+// flag only gates console.log emission.
 const TAB_SCOPE_DRAFT_KEY = "recordingTabSelectionDraft";
 const TAB_SCOPE_WATCH_ENABLED_KEY = "recordingTabSelectionWatchEnabled";
 const EVENT_COMPACT_TRIGGER_COUNT = 600;
@@ -147,6 +179,35 @@ const STOP_FINALIZATION_DRAIN_TIMEOUT_MS = 15000;
 const RECORD_EVENT_PERSIST_MIN_INTERVAL_MS = 1500;
 const PENDING_STOP_SNAPSHOT_KEY = "__uiRecorderPendingStopSnapshot";
 const SCREENSHOT_REDACTION_MODES = new Set(["none", "omit"]);
+
+// Schema-versioned migration table for persisted `settings` and `reports`.
+// v1 is baseline: MIGRATIONS entries are empty. Add e.g. `MIGRATIONS.settings[2] = (s)=>({...})`
+// when bumping SETTINGS_SCHEMA_VERSION. Migrations to target N run when stored version < N.
+const SETTINGS_SCHEMA_VERSION = 1;
+const REPORTS_SCHEMA_VERSION = 1;
+const SETTINGS_SCHEMA_KEY = "settingsSchemaVersion";
+const REPORTS_SCHEMA_KEY = "reportsSchemaVersion";
+const MIGRATIONS = { settings: {}, reports: {} };
+
+function applySchemaMigrations(area, storedVersion, targetVersion, value) {
+  const applied = [];
+  let v = value;
+  let from = typeof storedVersion === "number" && storedVersion >= 0 ? storedVersion : 0;
+  const registry = (MIGRATIONS && MIGRATIONS[area]) || {};
+  for (let n = from + 1; n <= targetVersion; n++) {
+    const fn = registry[n];
+    if (typeof fn === "function") {
+      try {
+        v = fn(v);
+        applied.push(n);
+        bgWarn("schema-migration:applied", { area, from: n - 1, to: n });
+      } catch (e) {
+        bgWarn("schema-migration:error", { area, from: n - 1, to: n, error: formatError(e) });
+      }
+    }
+  }
+  return { value: v, applied };
+}
 
 const frameSpool = (
   typeof self !== "undefined" &&
@@ -608,14 +669,56 @@ async function storeBurstFrameInSpool(dataUrl, meta = {}) {
   }
 }
 
+// In-memory diagnostics ring (T2A.2). Bounded FIFO of recent bgLog/bgWarn calls
+// with PII-sensitive values stripped. Never auto-uploaded; exposed via
+// GET_DIAGNOSTICS message for manual copy from the popup.
+const DIAGNOSTICS_RING_MAX = 500;
+const DIAGNOSTICS_PII_KEY_RE = /origin|host|url|apikey|token|password|secret/i;
+const diagnosticsRing = [];
+
+function sanitizeDiagnosticsData(value, depth) {
+  const d = typeof depth === "number" ? depth : 0;
+  if (value == null) return value;
+  if (d > 4) return "[TRUNCATED]";
+  const t = typeof value;
+  if (t === "string" || t === "number" || t === "boolean") return value;
+  if (Array.isArray(value)) return value.slice(0, 64).map((v) => sanitizeDiagnosticsData(v, d + 1));
+  if (t === "object") {
+    const out = {};
+    let n = 0;
+    for (const k of Object.keys(value)) {
+      if (n++ >= 64) break;
+      if (DIAGNOSTICS_PII_KEY_RE.test(k)) out[k] = "[STRIPPED]";
+      else out[k] = sanitizeDiagnosticsData(value[k], d + 1);
+    }
+    return out;
+  }
+  return String(t);
+}
+
+function pushDiagnosticsEntry(level, tag, data) {
+  try {
+    const entry = {
+      ts: Date.now(),
+      level,
+      tag: typeof tag === "string" ? tag : String(tag)
+    };
+    if (data !== undefined) entry.data = sanitizeDiagnosticsData(data, 0);
+    diagnosticsRing.push(entry);
+    while (diagnosticsRing.length > DIAGNOSTICS_RING_MAX) diagnosticsRing.shift();
+  } catch (_) { /* diagnostics must never throw */ }
+}
+
 function bgLog(message, data) {
-  if (!DEBUG_LOGS) return;
+  pushDiagnosticsEntry("log", message, data);
+  if (!settings || !settings.debugLogsEnabled) return;
   const prefix = `[UIR BG ${new Date().toISOString()}]`;
   if (data === undefined) console.log(prefix, message);
   else console.log(prefix, message, data);
 }
 
 function bgWarn(message, data) {
+  pushDiagnosticsEntry("warn", message, data);
   const prefix = `[UIR BG ${new Date().toISOString()}]`;
   if (data === undefined) console.warn(prefix, message);
   else console.warn(prefix, message, data);
@@ -1113,6 +1216,49 @@ function normalizeMarkerStyle(value) {
   return "rounded-bold";
 }
 
+// T2C.2: ReDoS-safe compile probe for custom redaction patterns. Runs the
+// candidate regex against a battery of ~4KB pathological samples under a
+// wall-clock budget; rejects if compile fails, any single sample throws, or
+// any single sample exceeds the budget. Widened from a single 200-char 'a'
+// sample so patterns targeting digits/mixed classes on longer inputs are
+// also caught.
+function probeRedactRuleReDoS(pattern) {
+  if (typeof pattern !== "string" || !pattern.length) return { ok: false, reason: "empty" };
+  if (pattern.length > 2000) return { ok: false, reason: "oversize" };
+  let re;
+  try { re = new RegExp(pattern, "ig"); } catch (_) { return { ok: false, reason: "invalid" }; }
+  let worstElapsed = 0;
+  for (const sample of CUSTOM_REDACT_PROBE_SAMPLES) {
+    const start = Date.now();
+    try { sample.replace(re, ""); } catch (_) { return { ok: false, reason: "runtime" }; }
+    const elapsed = Date.now() - start;
+    if (elapsed > worstElapsed) worstElapsed = elapsed;
+    if (elapsed > CUSTOM_REDACT_PROBE_BUDGET_MS) return { ok: false, reason: "slow", elapsedMs: elapsed };
+  }
+  return { ok: true, elapsedMs: worstElapsed };
+}
+
+function normalizeCustomRedactRules(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  const seenNames = new Set();
+  for (const raw of value) {
+    if (out.length >= CUSTOM_REDACT_RULES_MAX) break;
+    if (!raw || typeof raw !== "object") continue;
+    const name = String(raw.name || "").trim().slice(0, 64);
+    const pattern = typeof raw.pattern === "string" ? raw.pattern : "";
+    if (!name || !pattern) continue;
+    if (seenNames.has(name)) continue;
+    const probe = probeRedactRuleReDoS(pattern);
+    if (!probe.ok) continue;
+    const replaceRaw = typeof raw.replace === "string" ? raw.replace : "[REDACTED]";
+    const replace = replaceRaw.slice(0, 128);
+    seenNames.add(name);
+    out.push({ name, pattern, replace });
+  }
+  return out;
+}
+
 function normalizeScreenshotRedactionMode(value) {
   const mode = String(value || "").trim().toLowerCase();
   if (SCREENSHOT_REDACTION_MODES.has(mode)) return mode;
@@ -1152,8 +1298,10 @@ function normalizeSettings(base) {
   out.diffEnabled = out.diffEnabled !== false;
   out.redactEnabled = out.redactEnabled !== false;
   out.redactLoginUsernames = out.redactLoginUsernames !== false;
+  out.customRedactRules = normalizeCustomRedactRules(out.customRedactRules);
   out.screenshotRedactionMode = normalizeScreenshotRedactionMode(out.screenshotRedactionMode);
   out.secureAtRestMode = !!out.secureAtRestMode;
+  out.encryptedAtRestVaultEnabled = !!out.encryptedAtRestVaultEnabled;
   out.captureMode = out.captureMode === "clicks" ? "clicks" : "all";
   out.activeTabOnly = out.activeTabOnly !== false;
   out.autoPauseOnIdle = !!out.autoPauseOnIdle;
@@ -1163,11 +1311,16 @@ function normalizeSettings(base) {
   out.pruneWindowMs = Math.max(100, Number(out.pruneWindowMs) || 1200);
   out.pageWatchEnabled = out.pageWatchEnabled !== false;
   out.pageWatchMs = Math.max(200, Number(out.pageWatchMs) || 500);
+  {
+    const rawRetention = Math.round(Number(out.reportRetention));
+    out.reportRetention = Math.min(10, Math.max(1, Number.isFinite(rawRetention) ? rawRetention : 3));
+  }
   out.hotkeyBurstFps = normalizeHotkeyBurstFps(out.hotkeyBurstFps);
   out.hotkeyBurstImageFormat = normalizeHotkeyBurstImageFormat(out.hotkeyBurstImageFormat);
   out.hotkeyBurstJpegQuality = normalizeHotkeyBurstJpegQuality(out.hotkeyBurstJpegQuality);
   out.burstStabilityMode = out.burstStabilityMode !== false;
   out.burstMaxEffectiveFps = normalizeBurstMaxEffectiveFps(out.burstMaxEffectiveFps);
+  out.debugLogsEnabled = !!out.debugLogsEnabled;
   out.clickBurstMarkerColor = normalizeHexColor(out.clickBurstMarkerColor, "#2563eb");
   out.clickBurstMarkerStyle = normalizeMarkerStyle(out.clickBurstMarkerStyle);
   delete out.clickBurstEnabled;
@@ -1273,7 +1426,13 @@ async function purgeFrameSpoolForSecureAtRest(reason) {
 
 async function writePersistedState(payload, context = "persist") {
   const normalizedSettings = normalizeSettings((payload && payload.settings) || settings);
-  const normalizedPayload = { ...payload, settings: normalizedSettings, reportsMeta: buildReportsMeta() };
+  const normalizedPayload = {
+    ...payload,
+    settings: normalizedSettings,
+    reportsMeta: buildReportsMeta(),
+    [SETTINGS_SCHEMA_KEY]: SETTINGS_SCHEMA_VERSION,
+    [REPORTS_SCHEMA_KEY]: REPORTS_SCHEMA_VERSION
+  };
   const secureAtRestMode = !!normalizedSettings.secureAtRestMode;
   if (!secureAtRestMode) {
     await browser.storage.local.set(normalizedPayload);
@@ -1797,7 +1956,9 @@ async function loadPersisted() {
     "sessionId",
     "recordingTabSelection",
     "recordingScopeEnforced",
-    TAB_SCOPE_WATCH_ENABLED_KEY
+    TAB_SCOPE_WATCH_ENABLED_KEY,
+    SETTINGS_SCHEMA_KEY,
+    REPORTS_SCHEMA_KEY
   ]);
   let stored = storedLocal;
   if (storedLocal.settings) settings = { ...settings, ...storedLocal.settings };
@@ -1841,6 +2002,16 @@ async function loadPersisted() {
   }
   if (stored.settings) settings = { ...settings, ...stored.settings };
   settings = normalizeSettings(settings);
+  const storedSettingsVer = typeof stored[SETTINGS_SCHEMA_KEY] === "number" ? stored[SETTINGS_SCHEMA_KEY] : 0;
+  const storedReportsVer = typeof stored[REPORTS_SCHEMA_KEY] === "number" ? stored[REPORTS_SCHEMA_KEY] : 0;
+  if (storedSettingsVer < SETTINGS_SCHEMA_VERSION) {
+    const r = applySchemaMigrations("settings", storedSettingsVer, SETTINGS_SCHEMA_VERSION, settings);
+    if (r && r.value && typeof r.value === "object") settings = normalizeSettings(r.value);
+  }
+  if (storedReportsVer < REPORTS_SCHEMA_VERSION) {
+    const r = applySchemaMigrations("reports", storedReportsVer, REPORTS_SCHEMA_VERSION, reports);
+    if (r && Array.isArray(r.value)) reports = r.value;
+  }
   recordingStartedAtMs = isRecording ? Date.now() : 0;
   burstHotkeyModeActive = false;
   burstModeEpoch = 0;
@@ -1884,18 +2055,68 @@ function stableHash(str) {
   return h.toString(16);
 }
 
+// T2C.2 defense-in-depth: apply a single redact rule under a wall-clock
+// budget. If a rule (built-in or custom) exceeds the budget on this input,
+// skip it for this call and log the rule name only — never the input text.
+// A bailed rule is preferable to a wedged background page.
+function applyRedactRuleWithBudget(input, rule) {
+  let re;
+  try { re = new RegExp(rule.pattern, "ig"); } catch (_) { return input; }
+  const start = Date.now();
+  let next;
+  try { next = input.replace(re, rule.replace); } catch (_) { return input; }
+  const elapsed = Date.now() - start;
+  if (elapsed > REDACT_RULE_RUNTIME_BUDGET_MS) {
+    try { bgWarn("redact-rule:runtime-budget-exceeded", { name: rule.name || "(unnamed)", elapsedMs: elapsed, budgetMs: REDACT_RULE_RUNTIME_BUDGET_MS }); } catch (_) {}
+    return input;
+  }
+  return next;
+}
+
 function applyRedactionToText(text) {
   if (!settings.redactEnabled) return text;
   if (text === null || text === undefined) return text;
   let out = String(text);
   for (const rule of settings.redactRules || []) {
-    try {
-      const re = new RegExp(rule.pattern, "ig");
-      out = out.replace(re, rule.replace);
-    } catch (_) {}
+    out = applyRedactRuleWithBudget(out, rule);
+  }
+  // T2C.2: custom user rules layered ON TOP of the built-ins above (never replacing them).
+  for (const rule of settings.customRedactRules || []) {
+    out = applyRedactRuleWithBudget(out, rule);
   }
   if (out.length > 180 && /[A-Za-z0-9+\/=]{60,}/.test(out)) out = "[REDACTED BLOB]";
   return out;
+}
+
+// T2C.3: same pipeline as applyRedactionToText, but records which rules
+// mutated the string. Used by the popup's "Test redaction" panel — no I/O,
+// no storage side effects. Kept in lock-step with applyRedactionToText.
+function applyRedactionWithTrace(text) {
+  const input = (text === null || text === undefined) ? "" : String(text);
+  const trace = { input, output: input, matches: [], enabled: !!settings.redactEnabled, blobRedacted: false, builtinRuleCount: 0, customRuleCount: 0 };
+  trace.builtinRuleCount = Array.isArray(settings.redactRules) ? settings.redactRules.length : 0;
+  trace.customRuleCount = Array.isArray(settings.customRedactRules) ? settings.customRedactRules.length : 0;
+  if (!settings.redactEnabled || text === null || text === undefined) return trace;
+  let out = input;
+  const runRules = (rules, source) => {
+    for (const rule of rules || []) {
+      try {
+        const re = new RegExp(rule.pattern, "ig");
+        const before = out;
+        out = out.replace(re, rule.replace);
+        if (out !== before) trace.matches.push({ name: rule.name || "(unnamed)", source, replace: rule.replace });
+      } catch (_) {}
+    }
+  };
+  runRules(settings.redactRules, "builtin");
+  runRules(settings.customRedactRules, "custom");
+  if (out.length > 180 && /[A-Za-z0-9+\/=]{60,}/.test(out)) {
+    out = "[REDACTED BLOB]";
+    trace.blobRedacted = true;
+    trace.matches.push({ name: "long-blob-fallback", source: "builtin", replace: "[REDACTED BLOB]" });
+  }
+  trace.output = out;
+  return trace;
 }
 
 function formatToMime(format) {
@@ -2172,8 +2393,9 @@ async function saveReportSnapshotDetached(snapshot, options = {}) {
     report.title = `${String(report.title || "").trim()} ${String(opts.titleSuffix)}`.trim();
   }
   reports.unshift(report);
-  const droppedReports = reports.slice(3);
-  reports = reports.slice(0, 3);
+  const retentionLimit = Math.min(10, Math.max(1, Math.round(Number(resolvedSettings.reportRetention) || 3)));
+  const droppedReports = reports.slice(retentionLimit);
+  reports = reports.slice(0, retentionLimit);
 
   const persisted = await persistReportsSafe(opts.reason || "snapshot");
   if (!persisted.ok) {
@@ -2852,8 +3074,13 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         stopFinalization: getStopFinalizationStateSnapshot(),
         burstPerf: getBurstPerfSnapshot(),
         spoolRuntime,
-        spoolWorkers
+        spoolWorkers,
+        frameMsgToken
       };
+    }
+
+    if (msgType === "GET_DIAGNOSTICS") {
+      return { ok: true, entries: diagnosticsRing.slice(), max: DIAGNOSTICS_RING_MAX };
     }
 
     if (msgType === "UPDATE_SETTINGS") {
@@ -2977,6 +3204,14 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     if (msgType === "OPEN_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?idx=0" }); return { ok: true }; }
     if (msgType === "OPEN_DOCS") { await browser.tabs.create({ url: browser.runtime.getURL("docs.html") }); return { ok: true }; }
     if (msgType === "OPEN_PRINTABLE_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?print=1&idx=0" }); return { ok: true }; }
+
+    if (msgType === "TEST_REDACTION") {
+      const raw = typeof msg.text === "string" ? msg.text : "";
+      // Cap input at 8 KB so the popup can't accidentally choke the background.
+      const bounded = raw.length > 8192 ? raw.slice(0, 8192) : raw;
+      const trace = applyRedactionWithTrace(bounded);
+      return { ok: true, trace, truncated: raw.length > 8192, inputLength: raw.length };
+    }
 
     if (msgType === "RECORD_EVENT") {
       activeRecordEvents++;

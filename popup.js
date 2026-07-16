@@ -19,6 +19,7 @@ function burstPauseReasonLabel(reason) {
   const key = String(reason || "").trim().toLowerCase();
   if (!key) return "running";
   if (key === "secure-at-rest") return "secure mode";
+  if (key === "vault-mode") return "encrypted-at-rest vault";
   if (key === "redaction-policy") return "redaction policy";
   if (key === "mode-off") return "mode off";
   if (key === "inactive-recording") return "recording inactive";
@@ -394,6 +395,87 @@ async function writeControlSignal() {
   }
 }
 
+// T2C.2: custom redaction rules — textarea <-> array plumbing plus ReDoS-safe compile probe.
+const CUSTOM_REDACT_RULES_MAX = 32;
+const CUSTOM_REDACT_PROBE_BUDGET_MS = 50;
+const CUSTOM_REDACT_PROBE_SAMPLE = "a".repeat(200) + "!";
+let customRedactRulesLastLoaded = [];
+let customRedactRulesDirty = false;
+
+function probeCustomRedactRuleReDoS(pattern) {
+  if (typeof pattern !== "string" || !pattern.length) return { ok: false, reason: "empty" };
+  if (pattern.length > 2000) return { ok: false, reason: "oversize" };
+  let re;
+  try { re = new RegExp(pattern, "ig"); } catch (_) { return { ok: false, reason: "invalid" }; }
+  const start = Date.now();
+  try { CUSTOM_REDACT_PROBE_SAMPLE.replace(re, ""); } catch (_) { return { ok: false, reason: "runtime" }; }
+  const elapsed = Date.now() - start;
+  if (elapsed > CUSTOM_REDACT_PROBE_BUDGET_MS) return { ok: false, reason: "slow", elapsedMs: elapsed };
+  return { ok: true, elapsedMs: elapsed };
+}
+
+function parseCustomRedactRulesText(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const rules = [];
+  const errors = [];
+  const seenNames = new Set();
+  lines.forEach((raw, idx) => {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) return;
+    const sepIdx = line.indexOf(":");
+    if (sepIdx <= 0) {
+      errors.push({ line: idx + 1, reason: "expected 'name: pattern'" });
+      return;
+    }
+    const name = line.slice(0, sepIdx).trim().slice(0, 64);
+    const pattern = line.slice(sepIdx + 1).trim();
+    if (!name || !pattern) {
+      errors.push({ line: idx + 1, reason: "name or pattern empty" });
+      return;
+    }
+    if (seenNames.has(name)) {
+      errors.push({ line: idx + 1, reason: `duplicate name "${name}"` });
+      return;
+    }
+    if (rules.length >= CUSTOM_REDACT_RULES_MAX) {
+      errors.push({ line: idx + 1, reason: `exceeds ${CUSTOM_REDACT_RULES_MAX} rule cap` });
+      return;
+    }
+    const probe = probeCustomRedactRuleReDoS(pattern);
+    if (!probe.ok) {
+      errors.push({ line: idx + 1, reason: `rejected (${probe.reason}${probe.elapsedMs != null ? ` ${probe.elapsedMs}ms` : ""})` });
+      return;
+    }
+    seenNames.add(name);
+    rules.push({ name, pattern, replace: "[REDACTED]" });
+  });
+  return { rules, errors };
+}
+
+function formatCustomRedactRulesForTextarea(rules) {
+  if (!Array.isArray(rules)) return "";
+  return rules.map((r) => `${r.name}: ${r.pattern}`).join("\n");
+}
+
+function syncCustomRedactRulesUi(rules) {
+  const list = Array.isArray(rules) ? rules : [];
+  customRedactRulesLastLoaded = list.slice();
+  const ta = document.getElementById("custom-redact-rules");
+  const count = document.getElementById("custom-redact-count");
+  if (count) {
+    const next = `${list.length} loaded`;
+    if (count.textContent !== next) count.textContent = next;
+  }
+  if (ta && !customRedactRulesDirty) ta.value = formatCustomRedactRulesForTextarea(list);
+}
+
+function setCustomRedactStatus(text, kind) {
+  const el = document.getElementById("custom-redact-status");
+  if (!el) return;
+  el.textContent = text || "";
+  el.dataset.kind = kind || "muted";
+}
+
 async function getState() { return await browser.runtime.sendMessage({ type: "GET_STATE" }); }
 async function updateSettings(partial) { return await browser.runtime.sendMessage({ type: "UPDATE_SETTINGS", settings: partial }); }
 async function sendMessageSafe(message) {
@@ -569,10 +651,14 @@ async function refresh() {
   document.getElementById("redact-user").checked = !!st.settings?.redactLoginUsernames;
   document.getElementById("screenshot-redaction-mode").value = st.settings?.screenshotRedactionMode === "omit" ? "omit" : "none";
   document.getElementById("secure-at-rest").checked = !!st.settings?.secureAtRestMode;
+  document.getElementById("vault-mode").checked = !!st.settings?.encryptedAtRestVaultEnabled;
   document.getElementById("auto-idle").checked = !!st.settings?.autoPauseOnIdle;
   document.getElementById("idle-sec").value = st.settings?.idleThresholdSec ?? 60;
   document.getElementById("resume-focus").checked = !!st.settings?.resumeOnFocus;
   document.getElementById("prune-inputs").checked = !!st.settings?.pruneInputs;
+  document.getElementById("report-retention").value = Math.min(10, Math.max(1, Math.round(Number(st.settings?.reportRetention) || 3)));
+  syncCustomRedactRulesUi(Array.isArray(st.settings?.customRedactRules) ? st.settings.customRedactRules : []);
+  document.getElementById("debug-logs").checked = !!st.settings?.debugLogsEnabled;
   document.getElementById("page-watch").checked = !!st.settings?.pageWatchEnabled;
   document.getElementById("page-watch-ms").value = st.settings?.pageWatchMs ?? 500;
   document.getElementById("gif-capture-fps").value = String(configuredBurstFps);
@@ -710,6 +796,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("export-pdf").addEventListener("click", async () => {
     await sendMessageSafe({ type: "OPEN_PRINTABLE_REPORT" });
   });
+  document.getElementById("copy-diagnostics").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    const originalLabel = btn.textContent;
+    const setLabel = (t) => { try { btn.textContent = t; } catch (_) {} };
+    try {
+      const resp = await sendMessageSafe({ type: "GET_DIAGNOSTICS" });
+      const entries = (resp && Array.isArray(resp.entries)) ? resp.entries : [];
+      const payload = JSON.stringify({ entries, max: (resp && resp.max) || entries.length, capturedAt: Date.now() }, null, 2);
+      await navigator.clipboard.writeText(payload);
+      setLabel(`Copied ${entries.length}`);
+    } catch (_) {
+      setLabel("Copy failed");
+    }
+    setTimeout(() => setLabel(originalLabel), 1500);
+  });
 
   document.getElementById("debounce").addEventListener("change", async (e) => {
     await updateSettings({ screenshotDebounceMs: Math.max(0, Number(e.target.value || 0)) });
@@ -743,6 +844,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     await updateSettings({ secureAtRestMode: !!e.target.checked });
     await refresh();
   });
+  document.getElementById("vault-mode").addEventListener("change", async (e) => {
+    await updateSettings({ encryptedAtRestVaultEnabled: !!e.target.checked });
+    await refresh();
+  });
   document.getElementById("auto-idle").addEventListener("change", async (e) => {
     await updateSettings({ autoPauseOnIdle: !!e.target.checked });
     await refresh();
@@ -759,6 +864,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     await updateSettings({ pruneInputs: !!e.target.checked });
     await refresh();
   });
+  document.getElementById("report-retention").addEventListener("change", async (e) => {
+    const raw = Math.round(Number(e.target.value) || 3);
+    await updateSettings({ reportRetention: Math.min(10, Math.max(1, raw)) });
+    await refresh();
+  });
+  document.getElementById("debug-logs").addEventListener("change", async (e) => {
+    await updateSettings({ debugLogsEnabled: !!e.target.checked });
+    await refresh();
+  });
   document.getElementById("page-watch").addEventListener("change", async (e) => {
     await updateSettings({ pageWatchEnabled: !!e.target.checked });
     await refresh();
@@ -771,6 +885,159 @@ document.addEventListener("DOMContentLoaded", async () => {
     await updateSettings({ hotkeyBurstFps: normalizeHotkeyBurstFps(e.target.value) });
     await refresh();
   });
+
+  // T2C.2: custom redaction rules — save/export/import
+  const customRedactTa = document.getElementById("custom-redact-rules");
+  if (customRedactTa) {
+    customRedactTa.addEventListener("input", () => { customRedactRulesDirty = true; });
+  }
+  const customRedactSaveBtn = document.getElementById("custom-redact-save");
+  if (customRedactSaveBtn) {
+    customRedactSaveBtn.addEventListener("click", async () => {
+      const ta = document.getElementById("custom-redact-rules");
+      const { rules, errors } = parseCustomRedactRulesText(ta ? ta.value : "");
+      if (errors.length) {
+        const first = errors[0];
+        setCustomRedactStatus(`Rejected ${errors.length} line(s). First: line ${first.line} — ${first.reason}.`, "error");
+        return;
+      }
+      const resp = await updateSettings({ customRedactRules: rules });
+      const accepted = resp && resp.settings && Array.isArray(resp.settings.customRedactRules)
+        ? resp.settings.customRedactRules.length
+        : rules.length;
+      customRedactRulesDirty = false;
+      setCustomRedactStatus(`Saved ${accepted} rule(s).`, "success");
+      await refresh();
+    });
+  }
+  const customRedactExportBtn = document.getElementById("custom-redact-export");
+  if (customRedactExportBtn) {
+    customRedactExportBtn.addEventListener("click", async () => {
+      try {
+        const payload = { customRedactRules: customRedactRulesLastLoaded, exportedAt: new Date().toISOString() };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const filename = `ui-recorder-custom-redact-rules-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+        if (browser.downloads && typeof browser.downloads.download === "function") {
+          await browser.downloads.download({ url, filename, saveAs: true });
+        } else {
+          const a = document.createElement("a");
+          a.href = url; a.download = filename; a.click();
+        }
+        setCustomRedactStatus(`Exported ${customRedactRulesLastLoaded.length} rule(s).`, "success");
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+      } catch (e) {
+        setCustomRedactStatus(`Export failed: ${String((e && e.message) || e)}`, "error");
+      }
+    });
+  }
+  const customRedactImportBtn = document.getElementById("custom-redact-import");
+  const customRedactImportFile = document.getElementById("custom-redact-import-file");
+  if (customRedactImportBtn && customRedactImportFile) {
+    customRedactImportBtn.addEventListener("click", () => { customRedactImportFile.click(); });
+    customRedactImportFile.addEventListener("change", async () => {
+      const file = customRedactImportFile.files && customRedactImportFile.files[0];
+      customRedactImportFile.value = "";
+      if (!file) return;
+      if (file.size > 262144) {
+        setCustomRedactStatus("Import rejected: file exceeds 256 KB.", "error");
+        return;
+      }
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        const source = Array.isArray(parsed) ? parsed
+          : (parsed && Array.isArray(parsed.customRedactRules)) ? parsed.customRedactRules
+          : null;
+        if (!source) {
+          setCustomRedactStatus("Import rejected: expected array or {customRedactRules:[...]}.", "error");
+          return;
+        }
+        const rules = [];
+        const errors = [];
+        const seenNames = new Set();
+        source.forEach((raw, idx) => {
+          if (rules.length >= CUSTOM_REDACT_RULES_MAX) return;
+          if (!raw || typeof raw !== "object") { errors.push(idx); return; }
+          const name = String(raw.name || "").trim().slice(0, 64);
+          const pattern = typeof raw.pattern === "string" ? raw.pattern : "";
+          if (!name || !pattern || seenNames.has(name)) { errors.push(idx); return; }
+          const probe = probeCustomRedactRuleReDoS(pattern);
+          if (!probe.ok) { errors.push(idx); return; }
+          seenNames.add(name);
+          rules.push({ name, pattern, replace: typeof raw.replace === "string" ? raw.replace.slice(0, 128) : "[REDACTED]" });
+        });
+        const ta = document.getElementById("custom-redact-rules");
+        if (ta) { ta.value = formatCustomRedactRulesForTextarea(rules); customRedactRulesDirty = true; }
+        const msg = errors.length
+          ? `Imported ${rules.length} rule(s); dropped ${errors.length}. Review then Save.`
+          : `Imported ${rules.length} rule(s). Review then Save.`;
+        setCustomRedactStatus(msg, errors.length ? "error" : "success");
+      } catch (e) {
+        setCustomRedactStatus(`Import failed: ${String((e && e.message) || e)}`, "error");
+      }
+    });
+  }
+  // T2C.3: live redaction tester — sends TEST_REDACTION to background, which
+  // runs applyRedactionWithTrace against currently-saved rules. No storage effects.
+  const redactTestRunBtn = document.getElementById("redact-test-run");
+  const redactTestClearBtn = document.getElementById("redact-test-clear");
+  const redactTestInput = document.getElementById("redact-test-input");
+  const redactTestStatus = document.getElementById("redact-test-status");
+  const redactTestResult = document.getElementById("redact-test-result");
+  const redactTestOutput = document.getElementById("redact-test-output");
+  const redactTestMatches = document.getElementById("redact-test-matches");
+  const redactTestMatchCount = document.getElementById("redact-test-match-count");
+  function renderRedactTestResult(trace, meta) {
+    if (!redactTestResult || !redactTestOutput || !redactTestMatches || !redactTestMatchCount) return;
+    redactTestOutput.textContent = trace && typeof trace.output === "string" ? trace.output : "";
+    redactTestMatches.textContent = "";
+    const matches = (trace && Array.isArray(trace.matches)) ? trace.matches : [];
+    redactTestMatchCount.textContent = String(matches.length);
+    if (matches.length === 0) {
+      const li = document.createElement("li");
+      li.textContent = trace && trace.enabled === false
+        ? "Redaction is disabled — no rules ran."
+        : "No rules matched the input.";
+      redactTestMatches.appendChild(li);
+    } else {
+      matches.forEach((m) => {
+        const li = document.createElement("li");
+        li.textContent = `[${m.source || "?"}] ${m.name || "(unnamed)"} → ${m.replace || ""}`;
+        redactTestMatches.appendChild(li);
+      });
+    }
+    redactTestResult.style.display = "";
+    if (redactTestStatus) {
+      const truncated = meta && meta.truncated ? ` Input truncated to 8 KB (was ${meta.inputLength} chars).` : "";
+      redactTestStatus.textContent = `Tested ${matches.length} match(es).${truncated}`;
+      redactTestStatus.dataset.kind = "muted";
+    }
+  }
+  if (redactTestRunBtn) {
+    redactTestRunBtn.addEventListener("click", async () => {
+      const text = redactTestInput ? redactTestInput.value : "";
+      if (redactTestStatus) { redactTestStatus.textContent = "Testing..."; redactTestStatus.dataset.kind = "muted"; }
+      const resp = await sendMessageSafe({ type: "TEST_REDACTION", text });
+      if (!resp || !resp.ok) {
+        if (redactTestStatus) {
+          redactTestStatus.textContent = `Test failed: ${String((resp && resp.error) || "no response")}`;
+          redactTestStatus.dataset.kind = "error";
+        }
+        if (redactTestResult) redactTestResult.style.display = "none";
+        return;
+      }
+      renderRedactTestResult(resp.trace, { truncated: !!resp.truncated, inputLength: Number(resp.inputLength) || 0 });
+    });
+  }
+  if (redactTestClearBtn) {
+    redactTestClearBtn.addEventListener("click", () => {
+      if (redactTestInput) redactTestInput.value = "";
+      if (redactTestResult) redactTestResult.style.display = "none";
+      if (redactTestStatus) { redactTestStatus.textContent = ""; redactTestStatus.dataset.kind = "muted"; }
+    });
+  }
+
   await refresh();
   setInterval(() => {
     refresh().catch(() => {});

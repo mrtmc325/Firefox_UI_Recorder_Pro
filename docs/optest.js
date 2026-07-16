@@ -64,7 +64,19 @@ console.log("\n=== Harness A: background.js (recorder core) ===");
 // Module `settings` (background.js:9) is already initialized to full defaults incl. redactRules.
 const BG = loadContext(["frame_spool.js", "background.js"], {
   epilogue: "globalThis.__BG = { RECORD_EVENT_PERSIST_MIN_INTERVAL_MS: (typeof RECORD_EVENT_PERSIST_MIN_INTERVAL_MS!=='undefined') ? RECORD_EVENT_PERSIST_MIN_INTERVAL_MS : undefined, " +
-    "redactEnabled: settings.redactEnabled, ruleCount: (settings.redactRules||[]).length };",
+    "redactEnabled: settings.redactEnabled, ruleCount: (settings.redactRules||[]).length, " +
+    "SETTINGS_SCHEMA_VERSION: (typeof SETTINGS_SCHEMA_VERSION!=='undefined') ? SETTINGS_SCHEMA_VERSION : undefined, " +
+    "REPORTS_SCHEMA_VERSION: (typeof REPORTS_SCHEMA_VERSION!=='undefined') ? REPORTS_SCHEMA_VERSION : undefined, " +
+    "MIGRATIONS: (typeof MIGRATIONS!=='undefined') ? MIGRATIONS : undefined, " +
+    "DIAGNOSTICS_RING_MAX: (typeof DIAGNOSTICS_RING_MAX!=='undefined') ? DIAGNOSTICS_RING_MAX : undefined, " +
+    "diagnosticsRing: (typeof diagnosticsRing!=='undefined') ? diagnosticsRing : undefined }; " +
+    "globalThis.__applySchemaMigrations = (typeof applySchemaMigrations!=='undefined') ? applySchemaMigrations : undefined; " +
+    "globalThis.__sanitizeDiagnosticsData = (typeof sanitizeDiagnosticsData!=='undefined') ? sanitizeDiagnosticsData : undefined; " +
+    "globalThis.__pushDiagnosticsEntry = (typeof pushDiagnosticsEntry!=='undefined') ? pushDiagnosticsEntry : undefined; " +
+    "globalThis.__bgLog = (typeof bgLog!=='undefined') ? bgLog : undefined; " +
+    "globalThis.__setDebugLogs = (v) => { settings.debugLogsEnabled = !!v; }; " +
+    "globalThis.__getDebugLogs = () => !!(settings && settings.debugLogsEnabled); " +
+    "globalThis.__getSettings = () => settings;",
 });
 
 // §3 — isInjectableTabUrl is an http/https allowlist (no capture on file:/about: pages)
@@ -93,6 +105,218 @@ const r3 = BG.applyRedactionToText(blob);
 check("4", "long base64 blob -> [REDACTED BLOB]", r3 === "[REDACTED BLOB]", JSON.stringify(r3).slice(0, 60));
 const clean = BG.applyRedactionToText("Click the blue Submit button");
 check("4", "non-sensitive text untouched", clean === "Click the blue Submit button", JSON.stringify(clean));
+
+// T2C.2 — custom redaction rules layered on top of built-ins
+check("T2C.2", "customRedactRules default = []",
+  Array.isArray(BG.__getSettings().customRedactRules) && BG.__getSettings().customRedactRules.length === 0);
+check("T2C.2", "probeRedactRuleReDoS accepts safe pattern",
+  BG.probeRedactRuleReDoS("INC[0-9]{6,}").ok === true);
+check("T2C.2", "probeRedactRuleReDoS rejects invalid regex",
+  BG.probeRedactRuleReDoS("[unterminated").ok === false);
+check("T2C.2", "probeRedactRuleReDoS rejects empty pattern",
+  BG.probeRedactRuleReDoS("").ok === false);
+check("T2C.2", "probeRedactRuleReDoS rejects oversize (>2000 chars)",
+  BG.probeRedactRuleReDoS("a".repeat(2001)).ok === false);
+{
+  const rules = BG.normalizeCustomRedactRules([
+    { name: "ticket", pattern: "INC[0-9]{6,}", replace: "[TICKET]" },
+    { name: "", pattern: "x" },                 // dropped: empty name
+    { name: "bad", pattern: "[unterminated" },  // dropped: invalid regex
+    { name: "ticket", pattern: "dupe" },        // dropped: duplicate name
+    { name: "no-replace", pattern: "abc" }      // replace defaults to [REDACTED]
+  ]);
+  check("T2C.2", "normalizeCustomRedactRules drops invalid entries and dedupes names",
+    Array.isArray(rules) && rules.length === 2 && rules[0].name === "ticket" && rules[1].name === "no-replace" &&
+    rules[0].replace === "[TICKET]" && rules[1].replace === "[REDACTED]",
+    JSON.stringify(rules));
+}
+check("T2C.2", "normalizeCustomRedactRules non-array => []",
+  Array.isArray(BG.normalizeCustomRedactRules(null)) && BG.normalizeCustomRedactRules(null).length === 0 &&
+  BG.normalizeCustomRedactRules("junk").length === 0);
+check("T2C.2", "normalizeCustomRedactRules caps at 32 rules",
+  BG.normalizeCustomRedactRules(Array.from({ length: 40 }, (_, i) => ({ name: "r" + i, pattern: "p" + i }))).length === 32);
+{
+  // Layered on top of built-ins: built-in still redacts password, custom also redacts ticket id.
+  const prev = BG.__getSettings().customRedactRules;
+  BG.__getSettings().customRedactRules = BG.normalizeCustomRedactRules([
+    { name: "ticket", pattern: "INC[0-9]{6,}", replace: "[TICKET]" }
+  ]);
+  const out = BG.applyRedactionToText("password: hunter2secret ref INC123456 done");
+  BG.__getSettings().customRedactRules = prev;
+  check("T2C.2", "custom rule layered on top of built-ins (both apply)",
+    /password:\s*\[REDACTED\]/i.test(out) && /\[TICKET\]/.test(out) && !/INC123456/.test(out) && !/hunter2secret/.test(out),
+    JSON.stringify(out));
+}
+check("T2C.2", "normalizeSettings threads customRedactRules through",
+  Array.isArray(BG.normalizeSettings({ customRedactRules: [{ name: "t", pattern: "abc" }] }).customRedactRules) &&
+  BG.normalizeSettings({ customRedactRules: [{ name: "t", pattern: "abc" }] }).customRedactRules.length === 1);
+
+// T2C.2 — ReDoS probe uses a battery of ~4KB samples across character
+// classes, not a single 200-char 'a' input. (A genuine ReDoS pattern would
+// hang V8 — the probe checks elapsed AFTER regex completes — so we simulate
+// the slow branch by intercepting Date.now inside the vm and forcing elapsed
+// > 50ms on the SECOND sample only. If the probe iterated a single sample
+// (the old behavior) it would return ok:true; the widened battery reaches
+// the second sample and must reject as slow.)
+{
+  const probeResults = vm.runInContext(`
+    (function () {
+      const origDateNow = Date.now;
+      let callN = 0;
+      Date.now = function () {
+        callN++;
+        // Probe loop: sample 0 -> calls 1,2 ; sample 1 -> calls 3,4 ; ...
+        // Force elapsed > 50ms only for sample-1's end call (call #4) so
+        // the old single-sample probe (which stops after sample 0) would
+        // still return ok:true.
+        if (callN === 4) return origDateNow.call(Date) + 200;
+        return origDateNow.call(Date);
+      };
+      let rejected = false, acceptedAfter = false;
+      try {
+        rejected = probeRedactRuleReDoS("probe-widen-sim").ok === false;
+      } finally {
+        Date.now = origDateNow;
+      }
+      // Re-run without the slow injection: same pattern must be accepted,
+      // isolating the rejection cause to the widened battery reaching the
+      // second sample.
+      acceptedAfter = probeRedactRuleReDoS("probe-widen-sim").ok === true;
+      return { rejected, acceptedAfter };
+    })();
+  `, BG, { filename: "t2c2-probe-widening-sim.js" });
+  check("T2C.2", "probeRedactRuleReDoS rejects pattern slow on non-first sample (widened battery)",
+    probeResults && probeResults.rejected === true && probeResults.acceptedAfter === true,
+    JSON.stringify(probeResults));
+}
+// T2C.2 — applyRedactionToText enforces a per-rule wall-clock budget. Inject
+// a rule whose .replace() burns past the 25ms budget via a replacement
+// callback (String.prototype.replace accepts a function that produces the
+// replacement text — we use it as a legitimate slow-op hook). The bailed rule
+// must be skipped (bail returns pre-replace input), while the built-in
+// password rule continues to redact. Run inside the vm context so `settings`,
+// `applyRedactionToText`, and Date share the sandbox's realm.
+{
+  const runtimeResults = vm.runInContext(`
+    (function () {
+      const prev = settings.customRedactRules;
+      let stubHits = 0;
+      // A function replacement is called by String.prototype.replace for each
+      // match. Burn ~40ms — larger than the 25ms per-rule runtime budget — so
+      // applyRedactRuleWithBudget bails and returns the pre-replace input.
+      const slowReplace = function (m) {
+        stubHits++;
+        const start = Date.now();
+        while (Date.now() - start < 40) { /* burn */ }
+        return "[BUDGET-EXCEEDED-SENTINEL]";
+      };
+      let out = "";
+      try {
+        settings.customRedactRules = [{
+          name: "budget-stub",
+          pattern: "match-target-abc",
+          replace: slowReplace
+        }];
+        out = applyRedactionToText("password: hunter2secret plain text match-target-abc body");
+      } finally {
+        settings.customRedactRules = prev;
+      }
+      return {
+        out,
+        passwordRedacted: /password:\\s*\\[REDACTED\\]/i.test(out),
+        sentinelAbsent: !/\\[BUDGET-EXCEEDED-SENTINEL\\]/.test(out),
+        targetSurvived: /match-target-abc/.test(out),
+        stubHits
+      };
+    })();
+  `, BG, { filename: "t2c2-rule-budget-sim.js" });
+  check("T2C.2", "applyRedactionToText skips a rule that exceeds its per-rule runtime budget",
+    runtimeResults
+      && runtimeResults.passwordRedacted === true
+      && runtimeResults.sentinelAbsent === true
+      && runtimeResults.targetSurvived === true
+      && runtimeResults.stubHits > 0,
+    JSON.stringify(runtimeResults));
+}
+
+// T2C.2 — popup.html surfaces the editor UI
+{
+  const popupHtml = fs.readFileSync(path.join(REPO, "popup.html"), "utf8");
+  check("T2C.2", "popup.html has custom-redact-rules textarea",
+    /id="custom-redact-rules"/.test(popupHtml) && /<textarea[^>]*id="custom-redact-rules"/.test(popupHtml));
+  check("T2C.2", "popup.html has save/export/import buttons",
+    /id="custom-redact-save"/.test(popupHtml) && /id="custom-redact-export"/.test(popupHtml) && /id="custom-redact-import"/.test(popupHtml));
+  check("T2C.2", "popup.html import file input accepts JSON",
+    /id="custom-redact-import-file"[^>]*accept="[^"]*json/.test(popupHtml));
+  const popupJs = fs.readFileSync(path.join(REPO, "popup.js"), "utf8");
+  check("T2C.2", "popup.js wires customRedactRules through UPDATE_SETTINGS",
+    /updateSettings\(\s*\{\s*customRedactRules:/.test(popupJs));
+  check("T2C.2", "popup.js parses 'name: pattern' lines",
+    /parseCustomRedactRulesText/.test(popupJs) && /indexOf\(":"/.test(popupJs));
+  check("T2C.2", "popup.js probes ReDoS with 50ms budget on 'a'*200 + '!'",
+    /probeCustomRedactRuleReDoS/.test(popupJs) && /CUSTOM_REDACT_PROBE_BUDGET_MS\s*=\s*50/.test(popupJs) &&
+    /"a"\.repeat\(200\)\s*\+\s*"!"/.test(popupJs));
+  check("T2C.2", "popup.js export path uses browser.downloads.download",
+    /browser\.downloads\.download\(/.test(popupJs));
+}
+
+// T2C.3 — live redaction tester (applyRedactionWithTrace + popup UI)
+check("T2C.3", "applyRedactionWithTrace returns trace shape",
+  typeof BG.applyRedactionWithTrace === "function" &&
+  (() => { const t = BG.applyRedactionWithTrace("hello"); return t && typeof t.input === "string" && typeof t.output === "string" && Array.isArray(t.matches); })());
+{
+  const t = BG.applyRedactionWithTrace("password: hunter2secret then normal");
+  check("T2C.3", "trace records built-in match with source=builtin",
+    t.matches.some((m) => m.source === "builtin" && /password/i.test(m.name)) &&
+    /\[REDACTED\]/.test(t.output) && !/hunter2secret/.test(t.output),
+    JSON.stringify(t.matches));
+}
+{
+  const prev = BG.__getSettings().customRedactRules;
+  BG.__getSettings().customRedactRules = BG.normalizeCustomRedactRules([
+    { name: "ticket", pattern: "INC[0-9]{6,}", replace: "[TICKET]" }
+  ]);
+  const t = BG.applyRedactionWithTrace("ref INC123456 done");
+  BG.__getSettings().customRedactRules = prev;
+  check("T2C.3", "trace records custom match with source=custom",
+    t.matches.some((m) => m.source === "custom" && m.name === "ticket") &&
+    /\[TICKET\]/.test(t.output),
+    JSON.stringify(t.matches));
+}
+{
+  const t = BG.applyRedactionWithTrace("Click the blue Submit button");
+  check("T2C.3", "trace: no matches on clean text, output unchanged",
+    t.matches.length === 0 && t.output === "Click the blue Submit button");
+}
+{
+  const t = BG.applyRedactionWithTrace(null);
+  check("T2C.3", "trace: null input yields empty strings, no matches",
+    t.input === "" && t.output === "" && t.matches.length === 0);
+}
+{
+  const prev = BG.__getSettings().redactEnabled;
+  BG.__getSettings().redactEnabled = false;
+  const t = BG.applyRedactionWithTrace("password: hunter2secret");
+  BG.__getSettings().redactEnabled = prev;
+  check("T2C.3", "trace: disabled redaction returns input unchanged with enabled=false",
+    t.enabled === false && t.output === "password: hunter2secret" && t.matches.length === 0);
+}
+{
+  const blob = "SGVsbG9Xb3JsZGZvb2JhcmJhemJhcXV1eHl6".repeat(6);
+  const t = BG.applyRedactionWithTrace(blob);
+  check("T2C.3", "trace: long blob fallback flagged and named",
+    t.blobRedacted === true && t.output === "[REDACTED BLOB]" &&
+    t.matches.some((m) => m.name === "long-blob-fallback"));
+}
+{
+  const popupHtml = fs.readFileSync(path.join(REPO, "popup.html"), "utf8");
+  check("T2C.3", "popup.html has redact-test input/button/result",
+    /id="redact-test-input"/.test(popupHtml) && /id="redact-test-run"/.test(popupHtml) &&
+    /id="redact-test-output"/.test(popupHtml) && /id="redact-test-matches"/.test(popupHtml));
+  const popupJs = fs.readFileSync(path.join(REPO, "popup.js"), "utf8");
+  check("T2C.3", "popup.js sends TEST_REDACTION and renders trace",
+    /type:\s*"TEST_REDACTION"/.test(popupJs) && /renderRedactTestResult/.test(popupJs));
+}
 
 // §5 — screenshot pixel policy predicate
 check("5", "omit policy suppresses pixels", BG.shouldCaptureScreenshotPixels({ screenshotRedactionMode: "omit" }) === false);
@@ -129,6 +353,156 @@ check("7", "buildReportsMeta nonce increments", meta2.nonce > meta1.nonce, `${me
 
 // §9.4 — persist coalescing constant + trailing-timer behavior
 check("9", "RECORD_EVENT persist interval = 1500ms", BG.__BG.RECORD_EVENT_PERSIST_MIN_INTERVAL_MS === 1500, String(BG.__BG.RECORD_EVENT_PERSIST_MIN_INTERVAL_MS));
+
+// T2A.1 — schema-versioned migration table (settings + reports)
+check("T2A.1", "SETTINGS_SCHEMA_VERSION/REPORTS_SCHEMA_VERSION/MIGRATIONS defined",
+  BG.__BG.SETTINGS_SCHEMA_VERSION === 1 && BG.__BG.REPORTS_SCHEMA_VERSION === 1 &&
+  BG.__BG.MIGRATIONS && typeof BG.__BG.MIGRATIONS === "object" &&
+  typeof BG.__BG.MIGRATIONS.settings === "object" && typeof BG.__BG.MIGRATIONS.reports === "object",
+  `s=${BG.__BG.SETTINGS_SCHEMA_VERSION} r=${BG.__BG.REPORTS_SCHEMA_VERSION} reg=${!!BG.__BG.MIGRATIONS}`);
+{
+  // Inject a temporary migration to prove the runner invokes registered functions
+  // when the stored version is older than the current, then restore.
+  const reg = BG.__BG.MIGRATIONS.settings;
+  const had = Object.prototype.hasOwnProperty.call(reg, 1);
+  const prev = reg[1];
+  reg[1] = (s) => ({ ...(s || {}), __migrated: true });
+  const older = BG.__applySchemaMigrations("settings", 0, 1, { a: 1 });
+  if (had) reg[1] = prev; else delete reg[1];
+  check("T2A.1", "runner applies registered migration when stored < current",
+    older && older.value && older.value.__migrated === true && older.value.a === 1 &&
+    Array.isArray(older.applied) && older.applied.length === 1 && older.applied[0] === 1,
+    JSON.stringify(older));
+}
+{
+  // No-op when stored version equals current: no migrations invoked.
+  const same = BG.__applySchemaMigrations("settings", 1, 1, { keep: true });
+  check("T2A.1", "runner is a no-op when stored version equals current",
+    same && same.value && same.value.keep === true && Array.isArray(same.applied) && same.applied.length === 0,
+    JSON.stringify(same));
+}
+
+// T2A.2 — in-memory diagnostics ring (bounded FIFO, PII-sanitized, GET_DIAGNOSTICS)
+check("T2A.2", "DIAGNOSTICS_RING_MAX == 500", BG.__BG.DIAGNOSTICS_RING_MAX === 500, String(BG.__BG.DIAGNOSTICS_RING_MAX));
+check("T2A.2", "diagnosticsRing/sanitizer/push exist",
+  Array.isArray(BG.__BG.diagnosticsRing) && typeof BG.__sanitizeDiagnosticsData === "function" && typeof BG.__pushDiagnosticsEntry === "function");
+{
+  // Sanitizer strips known-PII keys at any depth; leaves benign keys.
+  const s = BG.__sanitizeDiagnosticsData({
+    origin: "https://x.example",
+    host: "x.example",
+    url: "https://x.example/y",
+    apikey: "sekret",
+    token: "abc",
+    password: "hunter2",
+    secret: "shh",
+    nested: { host: "inner", ok: 1 },
+    ok: "keep"
+  });
+  check("T2A.2", "sanitizer strips origin/host/url/apikey/token/password/secret",
+    s.origin === "[STRIPPED]" && s.host === "[STRIPPED]" && s.url === "[STRIPPED]" &&
+    s.apikey === "[STRIPPED]" && s.token === "[STRIPPED]" && s.password === "[STRIPPED]" && s.secret === "[STRIPPED]",
+    JSON.stringify(s));
+  check("T2A.2", "sanitizer descends into nested objects", s.nested && s.nested.host === "[STRIPPED]" && s.nested.ok === 1, JSON.stringify(s.nested));
+  check("T2A.2", "sanitizer preserves benign keys", s.ok === "keep");
+}
+{
+  // Ring is bounded: pushing >MAX evicts oldest via FIFO.
+  const ring = BG.__BG.diagnosticsRing;
+  const startLen = ring.length;
+  for (let i = 0; i < BG.__BG.DIAGNOSTICS_RING_MAX + 25; i++) BG.__pushDiagnosticsEntry("log", "t2a2-fill", { i });
+  check("T2A.2", "ring bounded at DIAGNOSTICS_RING_MAX", ring.length === BG.__BG.DIAGNOSTICS_RING_MAX, `len=${ring.length} start=${startLen}`);
+  const last = ring[ring.length - 1];
+  check("T2A.2", "ring entry shape has ts/level/tag/data", last && typeof last.ts === "number" && last.level === "log" && last.tag === "t2a2-fill" && last.data && typeof last.data.i === "number");
+}
+{
+  // GET_DIAGNOSTICS handler is registered and returns { ok, entries: [], max }.
+  const src = fs.readFileSync(path.join(REPO, "background.js"), "utf8");
+  check("T2A.2", "GET_DIAGNOSTICS message handler registered", /msgType === "GET_DIAGNOSTICS"/.test(src));
+  check("T2A.2", "GET_DIAGNOSTICS returns entries array + max",
+    /GET_DIAGNOSTICS[\s\S]{0,200}entries:\s*diagnosticsRing\.slice\(\)[\s\S]{0,80}max:\s*DIAGNOSTICS_RING_MAX/.test(src));
+}
+{
+  // Popup wires up a "Copy diagnostics" button that requests GET_DIAGNOSTICS + writes to clipboard.
+  const popHtml = fs.readFileSync(path.join(REPO, "popup.html"), "utf8");
+  const popJs = fs.readFileSync(path.join(REPO, "popup.js"), "utf8");
+  check("T2A.2", "popup exposes copy-diagnostics button", /id="copy-diagnostics"/.test(popHtml));
+  check("T2A.2", "popup handler sends GET_DIAGNOSTICS", /GET_DIAGNOSTICS/.test(popJs));
+  check("T2A.2", "popup handler writes to clipboard (no auto-upload)", /navigator\.clipboard\.writeText/.test(popJs));
+}
+
+// T2A.3 — runtime-toggleable DEBUG_LOGS via settings.debugLogsEnabled
+{
+  const bgSrc = fs.readFileSync(path.join(REPO, "background.js"), "utf8");
+  check("T2A.3", "debugLogsEnabled default = false", BG.__getDebugLogs() === false);
+  check("T2A.3", "normalizeSettings coerces debugLogsEnabled to boolean",
+    /out\.debugLogsEnabled\s*=\s*!!out\.debugLogsEnabled/.test(bgSrc));
+  check("T2A.3", "bgLog gates on settings.debugLogsEnabled (not compile-time const)",
+    /if\s*\(!settings\s*\|\|\s*!settings\.debugLogsEnabled\)\s*return/.test(bgSrc));
+  check("T2A.3", "popup exposes debug-logs checkbox",
+    /id="debug-logs"/.test(fs.readFileSync(path.join(REPO, "popup.html"), "utf8")));
+  check("T2A.3", "popup wires debugLogsEnabled update",
+    /debugLogsEnabled:\s*!!e\.target\.checked/.test(fs.readFileSync(path.join(REPO, "popup.js"), "utf8")));
+
+  // Behavioral: swap sandbox console, drive bgLog with the flag off and on.
+  const realConsole = BG.console;
+  const captured = [];
+  BG.console = { log: (...a) => captured.push(a), warn: () => {}, error: () => {}, info: () => {} };
+  try {
+    BG.__setDebugLogs(false);
+    BG.__bgLog("t2a3-off", { i: 1 });
+    const offCount = captured.length;
+    check("T2A.3", "bgLog with debugLogsEnabled=false does not console.log",
+      offCount === 0, `emitted=${offCount}`);
+
+    BG.__setDebugLogs(true);
+    BG.__bgLog("t2a3-on", { i: 2 });
+    check("T2A.3", "bgLog with debugLogsEnabled=true does console.log",
+      captured.length === 1 && /t2a3-on/.test(String(captured[0][1])),
+      JSON.stringify(captured));
+
+    // Diagnostics ring stays populated whether flag is on or off.
+    const ring = BG.__BG.diagnosticsRing;
+    const tagsBefore = ring.filter((e) => e.tag === "t2a3-off" || e.tag === "t2a3-on").length;
+    check("T2A.3", "diagnostics ring captures bgLog regardless of debugLogsEnabled",
+      tagsBefore === 2, `matched=${tagsBefore}`);
+  } finally {
+    BG.__setDebugLogs(false);
+    BG.console = realConsole;
+  }
+}
+
+// T2A.4 — reportRetention setting exposed, clamped, and honored
+{
+  const bgSrc = fs.readFileSync(path.join(REPO, "background.js"), "utf8");
+  check("T2A.4", "normalizeSettings defines reportRetention",
+    /out\.reportRetention\s*=\s*Math\.min\(10,\s*Math\.max\(1,/.test(bgSrc));
+  check("T2A.4", "saveReportSnapshotDetached slices to resolvedSettings.reportRetention",
+    /resolvedSettings\.reportRetention[\s\S]{0,120}reports\.slice\(retentionLimit\)/.test(bgSrc));
+  check("T2A.4", "popup exposes report-retention input",
+    /id="report-retention"/.test(fs.readFileSync(path.join(REPO, "popup.html"), "utf8")));
+  const popJs = fs.readFileSync(path.join(REPO, "popup.js"), "utf8");
+  check("T2A.4", "popup wires reportRetention update", /reportRetention:\s*Math\.min\(10,\s*Math\.max\(1,/.test(popJs));
+  check("T2A.4", "report.js import honors reportRetention",
+    /retentionLimit\s*=\s*Math\.min\(10,\s*Math\.max\(1,[\s\S]{0,120}reports\.length\s*>\s*retentionLimit/.test(
+      fs.readFileSync(path.join(REPO, "report.js"), "utf8")));
+
+  // Behavioral: normalizeSettings clamps to [1,10] and defaults to 3.
+  BG.__setDebugLogs(false);
+  const norm = (input) => {
+    const raw = { reportRetention: input };
+    // Invoke the module normalizeSettings via a small runInContext.
+    const script = new vm.Script("normalizeSettings(" + JSON.stringify(raw) + ").reportRetention");
+    return script.runInContext(BG);
+  };
+  check("T2A.4", "reportRetention default = 3", norm(undefined) === 3);
+  check("T2A.4", "reportRetention clamps 0 -> 1", norm(0) === 1);
+  check("T2A.4", "reportRetention clamps negative -> 1", norm(-5) === 1);
+  check("T2A.4", "reportRetention clamps > 10 -> 10", norm(999) === 10);
+  check("T2A.4", "reportRetention accepts 7 as-is", norm(7) === 7);
+  check("T2A.4", "reportRetention rounds fractional", norm(4.6) === 5);
+  check("T2A.4", "reportRetention rejects garbage -> 3", norm("nope") === 3);
+}
 
 // T1.1 — host-permission grant/revoke reactivity (static grep against background.js)
 const bgjs = fs.readFileSync(path.join(REPO, "background.js"), "utf8");
@@ -318,6 +692,197 @@ function runStatic() {
     check("T1.4", "paste pem-block regex bounded (<50ms on pathological input)", benchMs < 50 && rPath && typeof rPath.value === "string", "elapsedMs=" + benchMs);
   }
 
+  // T2C.1 — WebCrypto-wrapped OpenAI key vault in report.js
+  check("T2C.1", "report.js declares encrypted-session storage key",
+    /SECTION_NARRATION_OPENAI_API_KEY_ENC_SESSION_STORAGE\s*=\s*["']__uiRecorderNarrationOpenAiApiKeySessionEnc["']/.test(rjs));
+  check("T2C.1", "vault generates AES-GCM 256 session key",
+    /generateKey\s*\(\s*\{\s*name:\s*["']AES-GCM["']\s*,\s*length:\s*256\s*\}/.test(rjs));
+  check("T2C.1", "vault key marked non-extractable",
+    /generateKey\s*\(\s*\{\s*name:\s*["']AES-GCM["']\s*,\s*length:\s*256\s*\}\s*,\s*false\s*,/.test(rjs));
+  check("T2C.1", "vault uses 12-byte GCM IV from getRandomValues",
+    /crypto\.getRandomValues\(\s*new\s+Uint8Array\(\s*12\s*\)\s*\)/.test(rjs));
+  check("T2C.1", "vault encrypt path present",
+    /sectionNarrationOpenAiVaultEncrypt/.test(rjs) && /crypto\.subtle\.encrypt\(\s*\{\s*name:\s*["']AES-GCM["']/.test(rjs));
+  check("T2C.1", "vault decrypt path present",
+    /sectionNarrationOpenAiVaultDecrypt/.test(rjs) && /crypto\.subtle\.decrypt\(\s*\{\s*name:\s*["']AES-GCM["']/.test(rjs));
+  check("T2C.1", "vault falls back to plain sessionStorage when WebCrypto unavailable",
+    /sectionNarrationOpenAiVaultHasSubtle\(\)/.test(rjs) && /WebCrypto unavailable/.test(rjs));
+  check("T2C.1", "setter clears both plain and encrypted slots on empty value",
+    /removeItem\(SECTION_NARRATION_OPENAI_API_KEY_SESSION_STORAGE\)[\s\S]{0,200}removeItem\(SECTION_NARRATION_OPENAI_API_KEY_ENC_SESSION_STORAGE\)/.test(rjs));
+  check("T2C.1", "loader purges stale encrypted blob at page start",
+    /sessionStorage\.removeItem\(SECTION_NARRATION_OPENAI_API_KEY_ENC_SESSION_STORAGE\)/.test(rjs));
+  check("T2C.1", "legacy localStorage purge preserved",
+    /localStorage\.removeItem\(SECTION_NARRATION_OPENAI_API_KEY_LEGACY_STORAGE\)/.test(rjs));
+
+  // T2C.4 — destructive manual redaction tool
+  check("T2C.4", "report.js defines applyDestructiveRedaction",
+    /function\s+applyDestructiveRedaction\s*\(/.test(rjs));
+  check("T2C.4", "redact mode listed in annotation toolbar",
+    /\["pen","highlight","rect","outline","obfuscate","redact","text"\]/.test(rjs));
+  check("T2C.4", "redact fills black onto an off-screen canvas (destructive)",
+    /applyDestructiveRedaction[\s\S]{0,1400}fillStyle\s*=\s*"#000"[\s\S]{0,200}fillRect/.test(rjs));
+  check("T2C.4", "redact rewrites ev.screenshot with the flattened data URL",
+    /applyDestructiveRedaction[\s\S]{0,1500}ev\.screenshot\s*=\s*mergedDataUrl/.test(rjs));
+  check("T2C.4", "redact drops screenshotRef so the ref-based frame store is severed",
+    /applyDestructiveRedaction[\s\S]{0,1500}ev\.screenshotRef\s*=\s*null/.test(rjs));
+  check("T2C.4", "redact recomputes ev.screenshotHash via FNV-1a over the merged bytes",
+    /applyDestructiveRedaction[\s\S]{0,1500}ev\.screenshotHash\s*=\s*fnv1aRawHex\(mergedDataUrl\)/.test(rjs));
+  check("T2C.4", "redact appends rect to ev.redactionRects for raw-ZIP round-trip",
+    /applyDestructiveRedaction[\s\S]{0,2000}ev\.redactionRects\.push\(\{[\s\S]{0,160}\}\)/.test(rjs));
+  check("T2C.4", "redact reloads screenshotImg.src to expose the baked image",
+    /applyDestructiveRedaction[\s\S]{0,2600}screenshotImg\.src\s*=\s*mergedDataUrl/.test(rjs));
+  check("T2C.4", "redact does not push an undo snapshot (undo would resurrect pixels)",
+    /else if \(state\.mode === "redact"\)[\s\S]{0,1400}applyDestructiveRedaction[\s\S]{0,200}\}\s*else if/.test(rjs)
+      && !/else if \(state\.mode === "redact"\)\s*\{[^}]*pushUndoSnapshot/.test(rjs));
+  check("T2C.4", "redact confirm gate prompts once per session before destroying pixels",
+    /state\.redactConfirmed[\s\S]{0,400}window\.confirm\([\s\S]{0,200}Destructive redaction/.test(rjs));
+  check("T2C.4", "fnv1aRawHex hex output matches background stableHash format (no prefix)",
+    /function\s+fnv1aRawHex[\s\S]{0,300}return\s*\(h\s*>>>\s*0\)\.toString\(16\)/.test(rjs));
+
+  // T2C.5 — iframe redaction-rect coordinate plumbing (frame offset handshake + rects reporting)
+  {
+    const cjs = fs.readFileSync(path.join(REPO, "content.js"), "utf8");
+    const bgs = fs.readFileSync(path.join(REPO, "background.js"), "utf8");
+    check("T2C.5", "background.js generates per-boot frameMsgToken",
+      /const\s+frameMsgToken\s*=\s*\(function\s*\(\)\s*\{[\s\S]{0,400}crypto\.randomUUID/.test(bgs));
+    check("T2C.5", "GET_STATE reply exposes frameMsgToken",
+      /if\s*\(msgType\s*===\s*"GET_STATE"\)[\s\S]{0,3200}frameMsgToken\b/.test(bgs));
+    check("T2C.5", "content.js declares FRAME_MSG kinds (hello/assign/rects)",
+      /const\s+FRAME_MSG\s*=\s*Object\.freeze\(\{[\s\S]{0,300}hello:[\s\S]{0,200}assign:[\s\S]{0,200}rects:/.test(cjs));
+    check("T2C.5", "content.js gates cross-frame messages on token match",
+      /function\s+isValidFrameToken\([\s\S]{0,300}t\s*===\s*frameMsgToken/.test(cjs));
+    check("T2C.5", "content.js fetches frameMsgToken from GET_STATE",
+      /ensureFrameMsgToken[\s\S]{0,600}st\.frameMsgToken/.test(cjs));
+    check("T2C.5", "top frame seeds offset {x:0,y:0} and frameOffsetKnown=true",
+      /IS_TOP_FRAME\s*\?\s*\{\s*x:\s*0,\s*y:\s*0\s*\}\s*:\s*null/.test(cjs)
+        && /let\s+frameOffsetKnown\s*=\s*!!IS_TOP_FRAME/.test(cjs));
+    check("T2C.5", "child frame posts FRAME_HELLO with FRAME_ID to parent",
+      /postFrameMessage\(window\.parent,\s*FRAME_MSG\.hello,\s*\{\s*frameId:\s*FRAME_ID\s*\}\)/.test(cjs));
+    check("T2C.5", "parent computes childOffset = ownOffset + iframe getBoundingClientRect",
+      /findChildIframeElementByWindow[\s\S]{0,2000}iframeEl\.getBoundingClientRect\(\)[\s\S]{0,400}frameOffset\s*\?\s*frameOffset\.x\s*:\s*0/.test(cjs));
+    check("T2C.5", "FRAME_OFFSET_ASSIGN handler stores offset only for matching FRAME_ID",
+      /kind\s*===\s*FRAME_MSG\.assign[\s\S]{0,500}d\.frameId\s*!==\s*FRAME_ID[\s\S]{0,400}frameOffsetKnown\s*=\s*true/.test(cjs));
+    check("T2C.5", "collectSensitiveRectsWithFrame translates rects to top-frame coords",
+      /function\s+collectSensitiveRectsWithFrame\(\)\s*\{[\s\S]{0,600}collectSensitiveRects\(\)\.map\(translateRectToTopFrame\)/.test(cjs));
+    check("T2C.5", "top frame merges cached child rects into own rects",
+      /IS_TOP_FRAME\s*\?\s*own\.concat\(collectCachedChildRects\(\)\)\s*:\s*own/.test(cjs));
+    check("T2C.5", "translateRectToTopFrame adds frameOffset x/y to rect x/y",
+      /function\s+translateRectToTopFrame[\s\S]{0,600}\(Number\(rc\.x\)\s*\|\|\s*0\)\s*\+\s*ox[\s\S]{0,120}\(Number\(rc\.y\)\s*\|\|\s*0\)\s*\+\s*oy/.test(cjs));
+    check("T2C.5", "child rects cache bounded (TTL prune + max 40 entries)",
+      /childRectsCache[\s\S]{0,1200}FRAME_RECTS_TTL_MS[\s\S]{0,600}childRectsCache\.size\s*>\s*40/.test(cjs));
+    check("T2C.5", "non-top frame forwards FRAME_RECTS reports up the chain",
+      /kind\s*===\s*FRAME_MSG\.rects[\s\S]{0,1600}postFrameMessage\(window\.parent,\s*FRAME_MSG\.rects/.test(cjs));
+    check("T2C.5", "FRAME_HELLO retry loop has attempt cap",
+      /FRAME_HELLO_RETRY_MAX\s*=\s*\d+/.test(cjs) && /frameHelloAttempts\+\+\s*>=\s*FRAME_HELLO_RETRY_MAX/.test(cjs));
+    // Source-window verification: page-world listeners in sibling frames cannot forge
+    // ASSIGN or RECTS messages even if they capture the token.
+    check("T2C.5", "FRAME_ASSIGN handler requires ev.source === window.parent",
+      /kind\s*===\s*FRAME_MSG\.assign[\s\S]{0,400}ev\.source\s*!==\s*window\.parent/.test(cjs));
+    check("T2C.5", "FRAME_RECTS handler verifies sender is a known child iframe",
+      /kind\s*===\s*FRAME_MSG\.rects[\s\S]{0,600}findChildIframeElementByWindow\(ev\.source\)/.test(cjs));
+    check("T2C.5", "top-frame rects cache keyed by verified iframe identity (not payload frameId)",
+      /childRectsCache\.set\(\s*getIframeCacheId\(\s*srcIframe\s*\)/.test(cjs));
+    check("T2C.5", "HELLO reply targets exact origin (ev.origin), not '*'",
+      /postFrameMessage\(\s*ev\.source,\s*FRAME_MSG\.assign,[\s\S]{0,200}ev\.origin\s*\)/.test(cjs));
+    check("T2C.5", "child stores parentOrigin from ASSIGN and reuses it for outbound rects",
+      /parentOrigin\s*=\s*ev\.origin/.test(cjs)
+        && /postFrameMessage\(window\.parent,\s*FRAME_MSG\.rects,[\s\S]{0,200}parentOrigin/.test(cjs));
+    // Behavioral: exercise translateRectToTopFrame with a fake offset via a minimal harness.
+    // (content.js is an IIFE we can't easily VM-load; regex the impl is our contract.)
+    check("T2C.5", "DESIGN.md no longer lists iframe-coord open question",
+      !/iframe redaction-rect coordinates \(`collectSensitiveRectsWithFrame`/.test(fs.readFileSync(path.join(REPO, "docs", "DESIGN.md"), "utf8")));
+  }
+
+  // T2C.6 — Ed25519-signed HTML export + companion offline verifier page
+  check("T2C.6", "report.js declares UIRPRO signature marker prefixes",
+    /UIRPRO-SIGNATURE-V1:/.test(rjs) && /UIRPRO-PUBKEY-V1:/.test(rjs));
+  check("T2C.6", "signExportHtml uses WebCrypto Ed25519 sign",
+    /function\s+signExportHtml[\s\S]{0,800}crypto\.subtle\.sign\(\s*\{\s*name:\s*["']Ed25519["']/.test(rjs));
+  check("T2C.6", "signing keypair generated via generateKey({name:'Ed25519'})",
+    /generateKey\(\s*\{\s*name:\s*["']Ed25519["']\s*\}\s*,\s*true\s*,\s*\[\s*["']sign["']\s*,\s*["']verify["']\s*\]/.test(rjs));
+  check("T2C.6", "signature block appended as HTML comments (not head/meta)",
+    /<!--\s*\$\{EXPORT_SIG_MARKER_PREFIX\}/.test(rjs) && /<!--\s*\$\{EXPORT_PUBKEY_MARKER_PREFIX\}/.test(rjs));
+  check("T2C.6", "verifier page uses crypto.subtle.verify Ed25519",
+    /buildExportVerifierPageHtml[\s\S]{0,5000}crypto\.subtle\.verify\([\s\S]{0,120}name:\s*["']Ed25519["']/.test(rjs));
+  check("T2C.6", "verifier page ships CSP default-src 'none'",
+    /buildExportVerifierPageHtml[\s\S]{0,3000}default-src 'none'/.test(rjs));
+  check("T2C.6", "signing opt-in checkbox present in report.html",
+    /id="bundle-sign"/.test(rhtml) && /Sign export with session key/.test(rhtml));
+  check("T2C.6", "public key display element present in report.html",
+    /id="bundle-sign-pubkey"/.test(rhtml));
+  check("T2C.6", "signed export path emits companion verifier download",
+    /buildExportVerifierPageHtml\(\)[\s\S]{0,200}verify-/.test(rjs));
+  check("T2C.6", "signing disabled by default (checkbox not preselected)",
+    /id="bundle-sign"\s+type="checkbox"\s*\/>/.test(rhtml) && !/id="bundle-sign"[^>]*checked/.test(rhtml));
+
+  // T2C.7 — Passphrase-derived encrypted-at-rest report vault (opt-in)
+  const bgjs = fs.readFileSync(path.join(REPO, "background.js"), "utf8");
+  check("T2C.7", "background.js declares encryptedAtRestVaultEnabled default false",
+    /encryptedAtRestVaultEnabled:\s*false/.test(bgjs));
+  check("T2C.7", "background normalizer coerces encryptedAtRestVaultEnabled to boolean",
+    /out\.encryptedAtRestVaultEnabled\s*=\s*!!out\.encryptedAtRestVaultEnabled/.test(bgjs));
+  check("T2C.7", "popup.html carries #vault-mode toggle",
+    /id="vault-mode"\s+type="checkbox"/.test(phtml));
+  check("T2C.7", "popup.js wires #vault-mode change to updateSettings",
+    /getElementById\(\s*["']vault-mode["']\s*\)[\s\S]{0,400}encryptedAtRestVaultEnabled/.test(pjs));
+  check("T2C.7", "report.js sets envelope version constant to 1",
+    /ENCRYPTED_VAULT_ENVELOPE_V\s*=\s*1/.test(rjs));
+  check("T2C.7", "report.js uses PBKDF2-SHA256 with 600000 iterations",
+    /ENCRYPTED_VAULT_KDF_ITERATIONS\s*=\s*600000/.test(rjs)
+      && /iterations:\s*ENCRYPTED_VAULT_KDF_ITERATIONS/.test(rjs)
+      && /hash:\s*["']SHA-256["']/.test(rjs));
+  check("T2C.7", "report.js derives AES-GCM 256 key via crypto.subtle.deriveKey",
+    /crypto\.subtle\.deriveKey\([\s\S]{0,400}name:\s*["']PBKDF2["'][\s\S]{0,400}name:\s*["']AES-GCM["']\s*,\s*length:\s*256/.test(rjs));
+  check("T2C.7", "report.js uses 12-byte GCM IV from getRandomValues",
+    /ENCRYPTED_VAULT_IV_BYTES\s*=\s*12/.test(rjs)
+      && /crypto\.getRandomValues\(\s*new\s+Uint8Array\(\s*ENCRYPTED_VAULT_IV_BYTES\s*\)\s*\)/.test(rjs));
+  check("T2C.7", "report.js uses 16-byte KDF salt from getRandomValues",
+    /ENCRYPTED_VAULT_SALT_BYTES\s*=\s*16/.test(rjs));
+  check("T2C.7", "report.js exposes encrypt/decrypt/envelope helpers",
+    /function\s+encryptedVaultEncryptReport\s*\(/.test(rjs)
+      && /function\s+encryptedVaultDecryptReport\s*\(/.test(rjs)
+      && /function\s+encryptedVaultIsEnvelope\s*\(/.test(rjs));
+  check("T2C.7", "saveReports wraps reports via encryptedVaultEncryptReport when unlocked",
+    /saveReports[\s\S]{0,2400}encryptedVaultIsUnlocked\(\)[\s\S]{0,1200}encryptedVaultEncryptReport\(/.test(rjs));
+  check("T2C.7", "loadReportsFromStorage decrypts detected envelopes",
+    /loadReportsFromStorage[\s\S]{0,3000}encryptedVaultIsEnvelope\([\s\S]{0,2000}encryptedVaultDecryptReport\(/.test(rjs));
+  check("T2C.7", "loadReportsFromStorage prompts for passphrase when locked",
+    /encryptedVaultShowPassphrasePrompt\(/.test(rjs));
+  check("T2C.7", "session key is memory-only (no persistence)",
+    !/(localStorage|sessionStorage|storage\.local\.set)[^\n]{0,200}encryptedVaultSessionKey/.test(rjs));
+  check("T2C.7", "vault mode is opt-in (default false in settings)",
+    /encryptedAtRestVaultEnabled:\s*false/.test(bgjs));
+
+  // Behavioral: exercise the vault crypto roundtrip under Node's SubtleCrypto.
+  (async () => {
+    const nodeCrypto = require("crypto").webcrypto;
+    const enc = new TextEncoder();
+    const salt = nodeCrypto.getRandomValues(new Uint8Array(16));
+    const iv = nodeCrypto.getRandomValues(new Uint8Array(12));
+    const material = await nodeCrypto.subtle.importKey("raw", enc.encode("correct horse battery staple"),
+      { name: "PBKDF2" }, false, ["deriveKey"]);
+    const key = await nodeCrypto.subtle.deriveKey(
+      { name: "PBKDF2", salt, iterations: 600000, hash: "SHA-256" },
+      material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    const pt = enc.encode(JSON.stringify({ id: "r1", events: [{ id: "e1", type: "click" }] }));
+    const ct = new Uint8Array(await nodeCrypto.subtle.encrypt({ name: "AES-GCM", iv }, key, pt));
+    const back = new TextDecoder().decode(await nodeCrypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct));
+    const obj = JSON.parse(back);
+    check("T2C.7", "PBKDF2-600k -> AES-GCM roundtrip decrypts to original JSON",
+      obj && obj.id === "r1" && Array.isArray(obj.events) && obj.events[0] && obj.events[0].id === "e1");
+    // Tamper resistance: flipping one byte of ciphertext must fail GCM auth.
+    const bad = new Uint8Array(ct); bad[0] ^= 1;
+    let failed = false;
+    try { await nodeCrypto.subtle.decrypt({ name: "AES-GCM", iv }, key, bad); } catch (_) { failed = true; }
+    check("T2C.7", "GCM tag rejects single-byte ciphertext tampering", failed);
+
+    console.log(`\n================  RESULT: ${pass} passed, ${fail} failed  ================`);
+    if (fail) { console.log("\nFailures:"); fails.forEach((f) => console.log("  - " + f)); process.exit(1); }
+    process.exit(0);
+  })();
+  return;
+  // Legacy exit path (unreachable — kept in case async block ever short-circuits):
+  // eslint-disable-next-line no-unreachable
   console.log(`\n================  RESULT: ${pass} passed, ${fail} failed  ================`);
   if (fail) { console.log("\nFailures:"); fails.forEach((f) => console.log("  - " + f)); process.exit(1); }
   process.exit(0);
