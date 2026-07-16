@@ -3061,3 +3061,20 @@ body.report.report-dark .step-title[contenteditable="true"]:focus {
   .toc-section { page-break-after: always; box-shadow: none; }
   .print-title { display: block; }
 }
+
+/* T2 2B.7 — step tags + tag filter chips */
+.tag-filter-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.tag-filter-chip {
+  font: inherit; font-size: 0.85em; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid #cbd0d8; background: #f3f4f6; color: inherit; cursor: pointer;
+}
+.tag-filter-chip-active { background: #1f2937; color: #fff; border-color: #1f2937; }
+.tag-filter-empty { font-size: 0.85em; opacity: 0.7; }
+body.report.report-dark .tag-filter-chip { background: #1a1c22; border-color: #2a2e36; }
+body.report.report-dark .tag-filter-chip-active { background: #e5e7eb; color: #111; border-color: #e5e7eb; }
+.step-tag-row { margin-top: 6px; }
+.step-tag-label { display: block; font-size: 0.85em; opacity: 0.8; }
+.step-tag-input {
+  width: 100%; font: inherit; font-size: 0.9em; padding: 3px 6px; margin-top: 2px;
+  border: 1px solid #cbd0d8; border-radius: 4px; background: transparent; color: inherit;
+}

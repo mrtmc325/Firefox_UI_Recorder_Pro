@@ -131,6 +131,10 @@
                 Search
                 <input id="search" type="text" placeholder="label, text, value..." />
               </label>
+              <div class="row" role="group" aria-labelledby="tag-filter-caption">
+                <div id="tag-filter-caption">Tag filter</div>
+                <div id="tag-filter-chips" class="tag-filter-chips"></div>
+              </div>
               <label class="row">
                 Type filter
                 <select id="type-filter">
@@ -161,6 +165,17 @@
               <button id="bundle-preview" class="btn ghost">Quick HTML preview</button>
               <button id="bundle-raw" class="btn">Export raw ZIP</button>
               <button id="bundle-media" class="btn">Export section media ZIP</button>
+              <div class="row">
+                <button id="bundle-markdown" class="btn" type="button">Export as Markdown</button>
+                <label class="row">
+                  Screenshots
+                  <select id="bundle-markdown-mode">
+                    <option value="inline">Inline (single .md, large)</option>
+                    <option value="zip">Sibling files in ZIP</option>
+                  </select>
+                </label>
+              </div>
+              <button id="bundle-playwright" class="btn" type="button">Export as Playwright script</button>
               <a id="docs-link" class="btn ghost docs-link-inline" href="docs.html" target="_blank" rel="noopener">Docs</a>
               <label class="row">
                 Import mode
@@ -171,6 +186,34 @@
               </label>
               <button id="bundle-import" class="btn">Import raw ZIP</button>
               <input id="bundle-import-file" class="file-input" type="file" accept=".zip,application/zip" />
+            </div>
+          </details>
+
+          <details class="config-rail-group settings-group">
+            <summary class="config-rail-summary settings-summary">
+              <span class="config-rail-summary-title settings-summary-title">Templates</span>
+              <span class="config-rail-summary-meta settings-summary-meta">Reuse</span>
+            </summary>
+            <div class="config-rail-body settings-group-body toolbar toolbar-rail" role="group" aria-label="Report templates">
+              <div class="hint">
+                Templates capture theme, section titles, and subsection descriptions only —
+                never screenshots, events, audio, or tag data. Loading merges into the current
+                report (existing events are preserved).
+              </div>
+              <label class="row">
+                Template name
+                <input id="report-template-name" type="text" maxlength="120" placeholder="e.g. Login regression" />
+              </label>
+              <button id="report-template-save" class="btn" type="button">Save as template</button>
+              <label class="row">
+                Load template
+                <select id="report-template-select"></select>
+              </label>
+              <div class="brand-action-buttons">
+                <button id="report-template-load" class="btn" type="button">Load template</button>
+                <button id="report-template-delete" class="btn ghost" type="button">Delete template</button>
+              </div>
+              <div id="report-template-status" class="hint" role="status" aria-live="polite"></div>
             </div>
           </details>
 
@@ -391,6 +434,17 @@
         </summary>
         <div class="panel-body">
           <div id="timeline" class="timeline"></div>
+        </div>
+      </details>
+
+      <details id="section-annotations" class="report-section report-panel noprint">
+        <summary class="panel-summary">
+          <span class="panel-title">Annotations</span>
+          <span class="panel-meta-count">Preview</span>
+        </summary>
+        <div class="panel-body">
+          <button id="vector-annotations-toggle" type="button" class="btn ghost">View vector annotations plan (coming soon)</button>
+          <div class="hint">Arrow, box, pin, and callout primitives stored alongside raster strokes. Toggling opens the design plan.</div>
         </div>
       </details>
 

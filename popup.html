@@ -34,6 +34,19 @@
   <section class="card settings-card" aria-label="Capture settings">
     <div class="card-title">Settings</div>
 
+    <label class="row" id="preset-row">
+      Presets
+      <select id="settings-preset">
+        <option value="">Choose preset...</option>
+        <option value="default">Default</option>
+        <option value="spa">SPA</option>
+        <option value="sensitive">Sensitive</option>
+        <option value="long-session">Long-session</option>
+      </select>
+    </label>
+    <div class="hint">One-click bundles from README how-to templates. Individual controls remain editable.</div>
+    <div id="settings-preset-status" class="hint" aria-live="polite"></div>
+
     <details class="settings-group settings-group-scope">
       <summary class="settings-summary">
         <span class="settings-summary-title">Recording Scope</span>

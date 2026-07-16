@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.20.0 - 2026-07-16
+
+### Added
+- Step tags: per-step chip input adds `ev.tags: string[]` (backward-compatible schema addition); a top-of-editor filter chip row filters the step list by tag. Tag data attributes are baked into exported HTML so exported reports remain filterable.
+- Report and section-shell templates: save the current report's theme + section shells (no events, no screenshots, no audio) as a named JSON template stored under `__uiRecorderReportTemplates` with a cap of 20. Loading merges the template's theme + section stubs into the current report as note-typed events; existing events are preserved.
+- Markdown / plain-text runbook export: emits clean Markdown (headings for sections, numbered lists for steps, code fences for URLs) with two modes selectable from a dropdown next to the export button — inline data-URI images or sibling screenshot files packaged inside a small ZIP.
+- Playwright test-scaffold emitter: exports a Playwright `test.js` scaffold from the recorded step events with best-effort selectors (aria-label / data-testid / role+name preferred over CSS class). Prominent "SCAFFOLD — REVIEW BEFORE RUNNING" banner at top; URLs are scrubbed for common sensitive query parameter names; free-text input values are replaced with placeholders unless structurally safe.
+- Recording presets dropdown in the popup: one-click bundles for Default / SPA / Sensitive / Long-session mirror the README how-to templates. Non-destructive — individual settings remain editable after apply.
+- Storage quota preflight and backpressure: `navigator.storage.estimate()` polled at recording start and every 30 s during recording. New backpressure tier `quota` pauses burst capture when usage/quota > 0.85 (pause reason "storage-quota"); recording auto-stops at > 0.97.
+- Recording-scope + Diagnostics: raw ZIP bundle JSON Schema documented at `docs/BUNDLE_SCHEMA.md` + `docs/bundle-schema.json`; ready for downstream tooling to validate exports.
+- Developer tooling helpers: `docs/dev-run.sh` (npx web-ext run wrapper) and `docs/eslintrc.json` (eslint:recommended shape, on-demand via `npx eslint`). No persistent package.json or node_modules.
+- Vector annotations design doc + placeholder button: `docs/plans/vector-annotations-2026-07-16.md` sketches the full feature; the report editor exposes a "View vector annotations plan (coming soon)" button that opens the plan file. No drawing code yet.
+
+### Changed
+- `render()` / `updateAux()` split (2D.2): the report editor's `render()` now defers auxiliary rebuilds via `requestIdleCallback(run, { timeout: 200 })` with `setTimeout(run, 200)` fallback. Move/drag/rename step operations call `render()` only and no longer tear down burst players / narration controllers on cheap edits.
+- `saveReports` is now a coalescing wrapper (2B.4): at most one storage write per 500 ms with a guaranteed trailing flush on `beforeunload` and `visibilitychange` → hidden. Preserves vault-locked semantics from v1.19.0 (a locked vault still hard-refuses the write).
+- Lazy lowercased haystack cache (2D.3): every event carries a lazily-computed lowercased search haystack in a per-page WeakMap; invalidated on every field mutation site that participates in search.
+
+### Fixed (against Tier-2 follow-up review)
+- 2D.3 haystack cache is now invalidated at every field-mutation site (section description, step title/text, tags) — search no longer returns stale hits after inline edits.
+- 2B.8 report template save no longer derives section titles from raw `ev.human`/`ev.label`/`ev.value`/`ev.text` — those recorded values could carry PII. Titles are placeholder-filled for events without user-authored `editedTitle`.
+- 2B.4 unload flush now prefers `visibilitychange` and structures the write path to minimize awaits, with a documented trade-off note for vault-mode payloads.
+- Playwright emitter scrubs common sensitive URL query parameters (token / api_key / secret / auth / sig / session / jwt / access_token / bearer / code); free-text `page.fill()` values default to placeholders unless the field is structurally safe (checkbox / radio / select).
+- Vector-annotations toggle is now a button (not a checkbox) — it opens the plan file and has no persistent state to misrepresent.
+- Popup preset select: aria-label removed (visible label wins); status text moved out of the aria-live region.
+- Report tag-filter caption: `aria-labelledby` on the visible caption matches sighted-user text.
+
+### Deferred to a follow-up
+- `2B.2` rename + delete individual reports.
+- `2B.3` undo stack for destructive step edits.
+- `2B.6` cross-report search from popup.
+These three aborted during workflow execution due to a false-positive concurrent-session guard. They will run in a subsequent slice.
+
 ## v1.19.0 - 2026-07-16
 
 ### Security

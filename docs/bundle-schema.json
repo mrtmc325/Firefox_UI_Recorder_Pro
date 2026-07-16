@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://uir-pro.local/schemas/bundle-schema.json",
+  "title": "UI Recorder Pro Raw Bundle",
+  "description": "JSON Schema (draft 2020-12) for the JSON files inside a raw uir-report-bundle ZIP. Documentation only; the extension does not ship a runtime validator.",
+  "type": "object",
+  "properties": {
+    "manifest": { "$ref": "#/$defs/Manifest" },
+    "report": { "$ref": "#/$defs/ReportEnvelope" },
+    "frameManifest": { "$ref": "#/$defs/FrameManifest" },
+    "textManifest": { "$ref": "#/$defs/TextManifest" },
+    "audioManifest": { "$ref": "#/$defs/AudioManifest" }
+  },
+  "$defs": {
+    "Manifest": {
+      "type": "object",
+      "required": ["format", "version", "exportedAt", "source"],
+      "properties": {
+        "format": { "const": "uir-report-bundle" },
+        "version": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "exportedAt": { "type": "string", "format": "date-time" },
+        "source": { "type": "string" },
+        "reportId": { "type": ["string", "null"] },
+        "sessionId": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "ReportEnvelope": {
+      "type": "object",
+      "required": ["report"],
+      "properties": {
+        "report": { "$ref": "#/$defs/Report" }
+      },
+      "additionalProperties": false
+    },
+    "Report": {
+      "type": "object",
+      "required": ["id", "name", "events"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "sessionId": { "type": ["string", "null"] },
+        "createdAtMs": { "type": "integer", "minimum": 0 },
+        "updatedAtMs": { "type": "integer", "minimum": 0 },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Event" }
+        },
+        "sections": { "type": "array" },
+        "bursts": { "type": "array" },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "Event": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string" },
+        "timestamp": { "type": ["integer", "number"] },
+        "tabId": { "type": ["integer", "null"] },
+        "tabTitle": { "type": "string" },
+        "windowId": { "type": ["integer", "null"] },
+        "url": { "type": "string" },
+        "screenshotRef": { "$ref": "#/$defs/ScreenshotRef" },
+        "textRef": { "$ref": "#/$defs/TextRef" },
+        "audioRef": { "$ref": "#/$defs/AudioRef" }
+      },
+      "additionalProperties": true
+    },
+    "ScreenshotRef": {
+      "type": "object",
+      "required": ["frameId"],
+      "properties": {
+        "frameId": { "type": "string" },
+        "sessionId": { "type": ["string", "null"] },
+        "mime": { "type": "string" },
+        "createdAtMs": { "type": "integer", "minimum": 0 },
+        "width": { "type": ["integer", "null"] },
+        "height": { "type": ["integer", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "TextRef": {
+      "type": "object",
+      "required": ["docId"],
+      "properties": {
+        "docId": { "type": "string" },
+        "mime": { "type": "string" },
+        "createdAtMs": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "AudioRef": {
+      "type": "object",
+      "required": ["docId"],
+      "properties": {
+        "docId": { "type": "string" },
+        "mime": { "type": "string" },
+        "createdAtMs": { "type": "integer", "minimum": 0 },
+        "provider": { "type": "string" },
+        "voice": { "type": "string" },
+        "model": { "type": "string" },
+        "textHash": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "FrameManifest": {
+      "type": "object",
+      "required": ["frames"],
+      "properties": {
+        "frames": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FrameEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FrameEntry": {
+      "type": "object",
+      "required": ["frameId", "file", "mime", "createdAtMs", "byteLength"],
+      "properties": {
+        "frameId": { "type": "string" },
+        "file": { "type": "string", "pattern": "^frames/" },
+        "sessionId": { "type": ["string", "null"] },
+        "mime": { "type": "string" },
+        "createdAtMs": { "type": "integer", "minimum": 0 },
+        "width": { "type": ["integer", "null"] },
+        "height": { "type": ["integer", "null"] },
+        "byteLength": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "TextManifest": {
+      "type": "object",
+      "required": ["texts"],
+      "properties": {
+        "texts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TextEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "TextEntry": {
+      "type": "object",
+      "required": ["docId", "file", "mime", "createdAtMs", "byteLength", "fileName", "fileType"],
+      "properties": {
+        "docId": { "type": "string" },
+        "file": { "type": "string", "pattern": "^texts/" },
+        "mime": { "type": "string" },
+        "createdAtMs": { "type": "integer", "minimum": 0 },
+        "byteLength": { "type": "integer", "minimum": 0 },
+        "fileName": { "type": "string" },
+        "fileType": { "type": "string" },
+        "preview": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "AudioManifest": {
+      "type": "object",
+      "required": ["audio"],
+      "properties": {
+        "audio": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/AudioEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AudioEntry": {
+      "type": "object",
+      "required": ["docId", "file", "mime", "createdAtMs", "byteLength", "fileName", "fileType"],
+      "properties": {
+        "docId": { "type": "string" },
+        "file": { "type": "string", "pattern": "^audio/" },
+        "mime": { "type": "string" },
+        "createdAtMs": { "type": "integer", "minimum": 0 },
+        "byteLength": { "type": "integer", "minimum": 0 },
+        "fileName": { "type": "string" },
+        "fileType": { "type": "string" },
+        "provider": { "type": "string" },
+        "voice": { "type": "string" },
+        "model": { "type": "string" },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "textHash": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

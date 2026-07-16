@@ -9,6 +9,43 @@ function popupLog(message, data) {
   else console.log(prefix, message, data);
 }
 
+// T2B.1: Settings preset bundles. Values mirror README how-to templates (Default baseline,
+// Dynamic Dashboard/SPA, Login/Sensitive, Long Session/Low Memory). Each bundle is applied
+// via UPDATE_SETTINGS as a partial; unmentioned settings are left untouched.
+const SETTINGS_PRESETS = {
+  "default": {
+    screenshotDebounceMs: 900,
+    diffEnabled: true,
+    captureMode: "all",
+    activeTabOnly: true,
+    pruneInputs: true,
+    pageWatchEnabled: true,
+    pageWatchMs: 500
+  },
+  "spa": {
+    captureMode: "all",
+    pageWatchEnabled: true,
+    pageWatchMs: 800,
+    diffEnabled: true,
+    screenshotDebounceMs: 800
+  },
+  "sensitive": {
+    captureMode: "all",
+    redactEnabled: true,
+    redactLoginUsernames: true,
+    pageWatchEnabled: true,
+    pageWatchMs: 800
+  },
+  "long-session": {
+    captureMode: "clicks",
+    diffEnabled: true,
+    screenshotDebounceMs: 1200,
+    pageWatchEnabled: true,
+    pageWatchMs: 2000,
+    pruneInputs: true
+  }
+};
+
 function normalizeHotkeyBurstFps(value) {
   const fps = Math.round(Number(value));
   if (fps === 10 || fps === 15) return fps;
@@ -885,6 +922,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     await updateSettings({ hotkeyBurstFps: normalizeHotkeyBurstFps(e.target.value) });
     await refresh();
   });
+
+  // T2B.1: recording presets — one-click bundles that mirror README how-to templates.
+  // Non-destructive: dropdown resets to blank after apply; individual controls remain editable.
+  const presetSel = document.getElementById("settings-preset");
+  if (presetSel) {
+    presetSel.addEventListener("change", async (e) => {
+      const key = String(e.target.value || "");
+      const bundle = SETTINGS_PRESETS[key];
+      const statusEl = document.getElementById("settings-preset-status");
+      if (!bundle) { e.target.value = ""; return; }
+      try {
+        await updateSettings(bundle);
+        if (statusEl) statusEl.textContent = `Applied preset: ${key}.`;
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `Preset apply failed: ${String((err && err.message) || err)}`;
+      }
+      e.target.value = "";
+      await refresh();
+    });
+  }
 
   // T2C.2: custom redaction rules — save/export/import
   const customRedactTa = document.getElementById("custom-redact-rules");

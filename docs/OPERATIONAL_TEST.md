@@ -148,3 +148,24 @@ Updated 2026-07-14: Tier-1 additions —
 - §4.4 added: paste-clipboard secret interception (`[REDACTED CLIPBOARD]`) and non-secret passthrough.
 - §5.8 added: host-permission revoke reactive pause and regrant clear.
 - Harness assertion count restated as a floor (`≥94 passed`) so incremental additions no longer force doc edits.
+
+## Developer tooling
+
+Ad-hoc developer helpers. These are opt-in — no persistent `package.json`, no
+`node_modules`, no `npm install`. Each script fetches its tool via `npx --yes`
+on demand and leaves the tree unchanged.
+
+- **`docs/dev-run.sh`** — launches the extension in a throwaway Firefox profile:
+  ```bash
+  docs/dev-run.sh
+  ```
+  Equivalent to `npx --yes web-ext run --source-dir . --start-url about:debugging`.
+  Any extra args are forwarded to `web-ext run` (e.g. `--firefox=nightly`).
+
+- **`docs/eslintrc.json`** — on-demand lint config (`eslint:recommended` shape,
+  browser + webextensions env, ES2022). Run against any file:
+  ```bash
+  npx --yes eslint --config docs/eslintrc.json background.js content.js popup.js report.js
+  ```
+  Neither the config nor the runner is required by CI or the shipped extension;
+  they exist purely to shorten the local edit / preflight loop.

@@ -1764,6 +1764,389 @@ function mergeReports(baseReport, incomingReport) {
   return merged;
 }
 
+// T2 2B.8 — report + section-shell templates.
+// A template captures only theme, exportTheme and the ordered SECTION SHELLS
+// (title + subsection description) — never events, screenshots, audio, tags,
+// section text, section media, brand assets, or anything derived from real data.
+// Cap enforced at REPORT_TEMPLATES_MAX; storage key: REPORT_TEMPLATES_STORAGE_KEY.
+const REPORT_TEMPLATES_STORAGE_KEY = "__uiRecorderReportTemplates";
+const REPORT_TEMPLATES_MAX = 20;
+const REPORT_TEMPLATE_NAME_MAX = 120;
+
+function normalizeReportTemplateName(value, fallback) {
+  const raw = String(value ?? "").replace(/\s+/g, " ").trim().slice(0, REPORT_TEMPLATE_NAME_MAX);
+  return raw || String(fallback || "Untitled template");
+}
+
+function normalizeReportTemplateEditorTheme(value) {
+  return String(value || "").toLowerCase() === "dark" ? "dark" : "light";
+}
+
+function buildTemplateFromReport(reportLike, options) {
+  const opts = isPlainObject(options) ? options : {};
+  const source = isPlainObject(reportLike) ? reportLike : {};
+  const events = Array.isArray(source.events) ? source.events : [];
+  // Templates never carry event/PII data. titleFor() derives titles from raw
+  // ev.human/ev.label/ev.text/ev.value when editedTitle is absent, which would
+  // capture recorded user data into the saved template. Only pass through the
+  // user-authored ev.editedTitle; otherwise emit a generic "Section N" label.
+  const sections = events.map((ev, index) => {
+    const authored = ev && typeof ev.editedTitle === "string" ? ev.editedTitle.trim() : "";
+    const title = (authored ? authored.slice(0, 240) : "") || `Section ${index + 1}`;
+    const rawDescription = ev && Object.prototype.hasOwnProperty.call(ev, "sectionDescription")
+      ? ev.sectionDescription || ""
+      : "";
+    const description = normalizeSectionDescriptionText(rawDescription);
+    const entry = { title };
+    if (description) entry.description = description;
+    return entry;
+  });
+  const nameFallback = (source && source.brand && source.brand.title) || source.title || "Untitled template";
+  return {
+    id: String(opts.id || `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+    name: normalizeReportTemplateName(opts.name, nameFallback),
+    createdAtMs: Number(opts.createdAtMs) || Date.now(),
+    editorTheme: normalizeReportTemplateEditorTheme(opts.editorTheme),
+    exportTheme: normalizeExportTheme(isPlainObject(opts.exportTheme) ? opts.exportTheme : source.exportTheme),
+    sections,
+  };
+}
+
+function normalizeStoredReportTemplate(raw) {
+  if (!isPlainObject(raw)) return null;
+  const sectionsIn = Array.isArray(raw.sections) ? raw.sections : [];
+  const sections = sectionsIn.map((entry) => {
+    if (!isPlainObject(entry)) return null;
+    const title = String(entry.title || "").trim().slice(0, 240);
+    if (!title) return null;
+    const description = normalizeSectionDescriptionText(entry.description || "");
+    const out = { title };
+    if (description) out.description = description;
+    return out;
+  }).filter(Boolean);
+  return {
+    id: String(raw.id || `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+    name: normalizeReportTemplateName(raw.name),
+    createdAtMs: Number(raw.createdAtMs) || Date.now(),
+    editorTheme: normalizeReportTemplateEditorTheme(raw.editorTheme),
+    exportTheme: normalizeExportTheme(raw.exportTheme),
+    sections,
+  };
+}
+
+function enforceReportTemplatesCap(list) {
+  const arr = Array.isArray(list) ? list.slice() : [];
+  if (arr.length <= REPORT_TEMPLATES_MAX) return arr;
+  return arr.slice(arr.length - REPORT_TEMPLATES_MAX);
+}
+
+function applyTemplateToReport(reportLike, templateLike) {
+  const base = isPlainObject(reportLike) ? reportLike : {};
+  const tpl = normalizeStoredReportTemplate(templateLike) || {
+    editorTheme: "light", exportTheme: normalizeExportTheme(null), sections: []
+  };
+  if (!Array.isArray(base.events)) base.events = [];
+  base.exportTheme = normalizeExportTheme(tpl.exportTheme);
+  const baseTs = Date.now();
+  tpl.sections.forEach((shell, index) => {
+    const stepId = `tpl_step_${baseTs}_${index}_${Math.random().toString(36).slice(2, 8)}`;
+    const ev = {
+      stepId,
+      type: "note",
+      ts: new Date(baseTs + index).toISOString(),
+      editedTitle: shell.title,
+    };
+    if (shell.description) ev.sectionDescription = shell.description;
+    base.events.push(ev);
+  });
+  return base;
+}
+
+// T2 2B.9 — Markdown / plain-text runbook export.
+// Two screenshot modes:
+//   inline: single .md file with base64 data-URI <img>s (large but self-contained)
+//   zip:    .md file + sibling screenshots/step-NNN.<ext> files packed via
+//           buildStoredZip (which fails loud on non-64 archives).
+// Only fields already visible in the report are emitted. Titles are escaped for
+// Markdown-safe rendering; URLs are wrapped in fenced code blocks (never made
+// clickable). No egress, no data-URI other than screenshots the user already
+// captured.
+const MARKDOWN_SCREENSHOT_MODES = Object.freeze(new Set(["inline", "zip"]));
+
+function normalizeMarkdownScreenshotMode(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return MARKDOWN_SCREENSHOT_MODES.has(raw) ? raw : "inline";
+}
+
+function escapeMarkdownInline(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, " ")
+    .replace(/\n/g, " ")
+    .replace(/([\\`*_{}\[\]()#+!-])/g, "\\$1")
+    .trim();
+}
+
+function escapeMarkdownBlock(value) {
+  return String(value || "").replace(/\r\n?/g, "\n");
+}
+
+function screenshotExtensionForMime(mime) {
+  const raw = String(mime || "").toLowerCase();
+  if (raw === "image/jpeg" || raw === "image/jpg") return "jpg";
+  if (raw === "image/webp") return "webp";
+  if (raw === "image/gif") return "gif";
+  if (raw === "image/bmp") return "bmp";
+  return "png";
+}
+
+function buildReportMarkdown(reportLike, options) {
+  const opts = isPlainObject(options) ? options : {};
+  const mode = normalizeMarkdownScreenshotMode(opts.screenshotMode);
+  const source = isPlainObject(reportLike) ? reportLike : {};
+  const events = Array.isArray(source.events) ? source.events : [];
+  const lines = [];
+  const screenshotEntries = [];
+  const brandTitle = source.brand && typeof source.brand === "object" ? String(source.brand.title || "").trim() : "";
+  const title = String(source.title || brandTitle || "UI Report").trim() || "UI Report";
+  lines.push(`# ${escapeMarkdownInline(title)}`);
+  lines.push("");
+  if (brandTitle && brandTitle !== title) {
+    lines.push(`_${escapeMarkdownInline(brandTitle)}_`);
+    lines.push("");
+  }
+  const startedAt = Number(source.startedAtMs || source.startedAt || 0);
+  if (startedAt) {
+    const iso = new Date(startedAt).toISOString();
+    lines.push(`_Recorded ${iso}_`);
+    lines.push("");
+  }
+  events.forEach((ev, index) => {
+    const n = index + 1;
+    const stepTitle = String(typeof titleFor === "function" ? titleFor(ev) : (ev && ev.editedTitle) || "Step").trim() || "Step";
+    lines.push(`## ${n}. ${escapeMarkdownInline(stepTitle)}`);
+    lines.push("");
+    const description = typeof sectionDescriptionFor === "function" ? sectionDescriptionFor(ev) : "";
+    if (description) {
+      lines.push(escapeMarkdownBlock(description));
+      lines.push("");
+    }
+    const url = String(ev && ev.url || "").trim();
+    if (url) {
+      lines.push("```");
+      lines.push(url);
+      lines.push("```");
+      lines.push("");
+    }
+    const noteText = String(ev && (ev.notes || ev.note) || "").trim();
+    if (noteText) {
+      lines.push(escapeMarkdownBlock(noteText));
+      lines.push("");
+    }
+    const inlineDataUrl = safeDataImageUrl(ev && ev.screenshot || "");
+    if (inlineDataUrl) {
+      const mime = (inlineDataUrl.match(/^data:([^;,]+)/i) || [])[1] || "image/png";
+      const ext = screenshotExtensionForMime(mime);
+      const alt = `Screenshot for step ${n}`;
+      if (mode === "zip") {
+        const filename = `screenshots/step-${String(n).padStart(3, "0")}.${ext}`;
+        screenshotEntries.push({ filename, dataUrl: inlineDataUrl, mime });
+        lines.push(`![${alt}](${filename})`);
+      } else {
+        lines.push(`![${alt}](${inlineDataUrl})`);
+      }
+      lines.push("");
+    }
+  });
+  return { markdown: lines.join("\n"), screenshotEntries, mode };
+}
+
+function buildReportMarkdownZipEntries(reportLike, options) {
+  const opts = isPlainObject(options) ? options : {};
+  const built = buildReportMarkdown(reportLike, { ...opts, screenshotMode: "zip" });
+  const stamp = Number(opts.updatedAt) || Date.now();
+  const entries = [{ name: "runbook.md", data: built.markdown, updatedAt: stamp }];
+  for (const entry of built.screenshotEntries) {
+    const bytes = dataUrlToBytes(entry.dataUrl);
+    if (!bytes || !bytes.length) continue;
+    entries.push({ name: entry.filename, data: bytes, updatedAt: stamp });
+  }
+  return { entries, markdown: built.markdown, screenshotEntries: built.screenshotEntries };
+}
+
+// T2 2B.11 — Playwright test-scaffold emitter.
+// Emits a single `test.js` string from the recorded event stream. Selectors are
+// best-effort text/role-based, deliberately in preference order:
+//   1) data-testid attr on the event  -> getByTestId
+//   2) aria-label attr on the event   -> getByLabel
+//   3) role + accessible name         -> getByRole
+//   4) visible label/human/text       -> getByText
+//   5) tag fallback                   -> page.locator(tag)
+// Emits click / fill / goto for click, input+change, and nav events. Never
+// emits a companion playwright.config.js (per plan). Prominent header banner
+// warns the reader to review before running.
+const PLAYWRIGHT_ROLE_MAP = Object.freeze({
+  button: "button",
+  link: "link",
+  checkbox: "checkbox",
+  radio: "radio",
+  textbox: "textbox",
+  combobox: "combobox",
+  tab: "tab",
+  menuitem: "menuitem",
+  option: "option",
+  toggle: "checkbox",
+});
+
+function escapePlaywrightString(value) {
+  return String(value == null ? "" : value)
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+// T2 2D.4 \u2014 URL query-string scrub for Playwright emission.
+// Emit page.goto with sensitive query params redacted so exported scaffolds
+// never leak OAuth tokens / api keys / session ids captured mid-flow.
+const PLAYWRIGHT_URL_REDACT_PARAM_RE = /token|api[_-]?key|secret|password|auth|sig|signature|nonce|session|jwt|access[_-]?token|bearer|code/i;
+function scrubPlaywrightUrl(raw) {
+  const s = String(raw == null ? "" : raw).trim();
+  if (!s) return "";
+  try {
+    const u = new URL(s);
+    // Defensive: only trust a URL parse that surfaces a real URLSearchParams.
+    // Some test harnesses stub URL; fall back to the input string in that case
+    // so we don't emit a mock placeholder for a well-formed URL.
+    if (!u || !u.searchParams || typeof u.searchParams.forEach !== "function"
+      || typeof u.searchParams.set !== "function" || typeof u.toString !== "function") {
+      return s;
+    }
+    const rewrites = [];
+    u.searchParams.forEach((_v, k) => {
+      if (PLAYWRIGHT_URL_REDACT_PARAM_RE.test(k)) rewrites.push(k);
+    });
+    for (const k of rewrites) u.searchParams.set(k, "REDACTED");
+    return u.toString();
+  } catch (_) {
+    return "TODO_URL_REVIEW";
+  }
+}
+
+// T2 2D.4 \u2014 safer default for input/change value emission. Free-text values
+// (names, addresses, notes) that slipped past built-in redaction would land
+// verbatim in the exported test. Only pass through when the field is
+// structurally non-sensitive (checkbox/radio/select/boolean); otherwise emit
+// a placeholder so the author has to opt back into the real value.
+const PLAYWRIGHT_SAFE_VALUE_ROLES = new Set(["checkbox", "radio", "toggle", "combobox", "option"]);
+const PLAYWRIGHT_SAFE_VALUE_INPUT_TYPES = new Set(["checkbox", "radio"]);
+function playwrightValueIsStructurallySafe(ev) {
+  if (!ev || typeof ev !== "object") return false;
+  if (typeof ev.checked === "boolean") return true;
+  const role = String(ev.role || ev.actionKind || "").toLowerCase();
+  if (PLAYWRIGHT_SAFE_VALUE_ROLES.has(role)) return true;
+  const inputType = String(ev.inputType || "").toLowerCase();
+  if (PLAYWRIGHT_SAFE_VALUE_INPUT_TYPES.has(inputType)) return true;
+  const tag = String(ev.tagName || ev.tag || "").toLowerCase();
+  if (tag === "select") return true;
+  return false;
+}
+
+function trimForPlaywrightName(value) {
+  const s = String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+  return s.length > 120 ? s.slice(0, 120) : s;
+}
+
+function playwrightNameFor(ev) {
+  const candidates = [ev && ev.label, ev && ev.human, ev && ev.text];
+  for (const c of candidates) {
+    const s = trimForPlaywrightName(c);
+    if (s && s !== "[REDACTED]") return s;
+  }
+  return "";
+}
+
+function playwrightLocatorFor(ev) {
+  if (!ev || typeof ev !== "object") return "page.locator('body')";
+  const testid = trimForPlaywrightName(ev.dataTestid || ev.testId);
+  if (testid) return `page.getByTestId('${escapePlaywrightString(testid)}')`;
+  const aria = trimForPlaywrightName(ev.ariaLabel);
+  if (aria) return `page.getByLabel('${escapePlaywrightString(aria)}')`;
+  const name = playwrightNameFor(ev);
+  const rawRole = String((ev.role || ev.actionKind || "")).toLowerCase();
+  const role = PLAYWRIGHT_ROLE_MAP[rawRole];
+  if (role && name) return `page.getByRole('${role}', { name: '${escapePlaywrightString(name)}' })`;
+  if (name) return `page.getByText('${escapePlaywrightString(name)}', { exact: false })`;
+  const tag = String(ev.tag || "").toLowerCase();
+  if (tag) return `page.locator('${escapePlaywrightString(tag)}')`;
+  return "page.locator('body')";
+}
+
+function buildPlaywrightScript(reportLike) {
+  const source = isPlainObject(reportLike) ? reportLike : {};
+  const events = Array.isArray(source.events) ? source.events : [];
+  const brandTitle = source.brand && typeof source.brand === "object" ? String(source.brand.title || "").trim() : "";
+  const title = String(source.title || brandTitle || "recorded flow").trim() || "recorded flow";
+  const lines = [];
+  lines.push("// SCAFFOLD — REVIEW BEFORE RUNNING. Selectors are best-effort; verify against your DOM.");
+  lines.push("// Generated from a UI Recorder Pro session; hand-tune waits, assertions, and selectors before use.");
+  lines.push("// Single-file scaffold: plug into your existing Playwright project config.");
+  lines.push("");
+  lines.push("const { test, expect } = require('@playwright/test');");
+  lines.push("");
+  lines.push(`test('${escapePlaywrightString(title)}', async ({ page }) => {`);
+  let emitted = 0;
+  let firstNavUrl = "";
+  for (const ev of events) {
+    if (!ev || typeof ev !== "object") continue;
+    const type = String(ev.type || "").toLowerCase();
+    const url = String(ev.url || "").trim();
+    if (!firstNavUrl && (type === "nav" || url)) {
+      firstNavUrl = url;
+    }
+    if (type === "nav") {
+      if (url) {
+        lines.push(`  await page.goto('${escapePlaywrightString(scrubPlaywrightUrl(url))}');`);
+        emitted++;
+      }
+      continue;
+    }
+    if (type === "click" || type === "submit") {
+      lines.push(`  await ${playwrightLocatorFor(ev)}.click();`);
+      emitted++;
+      continue;
+    }
+    if (type === "input" || type === "change") {
+      const value = ev.value == null ? "" : String(ev.value);
+      let safe;
+      if (value === "[REDACTED]" || !playwrightValueIsStructurallySafe(ev)) {
+        lines.push("  // TODO: replace TODO_FILL_VALUE with the real value before running.");
+        safe = "TODO_FILL_VALUE";
+      } else {
+        safe = value;
+      }
+      lines.push(`  await ${playwrightLocatorFor(ev)}.fill('${escapePlaywrightString(safe)}');`);
+      emitted++;
+      continue;
+    }
+    if (type === "note" || type === "outcome") {
+      const text = trimForPlaywrightName(ev.notes || ev.note || ev.outcome || "");
+      if (text) lines.push(`  // ${text.replace(/\r?\n/g, " ")}`);
+      continue;
+    }
+  }
+  if (!emitted && firstNavUrl) {
+    lines.push(`  await page.goto('${escapePlaywrightString(scrubPlaywrightUrl(firstNavUrl))}');`);
+  }
+  if (!emitted && !firstNavUrl) {
+    lines.push("  // No actionable events recorded.");
+  }
+  lines.push("});");
+  lines.push("");
+  return lines.join("\n");
+}
+
 const AUDIO_IMPORT_ALLOWED_MIME = Object.freeze(new Set([
   "audio/mpeg",
   "audio/mp3",
@@ -2070,6 +2453,37 @@ function sectionDescriptionFor(ev) {
   return sectionDescriptionRawFor(ev).trim();
 }
 
+// T2 2B.7 — step tags. Backward-compatible: missing ev.tags == []. Normalized
+// to lowercase, trimmed, deduped, capped in count + per-tag length.
+const MAX_TAGS_PER_EVENT = 16;
+const MAX_TAG_LENGTH = 32;
+function normalizeTags(input) {
+  let raw;
+  if (Array.isArray(input)) raw = input;
+  else if (typeof input === "string") raw = input.split(",");
+  else if (input == null) raw = [];
+  else return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of raw) {
+    if (out.length >= MAX_TAGS_PER_EVENT) break;
+    const t = String(item == null ? "" : item)
+      .toLowerCase()
+      .replace(/[\s,]+/g, "-")
+      .replace(/[^a-z0-9._-]/g, "")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, MAX_TAG_LENGTH);
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+function getEventTags(ev) {
+  if (!ev || typeof ev !== "object" || !Array.isArray(ev.tags)) return [];
+  return normalizeTags(ev.tags);
+}
+
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -2242,7 +2656,65 @@ function reportIdentityKey(entry) {
   return `meta:${createdAt}|${sessionId}`;
 }
 
-async function saveReports(reports) {
+// T2B.4 — coalesced editor saves. saveReports() is a 500 ms trailing-edge
+// scheduler over _saveReportsImmediate; rapid successive edits collapse to
+// one storage.local.set. beforeunload + visibilitychange force an immediate
+// flush so an about-to-close tab still persists the latest state. Vault-mode
+// semantics are unchanged — the immediate path still throws when locked, so
+// the awaited coalesced promise rejects at flush time (never a silent
+// downgrade to plaintext).
+let _saveReportsCoalesceTimer = null;
+let _saveReportsCoalescePending = null;      // latest reports reference to write
+let _saveReportsCoalescePromise = null;      // resolved when the trailing flush completes
+let _saveReportsCoalesceResolve = null;
+let _saveReportsCoalesceReject = null;
+const SAVE_REPORTS_COALESCE_MS = 500;
+
+function saveReports(reports) {
+  _saveReportsCoalescePending = reports;
+  if (!_saveReportsCoalescePromise) {
+    _saveReportsCoalescePromise = new Promise((res, rej) => {
+      _saveReportsCoalesceResolve = res;
+      _saveReportsCoalesceReject = rej;
+    });
+  }
+  if (_saveReportsCoalesceTimer) { clearTimeout(_saveReportsCoalesceTimer); }
+  _saveReportsCoalesceTimer = setTimeout(_saveReportsFlushNow, SAVE_REPORTS_COALESCE_MS);
+  return _saveReportsCoalescePromise;
+}
+
+function _saveReportsFlushNow() {
+  if (_saveReportsCoalesceTimer) { clearTimeout(_saveReportsCoalesceTimer); _saveReportsCoalesceTimer = null; }
+  if (!_saveReportsCoalescePromise) return;
+  const reports = _saveReportsCoalescePending;
+  const resolve = _saveReportsCoalesceResolve;
+  const reject = _saveReportsCoalesceReject;
+  _saveReportsCoalescePending = null;
+  _saveReportsCoalescePromise = null;
+  _saveReportsCoalesceResolve = null;
+  _saveReportsCoalesceReject = null;
+  // T2 2D.4 — beforeunload/visibilitychange flush: start _saveReportsImmediate
+  // synchronously (no Promise.resolve() microtask hop) so its sync prelude
+  // enqueues the storage.set before the tab unloads. Trade-off: the impl is
+  // still async — in vault mode it awaits AES-GCM encryption before the set,
+  // so a beforeunload immediately followed by tab close may not survive.
+  // Prefer visibilitychange->hidden where available; the browser holds the
+  // page longer than beforeunload and gives the encrypted write time to land.
+  try {
+    _saveReportsImmediate(reports).then(resolve, reject);
+  } catch (err) {
+    reject(err);
+  }
+}
+
+try {
+  window.addEventListener("beforeunload", _saveReportsFlushNow, { capture: true });
+  document.addEventListener("visibilitychange", () => {
+    if (document && document.visibilityState === "hidden") _saveReportsFlushNow();
+  }, { capture: true });
+} catch (_) {}
+
+async function _saveReportsImmediate(reports) {
   const storageContext = await resolveReportStorageContext();
   const pageReports = Array.isArray(reports) ? reports : [];
   const stored = await storageContext.area.get(["reports"]);
@@ -2432,15 +2904,57 @@ async function loadReportsFromStorage() {
   return { reports, storageContext };
 }
 
-function filterEvents(events, query, typeFilter, urlFilter) {
+// T2 2D.3 — lazy lowercased haystack cache keyed by event identity.
+// filterEvents runs on every keystroke; without a cache each event re-lowercases
+// its label/text/human/value/outcome/tags/description on every call. WeakMap
+// keeps the cache tied to event object lifetime — GC handles cleanup. Mutation
+// call sites use setEventSearchableField / invalidateEventSearchHaystack to
+// clear the entry so the next lookup rebuilds.
+const EVENT_HAYSTACK_CACHE = new WeakMap();
+function buildEventSearchHaystack(ev) {
+  const parts = [
+    sectionDescriptionFor(ev),
+    ev.label, ev.text, ev.human, ev.value, ev.outcome,
+    getEventTags(ev).join(" "),
+  ];
+  return lower(parts.join(" "));
+}
+function getEventSearchHaystack(ev) {
+  if (!ev || typeof ev !== "object") return "";
+  const cached = EVENT_HAYSTACK_CACHE.get(ev);
+  if (typeof cached === "string") return cached;
+  const built = buildEventSearchHaystack(ev);
+  EVENT_HAYSTACK_CACHE.set(ev, built);
+  return built;
+}
+function invalidateEventSearchHaystack(ev) {
+  if (ev && typeof ev === "object") EVENT_HAYSTACK_CACHE.delete(ev);
+}
+function setEventSearchableField(ev, key, value) {
+  if (!ev || typeof ev !== "object") return;
+  ev[key] = value;
+  EVENT_HAYSTACK_CACHE.delete(ev);
+}
+
+function filterEvents(events, query, typeFilter, urlFilter, tagFilters) {
   const q = lower(query || "");
   const uf = lower(urlFilter || "");
+  // T2 2B.7 — active tag chips: event must carry at least one of them.
+  let tagSet = null;
+  if (tagFilters) {
+    const raw = tagFilters instanceof Set ? Array.from(tagFilters) : (Array.isArray(tagFilters) ? tagFilters : []);
+    const norm = normalizeTags(raw);
+    if (norm.length) tagSet = new Set(norm);
+  }
   return events.filter(ev => {
     if (typeFilter && typeFilter !== "all" && ev.type !== typeFilter) return false;
     if (uf && !lower(ev.url || "").includes(uf)) return false;
+    if (tagSet) {
+      const evTags = getEventTags(ev);
+      if (!evTags.some((t) => tagSet.has(t))) return false;
+    }
     if (!q) return true;
-    const hay = [sectionDescriptionFor(ev), ev.label, ev.text, ev.human, ev.value, ev.outcome].join(" ");
-    return lower(hay).includes(q);
+    return getEventSearchHaystack(ev).includes(q);
   });
 }
 
@@ -5153,7 +5667,8 @@ function buildExportHtml(report, options = {}) {
     metaText,
     mediaHtml,
     ccHtml,
-    isBurst = false
+    isBurst = false,
+    tags = []
   }) => {
     sectionNumber += 1;
     const numeric = sectionNumber;
@@ -5172,7 +5687,10 @@ function buildExportHtml(report, options = {}) {
       { ref: null, loaded: false, dataUrl: "" },
       null
     );
-    const slide = `<article id="${normalizedId}" class="carousel-slide${isBurst ? " carousel-slide-burst" : ""}" data-slide-id="${normalizedId}" data-slide-title="${safeTitle}" data-slide-subtitle="${safeSubtitle}" data-slide-meta="${safeMeta}" aria-hidden="true">
+    // T2 2B.7 — preserve tags on exported <article> so downstream tools/users can filter.
+    const normalizedTags = normalizeTags(tags);
+    const safeTagsAttr = escapeHtml(normalizedTags.join(","));
+    const slide = `<article id="${normalizedId}" class="carousel-slide${isBurst ? " carousel-slide-burst" : ""}" data-slide-id="${normalizedId}" data-slide-title="${safeTitle}" data-slide-subtitle="${safeSubtitle}" data-slide-meta="${safeMeta}" data-slide-tags="${safeTagsAttr}" aria-hidden="true">
   ${safeMedia}
   ${safeCc}
 </article>`;
@@ -5252,7 +5770,8 @@ function buildExportHtml(report, options = {}) {
       subtitleText: stepSubtitleForExport(ev),
       metaText: sectionDescription,
       mediaHtml,
-      ccHtml: stepTextPanel
+      ccHtml: stepTextPanel,
+      tags: getEventTags(ev)
     });
 
     const insertions = burstInsertionPlan.byStepId.get(stepId) || [];
@@ -7534,6 +8053,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   const exportPreviewHide = document.getElementById("export-preview-hide");
   const rawBundleBtn = document.getElementById("bundle-raw");
   const mediaBundleBtn = document.getElementById("bundle-media");
+  const markdownBundleBtn = document.getElementById("bundle-markdown");
+  const markdownBundleMode = document.getElementById("bundle-markdown-mode");
+  const playwrightBundleBtn = document.getElementById("bundle-playwright");
   const importMode = document.getElementById("import-mode");
   const importBtn = document.getElementById("bundle-import");
   const importFile = document.getElementById("bundle-import-file");
@@ -11553,13 +12075,168 @@ document.addEventListener("DOMContentLoaded", async () => {
     burstPlaybackSpeed.addEventListener("change", () => { persistBurstPlaybackSpeed(burstPlaybackSpeed.value); });
   }
 
+  // T2 2B.8 — report + section-shell templates management UI.
+  const templateNameInput = document.getElementById("report-template-name");
+  const templateSelect = document.getElementById("report-template-select");
+  const templateSaveBtn = document.getElementById("report-template-save");
+  const templateLoadBtn = document.getElementById("report-template-load");
+  const templateDeleteBtn = document.getElementById("report-template-delete");
+  const templateStatus = document.getElementById("report-template-status");
+  let cachedTemplates = [];
+
+  function setTemplateStatus(msg, isError) {
+    if (!templateStatus) return;
+    templateStatus.textContent = String(msg || "");
+    templateStatus.classList.toggle("error", !!isError);
+  }
+
+  async function loadReportTemplates() {
+    try {
+      const stored = await browser.storage.local.get([REPORT_TEMPLATES_STORAGE_KEY]);
+      const raw = stored && stored[REPORT_TEMPLATES_STORAGE_KEY];
+      const arr = Array.isArray(raw) ? raw : [];
+      const normalized = arr.map(normalizeStoredReportTemplate).filter(Boolean);
+      return enforceReportTemplatesCap(normalized);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  async function saveReportTemplates(list) {
+    const capped = enforceReportTemplatesCap(Array.isArray(list) ? list : []);
+    try {
+      await browser.storage.local.set({ [REPORT_TEMPLATES_STORAGE_KEY]: capped });
+    } catch (_) {}
+    return capped;
+  }
+
+  function renderTemplateSelect() {
+    if (!templateSelect) return;
+    templateSelect.innerHTML = "";
+    if (!cachedTemplates.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No saved templates";
+      templateSelect.appendChild(opt);
+      if (templateLoadBtn) templateLoadBtn.disabled = true;
+      if (templateDeleteBtn) templateDeleteBtn.disabled = true;
+      return;
+    }
+    cachedTemplates.forEach((tpl) => {
+      const opt = document.createElement("option");
+      opt.value = tpl.id;
+      const stamp = new Date(tpl.createdAtMs).toISOString().slice(0, 10);
+      opt.textContent = `${tpl.name} — ${tpl.sections.length} section${tpl.sections.length === 1 ? "" : "s"} (${stamp})`;
+      templateSelect.appendChild(opt);
+    });
+    if (templateLoadBtn) templateLoadBtn.disabled = false;
+    if (templateDeleteBtn) templateDeleteBtn.disabled = false;
+  }
+
+  async function refreshTemplateList() {
+    cachedTemplates = await loadReportTemplates();
+    renderTemplateSelect();
+  }
+
+  if (hasReport && templateSaveBtn) {
+    templateSaveBtn.addEventListener("click", async () => {
+      const name = templateNameInput ? templateNameInput.value : "";
+      const tpl = buildTemplateFromReport(report, {
+        name,
+        editorTheme: currentTheme,
+        exportTheme: report.exportTheme,
+      });
+      const next = enforceReportTemplatesCap(cachedTemplates.concat([tpl]));
+      cachedTemplates = await saveReportTemplates(next);
+      renderTemplateSelect();
+      if (templateSelect) templateSelect.value = tpl.id;
+      if (templateNameInput) templateNameInput.value = "";
+      setTemplateStatus(`Saved template "${tpl.name}" (${tpl.sections.length} sections).`, false);
+    });
+  }
+
+  if (hasReport && templateLoadBtn) {
+    templateLoadBtn.addEventListener("click", async () => {
+      const id = templateSelect ? templateSelect.value : "";
+      const tpl = cachedTemplates.find((t) => t.id === id);
+      if (!tpl) { setTemplateStatus("Select a template to load.", true); return; }
+      const beforeCount = Array.isArray(report.events) ? report.events.length : 0;
+      applyTemplateToReport(report, tpl);
+      syncExportThemeControls();
+      await saveReports(reports);
+      scheduleInlinePreviewRefresh();
+      render();
+      const afterCount = Array.isArray(report.events) ? report.events.length : 0;
+      setTemplateStatus(
+        `Merged "${tpl.name}": ${afterCount - beforeCount} sections added, ${beforeCount} existing events preserved.`,
+        false
+      );
+    });
+  }
+
+  if (hasReport && templateDeleteBtn) {
+    templateDeleteBtn.addEventListener("click", async () => {
+      const id = templateSelect ? templateSelect.value : "";
+      if (!id) { setTemplateStatus("Select a template to delete.", true); return; }
+      const next = cachedTemplates.filter((t) => t.id !== id);
+      cachedTemplates = await saveReportTemplates(next);
+      renderTemplateSelect();
+      setTemplateStatus("Template deleted.", false);
+    });
+  }
+
+  if (hasReport) refreshTemplateList();
+
+  // T2 2B.7 — tab-session-scoped active tag filter chips. Not persisted across
+  // reloads; the request explicitly scopes this to the tab session.
+  const activeTagFilters = new Set();
+
+  function collectAllTagsFromReport() {
+    const seen = new Set();
+    if (!hasReport || !Array.isArray(report.events)) return [];
+    for (const ev of report.events) {
+      for (const t of getEventTags(ev)) seen.add(t);
+    }
+    return Array.from(seen).sort();
+  }
+
+  function renderTagFilterChips() {
+    const host = document.getElementById("tag-filter-chips");
+    if (!host) return;
+    const tags = collectAllTagsFromReport();
+    // Prune stale active filters.
+    for (const t of Array.from(activeTagFilters)) {
+      if (!tags.includes(t)) activeTagFilters.delete(t);
+    }
+    host.innerHTML = "";
+    if (!tags.length) {
+      const empty = el("span", "tag-filter-empty hint", "No tags yet — add tags to any step to filter here.");
+      host.appendChild(empty);
+      return;
+    }
+    tags.forEach((tag) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "tag-filter-chip" + (activeTagFilters.has(tag) ? " tag-filter-chip-active" : "");
+      chip.textContent = tag;
+      chip.setAttribute("aria-pressed", activeTagFilters.has(tag) ? "true" : "false");
+      chip.addEventListener("click", () => {
+        if (activeTagFilters.has(tag)) activeTagFilters.delete(tag);
+        else activeTagFilters.add(tag);
+        render();
+      });
+      host.appendChild(chip);
+    });
+  }
+
   function getVisibleEvents() {
     if (!hasReport) return [];
     return filterEvents(
       report.events,
       search ? search.value : "",
       typeFilter ? typeFilter.value : "all",
-      urlFilter ? urlFilter.value : ""
+      urlFilter ? urlFilter.value : "",
+      activeTagFilters
     );
   }
 
@@ -11658,7 +12335,45 @@ document.addEventListener("DOMContentLoaded", async () => {
   // T2 perf remediation: accept a pre-built `view` (from render) so we don't
   // rebuild the view model, click-burst list, and insertion plan a second time.
   // When called with no args (side effects like save-then-refresh), rebuild.
+  // T2 2D.2 perf: coalesce updateAux calls scheduled from render() so a burst
+  // of step-list rebuilds (move/delete/rename) doesn't run the aux pipeline
+  // (hints/timeline/TOC + inline preview) N times. Uses requestIdleCallback
+  // when available with a 200ms setTimeout fallback for browsers that don't.
+  let pendingAuxHandle = null;
+  let pendingAuxKind = null; // "idle" | "timeout"
+  let pendingAuxArgs = null;
+  function scheduleUpdateAux(viewInput, optionsInput) {
+    // Latest args win — a later render() supersedes the pending payload.
+    pendingAuxArgs = [viewInput, optionsInput];
+    if (pendingAuxHandle !== null) return;
+    const run = () => {
+      pendingAuxHandle = null;
+      pendingAuxKind = null;
+      const args = pendingAuxArgs;
+      pendingAuxArgs = null;
+      if (args) updateAux(args[0], args[1]);
+    };
+    if (typeof requestIdleCallback === "function") {
+      pendingAuxKind = "idle";
+      pendingAuxHandle = requestIdleCallback(run, { timeout: 200 });
+    } else {
+      pendingAuxKind = "timeout";
+      pendingAuxHandle = setTimeout(run, 200);
+    }
+  }
   function updateAux(viewInput, optionsInput) {
+    // Cancel any pending scheduled aux — this direct call supersedes it and
+    // we must not let a stale deferred payload clobber the fresh state.
+    if (pendingAuxHandle !== null) {
+      if (pendingAuxKind === "idle" && typeof cancelIdleCallback === "function") {
+        try { cancelIdleCallback(pendingAuxHandle); } catch (_) {}
+      } else if (pendingAuxKind === "timeout") {
+        clearTimeout(pendingAuxHandle);
+      }
+      pendingAuxHandle = null;
+      pendingAuxKind = null;
+      pendingAuxArgs = null;
+    }
     const options = optionsInput || {};
     let view;
     if (viewInput && typeof viewInput === "object" && !Array.isArray(viewInput)
@@ -11726,6 +12441,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function render() {
     if (!hasReport) return;
+    renderTagFilterChips();
     destroyBurstPlayers();
     destroyNarrationControllers("render-refresh");
     if (activeAnnotationTeardown) {
@@ -11740,9 +12456,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     const burstInsertionPlan = buildBurstInsertionPlan(view.sourceEvents, events, view.bursts);
     const eventPositionMap = new Map();
     report.events.forEach((item, pos) => eventPositionMap.set(item, pos));
-    // T2 perf: hand the already-built view and burst plan to updateAux so it
-    // does not recompute buildVisibleViewModel / buildBurstInsertionPlan.
-    updateAux(view, { burstInsertionPlan });
+    // T2 2D.2 perf: hand the already-built view and burst plan to updateAux
+    // so it does not recompute buildVisibleViewModel / buildBurstInsertionPlan.
+    // Defer via requestIdleCallback (200ms setTimeout fallback) so step-list
+    // edits (move/delete/rename) don't block the frame on the aux pipeline.
+    scheduleUpdateAux(view, { burstInsertionPlan });
     let renderedStepCounter = 0;
 
     const appendInlineBursts = (entries) => {
@@ -11957,6 +12675,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         subtitle.value = nextDescription;
         if (nextDescription.trim()) ev.sectionDescription = nextDescription;
         else delete ev.sectionDescription;
+        // T2 2D.3 — sectionDescription feeds getEventSearchHaystack; clear cached entry.
+        invalidateEventSearchHaystack(ev);
         updateSubtitleCount();
         await saveReports(reports);
         updateAux();
@@ -12063,11 +12783,42 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       wrap.appendChild(actions);
 
+      // T2 2B.7 — per-step tag editor: comma-separated chip input.
+      const tagRow = el("div", "step-tag-row noprint");
+      const tagLabel = el("label", "step-tag-label", "Tags");
+      const tagInput = document.createElement("input");
+      tagInput.type = "text";
+      tagInput.className = "step-tag-input";
+      tagInput.placeholder = "comma,separated,tags";
+      tagInput.value = getEventTags(ev).join(", ");
+      tagInput.setAttribute("aria-label", "Step tags (comma separated)");
+      const commitTags = async () => {
+        const next = normalizeTags(tagInput.value);
+        const prev = getEventTags(ev);
+        const changed = next.length !== prev.length || next.some((t, i) => t !== prev[i]);
+        tagInput.value = next.join(", ");
+        if (!changed) return;
+        if (next.length) ev.tags = next; else delete ev.tags;
+        // T2 2D.3 — tags feed getEventSearchHaystack; clear cached entry.
+        invalidateEventSearchHaystack(ev);
+        await saveReports(reports);
+        renderTagFilterChips();
+      };
+      tagInput.addEventListener("blur", commitTags);
+      tagInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); tagInput.blur(); }
+      });
+      tagLabel.appendChild(tagInput);
+      tagRow.appendChild(tagLabel);
+      wrap.appendChild(tagRow);
+
       if (ev.type === "note") {
         const note = el("div", "step-note", ev.text || "");
         note.contentEditable = "true";
         note.addEventListener("blur", async () => {
           ev.text = note.textContent.trim();
+          // T2 2D.3 — text feeds getEventSearchHaystack; clear cached entry.
+          invalidateEventSearchHaystack(ev);
           await saveReports(reports);
           updateAux();
         });
@@ -12672,6 +13423,51 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  if (markdownBundleBtn) {
+    markdownBundleBtn.addEventListener("click", async () => {
+      if (!hasReport) {
+        setImportStatus("No report available to export.", true);
+        return;
+      }
+      const mode = normalizeMarkdownScreenshotMode(markdownBundleMode && markdownBundleMode.value);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      try {
+        if (mode === "zip") {
+          const built = buildReportMarkdownZipEntries(report, { updatedAt: Date.now() });
+          const zipBlob = buildStoredZip(built.entries);
+          const filename = `ui-runbook-${stamp}.zip`;
+          await downloadBlob(zipBlob, filename);
+          setImportStatus(`Exported Markdown runbook + ${built.screenshotEntries.length} screenshot(s): ${filename}`, false);
+        } else {
+          const built = buildReportMarkdown(report, { screenshotMode: "inline" });
+          const filename = `ui-runbook-${stamp}.md`;
+          await downloadBlob(new Blob([built.markdown], { type: "text/markdown" }), filename);
+          setImportStatus(`Exported Markdown runbook: ${filename}`, false);
+        }
+      } catch (err) {
+        setImportStatus(`Export Markdown failed: ${describeErrorMessage(err)}`, true);
+      }
+    });
+  }
+
+  if (playwrightBundleBtn) {
+    playwrightBundleBtn.addEventListener("click", async () => {
+      if (!hasReport) {
+        setImportStatus("No report available to export.", true);
+        return;
+      }
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      try {
+        const script = buildPlaywrightScript(report);
+        const filename = `ui-playwright-${stamp}.test.js`;
+        await downloadBlob(new Blob([script], { type: "text/javascript" }), filename);
+        setImportStatus(`Exported Playwright scaffold: ${filename} (review selectors before running).`, false);
+      } catch (err) {
+        setImportStatus(`Export Playwright failed: ${describeErrorMessage(err)}`, true);
+      }
+    });
+  }
+
   if (quickPreviewBtn) {
     quickPreviewBtn.addEventListener("click", async () => {
       if (await renderInlineQuickPreview(true)) {
@@ -12930,6 +13726,33 @@ document.addEventListener("DOMContentLoaded", async () => {
         importFile.value = "";
       }
     });
+  }
+
+  // 2D.1 stub: vector annotations control opens the design plan.
+  // Renderer/editor are not yet shipped; see docs/plans/vector-annotations-2026-07-16.md.
+  // T2 2D.4 — element is a <button> (not a persistent checkbox); handle click.
+  // If it ever regresses to a checkbox, only open the plan on transition to
+  // checked and immediately revert to unchecked (visiting the link is the only
+  // effect; the box must not stay "on").
+  const vectorAnnotToggle = document.getElementById("vector-annotations-toggle");
+  if (vectorAnnotToggle) {
+    const openPlan = () => {
+      try {
+        const planUrl = (typeof browser !== "undefined" && browser.runtime && typeof browser.runtime.getURL === "function")
+          ? browser.runtime.getURL("docs/plans/vector-annotations-2026-07-16.md")
+          : "docs/plans/vector-annotations-2026-07-16.md";
+        window.open(planUrl, "_blank", "noopener");
+      } catch (_) { /* runtime unavailable in preview */ }
+    };
+    if (vectorAnnotToggle.tagName === "BUTTON" || vectorAnnotToggle.type !== "checkbox") {
+      vectorAnnotToggle.addEventListener("click", openPlan);
+    } else {
+      vectorAnnotToggle.addEventListener("change", () => {
+        if (!vectorAnnotToggle.checked) return;
+        openPlan();
+        vectorAnnotToggle.checked = false;
+      });
+    }
   }
 
   if (isPrint) {

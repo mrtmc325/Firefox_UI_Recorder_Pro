@@ -174,6 +174,17 @@ const BURST_BACKOFF_CAPTURE_FAIL_MAX_MS = 1000;
 const BURST_BACKOFF_NO_ACTIVE_TAB_MS = 250;
 const BURST_BACKOFF_BACKPRESSURE_MIN_MS = 180;
 const BURST_CURSOR_SAMPLE_MAX_AGE_MS = 1400;
+// T2-2B.5 storage-quota preflight thresholds.
+const STORAGE_QUOTA_PAUSE_RATIO = 0.85;
+const STORAGE_QUOTA_STOP_RATIO = 0.97;
+const STORAGE_QUOTA_POLL_INTERVAL_MS = 30000;
+let storageQuotaLevel = "healthy";           // "healthy" | "quota" | "critical"
+let storageQuotaRatio = 0;
+let storageQuotaUsageBytes = 0;
+let storageQuotaLimitBytes = 0;
+let storageQuotaMessage = "";
+let storageQuotaCheckedAtMs = 0;
+let storageQuotaPollTimer = null;
 const STOP_LIFECYCLE_CAPTURE_TIMEOUT_MS = 600;
 const STOP_FINALIZATION_DRAIN_TIMEOUT_MS = 15000;
 const RECORD_EVENT_PERSIST_MIN_INTERVAL_MS = 1500;
@@ -238,6 +249,7 @@ function normalizeBurstLoopPauseReason(reason) {
   if (text.includes("paused")) return "paused";
   if (text.includes("no-active-tab") || text.includes("skip-tab")) return "no-active-tab";
   if (text.includes("capture-failed") || text.includes("capture-skip")) return "capture-failed";
+  if (text.includes("storage-quota") || text.includes("storage_quota")) return "storage-quota";
   if (text.includes("backpressure")) return "backpressure";
   if (text.includes("inactive")) return "inactive-recording";
   if (text.includes("mode-off") || text.includes("toggle-off") || text.includes("command:off") || text.includes("stop-recording")) {
@@ -386,6 +398,79 @@ function getFrameSpoolRuntimeSnapshot(queueState = null) {
     queueBytesHighWater: Number(burstPerf.queueBytesHighWater) || 0,
     effectiveBurstFps: Number(burstPerf.effectiveBurstFps) || 0
   };
+}
+
+// T2-2B.5 — poll navigator.storage.estimate() to detect quota pressure.
+// Ratios: >= 0.85 -> "quota" tier (pauses burst capture); >= 0.97 -> "critical"
+// (recording auto-stops). Purely additive to frame-spool backpressure tiers.
+async function checkStorageQuota(reason) {
+  try {
+    if (typeof navigator === "undefined" || !navigator.storage ||
+        typeof navigator.storage.estimate !== "function") {
+      return { ok: false, level: storageQuotaLevel, ratio: storageQuotaRatio, reason: "unsupported" };
+    }
+    const est = await navigator.storage.estimate();
+    const usage = Math.max(0, Number(est && est.usage) || 0);
+    const quota = Math.max(0, Number(est && est.quota) || 0);
+    const ratio = quota > 0 ? usage / quota : 0;
+    storageQuotaUsageBytes = usage;
+    storageQuotaLimitBytes = quota;
+    storageQuotaRatio = ratio;
+    storageQuotaCheckedAtMs = Date.now();
+    let level = "healthy";
+    if (ratio >= STORAGE_QUOTA_STOP_RATIO) level = "critical";
+    else if (ratio >= STORAGE_QUOTA_PAUSE_RATIO) level = "quota";
+    const prev = storageQuotaLevel;
+    storageQuotaLevel = level;
+    if (level !== "healthy" && prev !== level) {
+      storageQuotaMessage = level === "critical"
+        ? `Storage ${Math.round(ratio * 100)}% full — recording auto-stopped.`
+        : `Storage ${Math.round(ratio * 100)}% full — burst capture paused.`;
+      bgWarn("storage-quota:tier-change", { reason, prev, level, ratio: Number(ratio.toFixed(4)), usage, quota });
+    } else if (level === "healthy" && prev !== "healthy") {
+      storageQuotaMessage = "";
+      bgLog("storage-quota:recovered", { reason, prev, ratio: Number(ratio.toFixed(4)) });
+    }
+    return { ok: true, level, ratio, usage, quota };
+  } catch (err) {
+    bgWarn("storage-quota:check-failed", { reason, error: formatError(err) });
+    return { ok: false, level: storageQuotaLevel, ratio: storageQuotaRatio, reason: "error" };
+  }
+}
+
+function getStorageQuotaSnapshot() {
+  return {
+    level: storageQuotaLevel,
+    ratio: Number((Number(storageQuotaRatio) || 0).toFixed(4)),
+    usage: Number(storageQuotaUsageBytes) || 0,
+    quota: Number(storageQuotaLimitBytes) || 0,
+    message: String(storageQuotaMessage || ""),
+    checkedAtMs: Number(storageQuotaCheckedAtMs) || 0
+  };
+}
+
+function stopStorageQuotaPolling(reason) {
+  if (storageQuotaPollTimer) {
+    clearInterval(storageQuotaPollTimer);
+    storageQuotaPollTimer = null;
+    bgLog("storage-quota:poll-stopped", { reason });
+  }
+}
+
+function startStorageQuotaPolling(reason) {
+  stopStorageQuotaPolling("restart");
+  storageQuotaPollTimer = setInterval(async () => {
+    const res = await checkStorageQuota("poll");
+    if (res && res.level === "critical" && isRecording) {
+      bgWarn("storage-quota:auto-stop", { ratio: res.ratio });
+      try {
+        await stopRecordingInternal("storage-quota");
+      } catch (err) {
+        bgWarn("storage-quota:auto-stop-failed", { error: formatError(err) });
+      }
+    }
+  }, STORAGE_QUOTA_POLL_INTERVAL_MS);
+  bgLog("storage-quota:poll-started", { reason, intervalMs: STORAGE_QUOTA_POLL_INTERVAL_MS });
 }
 
 function isFrameSpoolBackpressureActive(queueState) {
@@ -1584,6 +1669,16 @@ async function runContinuousBurstCaptureTick() {
   let pressureLevel = "healthy";
   const tickStartedAt = Date.now();
   try {
+    // T2-2B.5 — storage-quota tier gates burst capture ahead of frame-spool pressure.
+    if (storageQuotaLevel === "quota" || storageQuotaLevel === "critical") {
+      burstLoopActive = false;
+      burstLastLoopPauseReason = "storage-quota";
+      burstPerf.backpressurePauses += 1;
+      bgLog("burst-loop:storage-quota", { level: storageQuotaLevel, ratio: storageQuotaRatio });
+      nextDelayMs = Math.max(frameMs, BURST_BACKOFF_BACKPRESSURE_MIN_MS);
+      burstCaptureFailureStreak = 0;
+      return;
+    }
     if (frameSpool) {
       const state = getFrameSpoolQueueState();
       updateWriteQueueHighWater(state);
@@ -2810,6 +2905,18 @@ async function startRecordingInternal(source, options = {}) {
       }
     }
   }
+  // T2-2B.5 — quota preflight. Refuse to start if the browser is already at
+  // the critical threshold; capture will only make the situation worse.
+  const preflight = await checkStorageQuota("start-preflight");
+  if (preflight && preflight.ok && preflight.level === "critical") {
+    bgWarn("start-recording:blocked-quota", { ratio: preflight.ratio });
+    return {
+      ok: false,
+      reason: "storage-quota-critical",
+      error: `Browser storage is ${Math.round((preflight.ratio || 0) * 100)}% full. Free space (delete old reports / clear extension data) and retry.`,
+      storageQuota: getStorageQuotaSnapshot()
+    };
+  }
   clearPendingHotkeyStop("start-recording");
   stopInProgress = false;
   resetBurstPerf();
@@ -2826,6 +2933,7 @@ async function startRecordingInternal(source, options = {}) {
   events = [];
   sessionId = newSessionId();
   recordingStartedAtMs = Date.now();
+  startStorageQuotaPolling("start-recording");
   resetScreenshotState();
   await appendLifecycleScreenshotEvent("start", source);
   const persisted = await persistSafe("start-recording");
@@ -2873,6 +2981,7 @@ async function stopRecordingInternal(source) {
     };
 
     stopContinuousBurstCaptureLoop("stop-recording");
+    stopStorageQuotaPolling("stop-recording");
     isRecording = false;
     isPaused = false;
     events = [];
@@ -3075,6 +3184,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         burstPerf: getBurstPerfSnapshot(),
         spoolRuntime,
         spoolWorkers,
+        storageQuota: getStorageQuotaSnapshot(),
         frameMsgToken
       };
     }
