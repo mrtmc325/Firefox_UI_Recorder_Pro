@@ -8,7 +8,7 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.20.0. Ships 10 of the Tier-2 follow-up items on top of v1.19.0: step tags with filter chips, report/section-shell templates (no event or media data), Markdown/plain-text runbook export, Playwright test-scaffold emitter (URL and free-text scrubbing built in), recording presets dropdown, storage-quota preflight + backpressure tier, raw-ZIP bundle JSON Schema doc, dev tooling helpers (web-ext run + eslint on demand), vector annotations design doc + placeholder button, and two report-editor performance wins (render/updateAux split, lazy WeakMap search haystack). Also: coalesced editor saves (500 ms trailing). Three items — rename/delete individual reports, undo stack for step edits, and cross-report search from popup — aborted during the workflow's serial phase due to a false-positive concurrent-session guard; deferred to the next slice.</p>
+    <p>Version 1.21.0. Ships the three items deferred from v1.20.0: per-report Rename + Delete actions (title sanitizer + confirm gate + focus management + immediate save flush), a dual-ring undo stack for destructive step edits (in-memory 10-entry step ring; 5-minute sessionStorage report-delete undo gated on vault-off AND secure-at-rest-off), and cross-report search from the popup (arrow-key-navigable combobox+listbox that opens the target report via ?idx=N#step-K deep link, with a burst-wrap fallback when the target step was folded into a click burst). Deep-link stepId validator loosened to accept template and burst step ids while still rejecting fragment-injection shapes.</p>
 
     <h2>Security &amp; Privacy Hardening (current build)</h2>
     <ul>
@@ -21,7 +21,7 @@
       <li>The deprecated microphone-capture subsystem is fully removed; residual mic requests are rejected with <code>mic-capture-removed</code>.</li>
     </ul>
 
-    <h2>Version Notes (v1.20.0)</h2>
+    <h2>Version Notes (v1.21.0)</h2>
     <ul>
       <li>Popup header version badge now resolves directly from extension manifest version to prevent stale hardcoded values after releases.</li>
       <li>Exported carousel right rail now uses <strong>Workflow Queue</strong> naming consistently.</li>

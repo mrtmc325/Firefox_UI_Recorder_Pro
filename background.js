@@ -3317,7 +3317,10 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       const idxNum = Number(idxRaw);
       const idx = Number.isFinite(idxNum) && idxNum >= 0 ? Math.floor(idxNum) : 0;
       const stepIdRaw = msg && typeof msg.stepId === "string" ? msg.stepId : "";
-      const stepId = /^step-\d{1,6}$/.test(stepIdRaw) ? stepIdRaw : "";
+      // Accept step-N (fallback), tpl_step_*, burst_*, and any DOM-id-safe token; reject
+      // anything with fragment/URL injection surface (quotes, angle brackets, #, ?, &, %, /, whitespace).
+      const stepId = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(stepIdRaw) ? stepIdRaw : "";
+      if (stepIdRaw && !stepId) bgWarn("open-report:invalid-stepId", { stepId: stepIdRaw.slice(0, 64) });
       const suffix = stepId ? `#${stepId}` : "";
       await browser.tabs.create({ url: browser.runtime.getURL("report.html") + `?idx=${idx}${suffix}` });
       return { ok: true };

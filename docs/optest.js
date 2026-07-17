@@ -1493,8 +1493,12 @@ function runStatic() {
   check("T1.5", "popup #burst-mode-chip drops aria-live storm", !/id="burst-mode-chip"[^>]*aria-live=/.test(phtml));
   check("T1.5", "popup #spool-runtime drops aria-live storm", !/id="spool-runtime"[^>]*aria-live=/.test(phtml));
   check("T1.5", "popup #tab-scope-list uses role=group (not listbox)", /id="tab-scope-list"[^>]*role="group"/.test(phtml) && !/id="tab-scope-list"[^>]*role="listbox"/.test(phtml));
-  check("T1.5", "popup.js renderTabScopeList no longer sets role=option", !/setAttribute\(\s*["']role["']\s*,\s*["']option["']\s*\)/.test(pjs));
-  check("T1.5", "popup.js renderTabScopeList no longer sets aria-selected", !/setAttribute\(\s*["']aria-selected["']/.test(pjs));
+  // Scope to renderTabScopeList only — the cross-report search listbox in
+  // renderHits legitimately uses role=option + aria-selected.
+  const renderTabScopeMatch = pjs.match(/function renderTabScopeList\([\s\S]*?\n\}/);
+  const renderTabScopeBody = renderTabScopeMatch ? renderTabScopeMatch[0] : pjs;
+  check("T1.5", "popup.js renderTabScopeList no longer sets role=option", !/setAttribute\(\s*["']role["']\s*,\s*["']option["']\s*\)/.test(renderTabScopeBody));
+  check("T1.5", "popup.js renderTabScopeList no longer sets aria-selected", !/setAttribute\(\s*["']aria-selected["']/.test(renderTabScopeBody));
   check("T1.5", "report.html #import-status has role=status", /id="import-status"[^>]*role="status"/.test(rhtml));
   check("T1.5", "report.js audio-status template has role=status", /section-text-audio-status[^"]*"[^>]*role="status"/.test(rjs));
 
@@ -1750,14 +1754,55 @@ function runStatic() {
     const rptJsB6 = fs.readFileSync(path.join(REPO, "report.js"), "utf8");
     check("T2B.6", "popup.html has cross-report search input + results list",
       /id="cross-report-search-input"/.test(popupHtmlB6) && /id="cross-report-search-results"/.test(popupHtmlB6));
+    check("T2B.6", "popup.html a11y: combobox input with aria-controls + aria-autocomplete",
+      /id="cross-report-search-input"[\s\S]{0,400}role="combobox"/.test(popupHtmlB6)
+      && /aria-controls="cross-report-search-results"/.test(popupHtmlB6)
+      && /aria-autocomplete="list"/.test(popupHtmlB6)
+      && /id="cross-report-search-input"[\s\S]{0,400}aria-expanded="false"/.test(popupHtmlB6));
+    check("T2B.6", "popup.html a11y: results <ul> has role=listbox",
+      /id="cross-report-search-results"[\s\S]{0,300}role="listbox"/.test(popupHtmlB6));
+    check("T2B.6", "popup.js renderHits sets role=option + aria-selected + option-<idx> id",
+      /setAttribute\("role",\s*"option"\)/.test(popupJsB6)
+      && /setAttribute\("aria-selected"/.test(popupJsB6)
+      && /`option-\$\{idx\}`/.test(popupJsB6));
+    check("T2B.6", "popup.js arrow-key nav + aria-activedescendant + aria-expanded toggle",
+      /ArrowDown/.test(popupJsB6)
+      && /ArrowUp/.test(popupJsB6)
+      && /aria-activedescendant/.test(popupJsB6)
+      && /aria-expanded"\s*,\s*"true"/.test(popupJsB6));
     check("T2B.6", "popup.js defines searchReports + CROSS_REPORT_SEARCH_CAP=20",
       /function searchReports\(/.test(popupJsB6) && /CROSS_REPORT_SEARCH_CAP\s*=\s*20/.test(popupJsB6));
     check("T2B.6", "popup.js click handler sends OPEN_REPORT with idx + stepId",
       /OPEN_REPORT[\s\S]{0,200}idx:\s*hit\.reportIdx[\s\S]{0,200}stepId:\s*hit\.stepId/.test(popupJsB6));
-    check("T2B.6", "background OPEN_REPORT validates stepId as step-\\d+",
-      /OPEN_REPORT[\s\S]{0,400}\/\^step-\\d\{1,6\}\$\//.test(bgJsB6));
+    check("T2B.6", "background OPEN_REPORT validates stepId with DOM-id-safe regex (accepts step-N/tpl_step_*/burst_*)",
+      /OPEN_REPORT[\s\S]{0,800}\/\^\[A-Za-z\]\[A-Za-z0-9_-\]\{0,63\}\$\//.test(bgJsB6));
+    check("T2B.6", "background OPEN_REPORT bgWarn on rejected stepId (truncated to 64 chars)",
+      /open-report:invalid-stepId[\s\S]{0,160}slice\(0,\s*64\)/.test(bgJsB6));
+    // F1: behavioral — validate the loosened regex admits the shapes report.js generates
+    // for template/burst steps and still rejects fragment-injection payloads.
+    const stepIdReF1 = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+    check("T2B.6-F1", "stepId regex accepts step-N (backcompat)", stepIdReF1.test("step-42"));
+    check("T2B.6-F1", "stepId regex accepts tpl_step_* (template steps)", stepIdReF1.test("tpl_step_1720000000000_3_ab12"));
+    check("T2B.6-F1", "stepId regex accepts burst_* (burst frames)", stepIdReF1.test("burst_frame_10"));
+    check("T2B.6-F1", "stepId regex rejects <script> injection", !stepIdReF1.test("<script>"));
+    check("T2B.6-F1", "stepId regex rejects leading digit", !stepIdReF1.test("1abc"));
+    check("T2B.6-F1", "stepId regex rejects whitespace", !stepIdReF1.test("a b"));
+    check("T2B.6-F1", "stepId regex rejects fragment/URL injection chars",
+      !stepIdReF1.test("a#b") && !stepIdReF1.test("a?b") && !stepIdReF1.test("a&b")
+      && !stepIdReF1.test("a%b") && !stepIdReF1.test("a/b") && !stepIdReF1.test("a\"b")
+      && !stepIdReF1.test("a>b") && !stepIdReF1.test("a<b") && !stepIdReF1.test("a'b"));
+    check("T2B.6-F1", "stepId regex rejects control characters", !stepIdReF1.test("a\nb") && !stepIdReF1.test("a\tb"));
+    check("T2B.6-F1", "stepId regex caps at 64 chars", stepIdReF1.test("a".repeat(64)) && !stepIdReF1.test("a".repeat(65)));
     check("T2B.6", "report.js consumes #step-N hash after render",
       /consumeCrossReportSearchFragment[\s\S]{0,400}step-\\d\{1,6\}/.test(rptJsB6));
+    // F8 — a step-N target may be burst-folded: the individual step frame is
+    // hidden by shouldHideRenderedStepEvent() and the visible artifact is the
+    // enclosing burst card. Fall back via burstFrameMap -> burstDomId and,
+    // if neither resolves, land at the top of the report with a status hint.
+    check("T2B.6 F8", "consumeCrossReportSearchFragment looks up burstFrameMap and falls back to burstDomId",
+      /consumeCrossReportSearchFragment[\s\S]{0,2000}burstFrameMap[\s\S]{0,1200}burstDomId\s*\(/.test(rptJsB6));
+    check("T2B.6 F8", "consumeCrossReportSearchFragment scrolls to top + status hint when no target resolves",
+      /consumeCrossReportSearchFragment[\s\S]{0,3000}window\.scrollTo\(/.test(rptJsB6));
     // Behavioral: load popup.js in vm and exercise searchReports.
     const searchCtx = loadContext(["popup.js"], {
       epilogue: "globalThis.__searchReports = searchReports; globalThis.__CAP = CROSS_REPORT_SEARCH_CAP;"
@@ -1812,6 +1857,14 @@ function runStatic() {
     // Encrypted envelopes must not appear in cachedReports (verified via filter form).
     check("T2B.6", "popup.js filters out encryptedVaultV envelopes before search",
       /encryptedVaultV/.test(popupJsB6));
+    // Stale stored stepIds are ignored — searchReports emits position-based ids
+    // so the fragment always matches assignStepIds()'s output on fresh render.
+    const staleStepIdReports = [{ name: "Post-delete", events: [
+      { stepId: "step-42", type: "click", text: "needle-kept" }
+    ]}];
+    const staleHit = S(staleStepIdReports, "needle-kept");
+    check("T2B.6", "stepId always emitted as position-based (stale stored ids ignored)",
+      staleHit.length === 1 && staleHit[0].stepId === "step-1");
   }
 
   // Behavioral: exercise the vault crypto roundtrip under Node's SubtleCrypto.
@@ -1900,6 +1953,36 @@ function runStatic() {
     check("T2 2B.3", "report-list undo bar renderer reads and expires the snapshot",
       /sessionStorage\.getItem\("firefox-ui-recorder-report-undo"\)/.test(rjs)
         && /5\s*\*\s*60_?000/.test(rjs));
+    // F2 — the delete-undo sessionStorage snapshot must not bypass at-rest
+    // encryption. Gate the setItem behind encryptedVaultSettingEnabled() and
+    // resolveReportStorageContext().secureAtRestMode.
+    check("T2 2B.3 F2", "delete-undo snapshot write is gated by !vaultOn && !secureAtRestMode",
+      /encryptedVaultSettingEnabled\(\)[\s\S]{0,600}resolveReportStorageContext\(\)[\s\S]{0,600}!vaultOn\s*&&\s*!ctx\.secureAtRestMode[\s\S]{0,200}sessionStorage\.setItem\("firefox-ui-recorder-report-undo"/.test(rjs));
+    // F3 — snapshot writes only occur AFTER saveReports resolves; the catch
+    // path clears any stale snapshot so a partially-failed delete doesn't leave
+    // a duplicate-restore booby-trap behind.
+    check("T2 2B.3 F3", "delete catch-path clears the sessionStorage snapshot before returning",
+      /sessionStorage\.removeItem\("firefox-ui-recorder-report-undo"\)[\s\S]{0,400}Delete failed/.test(rjs));
+    check("T2 2B.3 F3", "sessionStorage snapshot is written only on the success path (after await saveReports)",
+      /await\s+p;[\s\S]{0,2000}sessionStorage\.setItem\("firefox-ui-recorder-report-undo"/.test(rjs));
+    // F4 — delete forces immediate flush of the coalescer via
+    // _saveReportsFlushNow so the user does not stare at a stale page for up
+    // to 500 ms while the trailing-edge timer waits.
+    check("T2 2B.3 F4", "delete flushes coalesced save via _saveReportsFlushNow before awaiting",
+      /const\s+p\s*=\s*saveReports\(reports\)[\s\S]{0,120}_saveReportsFlushNow\(\)[\s\S]{0,60}await\s+p/.test(rjs));
+    // F5 — rename/delete buttons disable during the async save window so a
+    // second rapid click cannot mutate a different report by racing the save.
+    check("T2 2B.3 F5", "delete disables both buttons at click-start",
+      /reportDeleteBtn\.disabled\s*=\s*true[\s\S]{0,80}reportRenameBtn\.disabled\s*=\s*true/.test(rjs));
+    check("T2 2B.3 F5", "delete re-enables both buttons on save failure",
+      /reportDeleteBtn\.disabled\s*=\s*false[\s\S]{0,80}reportRenameBtn\.disabled\s*=\s*false/.test(rjs));
+    // F6 — location.href reload drops focus to <body>. Leave a one-shot
+    // sessionStorage flag so the reloaded page can restore focus to the next
+    // report's Rename button (or the empty-state anchor).
+    check("T2 2B.3 F6", "delete stashes post-delete focus flag before location.href reload",
+      /sessionStorage\.setItem\("firefox-ui-recorder-report-post-delete-focus"/.test(rjs));
+    check("T2 2B.3 F6", "post-delete focus consumer removes the flag and focuses the next anchor",
+      /sessionStorage\.getItem\("firefox-ui-recorder-report-post-delete-focus"\)[\s\S]{0,400}sessionStorage\.removeItem\("firefox-ui-recorder-report-post-delete-focus"\)/.test(rjs));
 
     // T2 2B.3 — behavioral simulation of the ring: cap=10, screenshotRef string
     // identity preserved across clone, exact-array restore on undo, and per-report
@@ -2115,8 +2198,16 @@ function runStatic() {
       /reports\.findIndex\(\(r\)\s*=>\s*r\s*&&\s*r\.id\s*===\s*activeId\)/.test(rjs));
     check("T2 2B.2", "report.js delete of current report picks next idx (clamped)",
       /Math\.max\(0,\s*Math\.min\(reports\.length\s*-\s*1,\s*removeAt\)\)/.test(rjs));
-    check("T2 2B.2", "report.js rename calls saveReports (coalesced)",
-      /active\.name\s*=\s*next[\s\S]{0,120}await\s+saveReports\(reports\)/.test(rjs));
+    // F1/F4/F5: rename now (a) also mirrors `next` into active.brand.title so the
+    // H1 live-updates without a reload, (b) force-flushes the coalescer via
+    // _saveReportsFlushNow so the user doesn't wait out the 500ms trailing edge,
+    // and (c) disables rename/delete during the async save to prevent double-fire.
+    check("T2 2B.2", "report.js rename calls saveReports (coalesced) and force-flushes via _saveReportsFlushNow",
+      /active\.name\s*=\s*next[\s\S]{0,600}saveReports\(reports\)[\s\S]{0,200}_saveReportsFlushNow/.test(rjs));
+    check("T2 2B.2 F1", "report.js rename also updates active.brand.title so H1 stays in sync",
+      /active\.name\s*=\s*next[\s\S]{0,400}active\.brand\s*=\s*Object\.assign\([\s\S]{0,120}title:\s*next/.test(rjs));
+    check("T2 2B.2 F5", "report.js rename disables buttons during save and restores on failure",
+      /reportRenameBtn\.disabled\s*=\s*true[\s\S]{0,800}reportRenameBtn\.disabled\s*=\s*false/.test(rjs));
     check("T2 2B.2", "reportHistoryName prefers explicit report.name",
       /const\s+explicitName\s*=\s*entry\s*&&\s*entry\.name/.test(rjs));
 

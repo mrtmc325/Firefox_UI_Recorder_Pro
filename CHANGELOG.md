@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.21.0 - 2026-07-17
+
+### Added
+- Rename + delete individual reports from the report editor: Rename prompts for a new title (sanitized to safe filename chars, 80-char cap), updates the dropdown and the H1 in sync; Delete prompts to confirm and removes the report by id. If a `saveReports` write fails on Delete, the report is preserved and the undo snapshot is discarded.
+- Undo stack for destructive step edits: an in-memory 10-entry per-report ring snapshots the events array before each move/drag/delete step operation; "Undo last change" bar above the steps panel restores the prior array on click. screenshotRef ids are captured by string identity so vault-encrypted binary payloads are never duplicated. When Delete Report succeeds and neither the encrypted vault nor secure-at-rest mode is on, a 5-minute sessionStorage-backed report-level undo appears on the next report page load.
+- Cross-report search from the popup: search input above the settings card matches against event text/labels/edited titles/report names; a scrollable listbox of up to 20 hits (arrow-key navigable, `aria-activedescendant`, `role=combobox` on input) opens the target report via `OPEN_REPORT` with `?idx=N#step-K` fragment and scrolls the matching step into view. Text-only search over already-loaded reports; no new storage, no new permissions; honors secure-at-rest.
+
+### Fixed (against Tier-2 deferred review)
+- 2B.6 cross-report search deep-link now always emits the position-based step fragment (`step-N`) to match how report.js reassigns stepIds on render — deleted/moved steps no longer resolve to the wrong target.
+- Delete-undo sessionStorage snapshot gated on encrypted vault OFF AND secure-at-rest OFF so vault protection isn't bypassed by the undo cache.
+- Delete flow no longer waits 500 ms for the coalesced `saveReports` timer before navigating; forces an immediate flush.
+- Delete/Rename buttons disable during the save window so a rapid second click can't target a different report.
+- Rename updates both the dropdown label AND the report H1 (previously stayed stale until reload).
+- Deep-link scroll falls back to the enclosing burst wrap when a step was folded into a click burst.
+- `OPEN_REPORT` stepId validator loosened to accept template/burst step ids (`tpl_step_*`, `burst_*`, `step-N`) while still rejecting fragment-injection shapes.
+- Focus management on Delete reload: focus moves to the next report's Rename button, or the report select, or the empty-state message.
+- Undo bar is `role="region" aria-label="Undo delete"` (not `aria-live`) so screen readers don't re-announce on every page reload.
+- Search results listbox has `role=listbox` + `role=option` + `aria-selected` + arrow-key navigation + Escape returns to input.
+
 ## v1.20.0 - 2026-07-16
 
 ### Added

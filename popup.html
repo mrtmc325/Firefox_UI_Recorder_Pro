@@ -35,11 +35,13 @@
     <label class="row" for="cross-report-search-input" style="display:block">
       <span class="hint">Search reports</span>
       <input id="cross-report-search-input" type="search" autocomplete="off" spellcheck="false"
+             role="combobox" aria-expanded="false" aria-controls="cross-report-search-results"
+             aria-autocomplete="list"
              placeholder="Search step text, labels, titles, report names..."
              style="width:100%;box-sizing:border-box" />
     </label>
     <div id="cross-report-search-status" class="hint" aria-live="polite"></div>
-    <ul id="cross-report-search-results" aria-label="Matching steps"
+    <ul id="cross-report-search-results" role="listbox" aria-label="Matching steps"
         style="display:none;list-style:none;margin:4px 0 0;padding:0;max-height:220px;overflow:auto;border:1px solid rgba(127,127,127,0.3);border-radius:4px"></ul>
   </section>
 

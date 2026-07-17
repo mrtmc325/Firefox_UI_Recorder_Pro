@@ -11930,11 +11930,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (raw == null) return;
       const next = sanitizeReportTitle(raw);
       if (!next) { setReportActionsStatus("Rename cancelled: name is empty after sanitizing.", true); return; }
+      // F5 — disable rename+delete during the async save so a rapid second
+      // click cannot mutate the same report while the first write is pending.
+      reportRenameBtn.disabled = true;
+      if (reportDeleteBtn) reportDeleteBtn.disabled = true;
       active.name = next;
+      // F1 — the report H1 is bound to `report.brand.title` (see the brand-title
+      // blur handler below). Keep both anchors in sync so a rename updates the
+      // dropdown label AND the visible H1 without waiting for a reload.
+      active.brand = Object.assign({}, active.brand || {}, { title: next });
       try {
-        await saveReports(reports);
+        const p = saveReports(reports);
+        if (typeof _saveReportsFlushNow === "function") _saveReportsFlushNow();
+        await p;
       } catch (e) {
         setReportActionsStatus("Rename failed: " + (e && e.message ? e.message : String(e)), true);
+        reportRenameBtn.disabled = false;
+        if (reportDeleteBtn) reportDeleteBtn.disabled = false;
         return;
       }
       const opt = select && select.options ? select.options[idx] : null;
@@ -11943,7 +11955,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         const stepCount = (active.events || []).length;
         opt.textContent = `${idx + 1}. ${next} (${stepCount} steps • ${shownAt})`;
       }
+      // Live-update the visible H1 in the same tick — mirrors the brand-title
+      // blur handler at ~report.js:12111 so rename does not require a reload.
+      try {
+        if (typeof brandTitle !== "undefined" && brandTitle) brandTitle.textContent = next;
+      } catch (_) {}
       setReportActionsStatus(`Renamed report to '${next}'.`);
+      reportRenameBtn.disabled = false;
+      if (reportDeleteBtn) reportDeleteBtn.disabled = false;
     });
   }
   if (reportDeleteBtn) {
@@ -11957,6 +11976,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const activeId = active.id;
       const removeAt = reports.findIndex((r) => r && r.id === activeId);
       if (removeAt < 0) return;
+      // F5 — freeze rename/delete controls until we navigate; on failure we
+      // re-enable so the user can retry, on success the page reloads anyway.
+      reportDeleteBtn.disabled = true;
+      if (reportRenameBtn) reportRenameBtn.disabled = true;
       // T2B.3 — snapshot the deleted report to sessionStorage so the next
       // page (post-reload) can offer an Undo delete. Chose sessionStorage
       // (not a live in-memory ring) because the delete handler navigates via
@@ -11964,18 +11987,59 @@ document.addEventListener("DOMContentLoaded", async () => {
       // closes" without requiring a delete-flow refactor. This ring is
       // separate from the per-report step undo ring above (different scope,
       // different lifetime — coordination via separate DOM anchors).
+      // F3 — build the snapshot up front but do NOT write it yet. If the
+      // coalesced save later rejects (vault-locked etc.) we must not surface
+      // an Undo bar that would duplicate the report on restore.
+      let snapshot = null;
       try {
-        const snapshot = { at: removeAt, ts: Date.now(), report: JSON.parse(JSON.stringify(active)) };
-        sessionStorage.setItem("firefox-ui-recorder-report-undo", JSON.stringify(snapshot));
-      } catch (_) { /* quota or other; undo simply won't be available */ }
+        snapshot = { at: removeAt, ts: Date.now(), report: JSON.parse(JSON.stringify(active)) };
+      } catch (_) { snapshot = null; }
       reports.splice(removeAt, 1);
+      // F4 — force an immediate flush so the user does not stare at a stale
+      // page for up to 500 ms while the coalescer waits out its trailing edge.
       try {
-        await saveReports(reports);
+        const p = saveReports(reports);
+        if (typeof _saveReportsFlushNow === "function") _saveReportsFlushNow();
+        await p;
       } catch (e) {
+        // F3 — save failed after the local splice. Undo bar must not appear
+        // (it would restore the report and immediately duplicate on the next
+        // successful save). Explicitly clear any leftover snapshot.
+        try { sessionStorage.removeItem("firefox-ui-recorder-report-undo"); } catch (_) {}
         setReportActionsStatus("Delete failed: " + (e && e.message ? e.message : String(e)), true);
+        reportDeleteBtn.disabled = false;
+        if (reportRenameBtn) reportRenameBtn.disabled = false;
         return;
       }
-      setReportActionsStatus("Report deleted.");
+      // F2/F3 — success path. Only now write the sessionStorage snapshot,
+      // and only when neither vault (encryptedAtRestVaultEnabled) nor
+      // secure-at-rest is on: those modes encrypt storage.local writes but
+      // sessionStorage is plaintext, so the snapshot would bypass at-rest
+      // encryption. Trade-off: report-level Undo is unavailable while either
+      // mode is active — surfaced via the status line so the user knows.
+      if (snapshot) {
+        try {
+          const vaultOn = await encryptedVaultSettingEnabled();
+          const ctx = await resolveReportStorageContext();
+          if (!vaultOn && !ctx.secureAtRestMode) {
+            try { sessionStorage.setItem("firefox-ui-recorder-report-undo", JSON.stringify(snapshot)); }
+            catch (_) { /* quota or other; undo simply won't be available */ }
+          } else {
+            setReportActionsStatus("Report deleted. Undo unavailable while encrypted-at-rest mode is on.");
+          }
+        } catch (_) { /* fail closed: no undo snapshot on introspection error */ }
+      }
+      if (!reportActionsStatus || !reportActionsStatus.textContent) {
+        setReportActionsStatus("Report deleted.");
+      }
+      // F6 — after location.href reloads the page, focus lands on <body> and
+      // screen readers lose context. Leave a one-shot flag so the reloaded
+      // page can restore focus to the next report's Rename button (or the
+      // report select / empty state) — see the flag consumer below.
+      try {
+        const nextIdx = reports.length === 0 ? "empty" : String(Math.max(0, Math.min(reports.length - 1, removeAt)));
+        sessionStorage.setItem("firefox-ui-recorder-report-post-delete-focus", nextIdx);
+      } catch (_) {}
       const url = new URL(location.href);
       if (reports.length === 0) {
         url.searchParams.delete("idx");
@@ -11987,6 +12051,37 @@ document.addEventListener("DOMContentLoaded", async () => {
       location.href = url.toString();
     });
   }
+
+  // F6 — consume the post-delete focus flag left by the delete handler above.
+  // Runs once per reload: pull the flag, remove it, and move keyboard/AT focus
+  // to whichever anchor makes sense in the new state (rename btn when a report
+  // remains, the empty-state notice otherwise). Wrapped in try/catch because
+  // sessionStorage can throw in privacy modes.
+  (function restorePostDeleteFocus() {
+    let flag = null;
+    try {
+      flag = sessionStorage.getItem("firefox-ui-recorder-report-post-delete-focus");
+      if (flag != null) sessionStorage.removeItem("firefox-ui-recorder-report-post-delete-focus");
+    } catch (_) { return; }
+    if (flag == null) return;
+    // Defer to the next frame so the render pass has added the report H1 / empty
+    // state / dropdown to the DOM before we try to focus it.
+    setTimeout(() => {
+      try {
+        if (flag === "empty") {
+          const empty = document.querySelector("#report-actions-status, #report") || document.body;
+          if (empty && typeof empty.focus === "function") {
+            if (!empty.hasAttribute("tabindex")) empty.setAttribute("tabindex", "-1");
+            empty.focus();
+          }
+        } else if (reportRenameBtn && !reportRenameBtn.disabled) {
+          reportRenameBtn.focus();
+        } else if (select && typeof select.focus === "function") {
+          select.focus();
+        }
+      } catch (_) {}
+    }, 0);
+  })();
 
   // T2B.3 — render report-list Undo bar (populated by the delete handler above
   // via sessionStorage snapshot). Snapshot expires after 5 minutes.
@@ -13372,14 +13467,51 @@ document.addEventListener("DOMContentLoaded", async () => {
   (function consumeCrossReportSearchFragment() {
     const rawHash = String(location.hash || "").replace(/^#/, "");
     if (!/^step-\d{1,6}$/.test(rawHash)) return;
+    // F8 — a step-N target may be "burst-folded": the individual step frame is
+    // hidden by shouldHideRenderedStepEvent() and the visible artifact is the
+    // enclosing burst card. Look up the enclosing burst via burstFrameMap and
+    // scroll to burstDomId(burst) instead. If neither resolves, fall back to
+    // the top of the report so the user is not stranded on a blank hash.
+    let burstFallbackId = "";
+    try {
+      if (hasReport) {
+        const view = buildVisibleViewModel(getVisibleEvents());
+        const frame = view && view.burstFrameMap && view.burstFrameMap.get(rawHash);
+        if (frame && frame.burstId) {
+          // buildBurstFrameMap only stores burstId (not the burst reference),
+          // so look up the burst object in view.bursts to feed burstDomId; if
+          // not found (edge case), synthesize the DOM id from the raw burstId
+          // using the same sanitizing rule as burstDomId().
+          const bursts = Array.isArray(view.bursts) ? view.bursts : [];
+          let burstIndex = -1;
+          const burst = bursts.find((b, i) => {
+            if (b && String(b.id) === String(frame.burstId)) { burstIndex = i; return true; }
+            return false;
+          });
+          if (burst) {
+            burstFallbackId = burstDomId(burst, burstIndex >= 0 ? burstIndex : 0);
+          } else {
+            const safe = String(frame.burstId).replace(/[^a-zA-Z0-9_-]+/g, "-");
+            if (safe) burstFallbackId = `burst-card-${safe}`;
+          }
+        }
+      }
+    } catch (_) { /* keep burstFallbackId empty and land at top */ }
     const attempt = (tries) => {
-      const target = document.getElementById(rawHash);
+      const target = document.getElementById(rawHash)
+        || (burstFallbackId ? document.getElementById(burstFallbackId) : null);
       if (target) {
         try { target.scrollIntoView({ behavior: "smooth", block: "start" }); }
         catch (_) { try { target.scrollIntoView(); } catch (__) {} }
         return;
       }
-      if (tries > 0) setTimeout(() => attempt(tries - 1), 60);
+      if (tries > 0) { setTimeout(() => attempt(tries - 1), 60); return; }
+      // No step or burst match after retries — surface a hint and scroll to top
+      // so a broken deep-link degrades gracefully instead of failing silently.
+      try {
+        if (typeof setStatus === "function") setStatus("Deep-link target not found in this report.");
+      } catch (_) {}
+      try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (_) { try { window.scrollTo(0, 0); } catch (__) {} }
     };
     setTimeout(() => attempt(20), 0);
   })();

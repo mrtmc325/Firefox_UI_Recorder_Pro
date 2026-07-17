@@ -64,7 +64,10 @@ function searchReports(reports, query, cap) {
     let anyEventHit = false;
     for (let si = 0; si < events.length && hits.length < limit; si++) {
       const ev = events[si] || {};
-      const stepId = ev.stepId ? String(ev.stepId) : `step-${si + 1}`;
+      // report.js's render() reassigns stepIds by position on every load (via
+      // assignStepIds), so any stored ev.stepId goes stale after a delete/move.
+      // Always emit the position-based fallback that matches assignStepIds.
+      const stepId = `step-${si + 1}`;
       const parts = [
         String(ev.text || ""),
         String(ev.label || ""),
@@ -891,24 +894,56 @@ document.addEventListener("DOMContentLoaded", async () => {
       cachedAt = now;
       return cachedReports;
     }
+    let activeOptionIdx = -1;
+    function getOptionEls() {
+      return resultsEl ? Array.from(resultsEl.querySelectorAll('li[role="option"]')) : [];
+    }
+    function updateActiveOption(nextIdx) {
+      const options = getOptionEls();
+      if (!options.length) {
+        activeOptionIdx = -1;
+        if (searchInput) searchInput.removeAttribute("aria-activedescendant");
+        return;
+      }
+      const n = options.length;
+      const idx = ((nextIdx % n) + n) % n;
+      options.forEach((opt, i) => opt.setAttribute("aria-selected", i === idx ? "true" : "false"));
+      activeOptionIdx = idx;
+      const activeOpt = options[idx];
+      if (activeOpt) {
+        if (searchInput) searchInput.setAttribute("aria-activedescendant", activeOpt.id);
+        try { activeOpt.focus(); } catch (_) {}
+      }
+    }
     function clearResults() {
       if (!resultsEl) return;
       resultsEl.innerHTML = "";
       resultsEl.style.display = "none";
       if (statusEl) statusEl.textContent = "";
+      activeOptionIdx = -1;
+      if (searchInput) {
+        searchInput.setAttribute("aria-expanded", "false");
+        searchInput.removeAttribute("aria-activedescendant");
+      }
     }
     function renderHits(hits) {
       if (!resultsEl) return;
       resultsEl.innerHTML = "";
+      activeOptionIdx = -1;
+      if (searchInput) searchInput.removeAttribute("aria-activedescendant");
       if (!hits.length) {
         resultsEl.style.display = "none";
         if (statusEl) statusEl.textContent = "No matches.";
+        if (searchInput) searchInput.setAttribute("aria-expanded", "false");
         return;
       }
       const total = hits.length;
-      hits.forEach((hit) => {
+      hits.forEach((hit, idx) => {
         const li = document.createElement("li");
-        li.tabIndex = 0;
+        li.id = `option-${idx}`;
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", "false");
+        li.tabIndex = -1;
         li.style.cssText = "padding:6px 8px;border-bottom:1px solid rgba(127,127,127,0.15);cursor:pointer;font-size:12px";
         const nameDiv = document.createElement("div");
         nameDiv.textContent = hit.reportName + (hit.stepIdx >= 0 ? ` — step ${hit.stepIdx + 1}` : "");
@@ -924,10 +959,18 @@ document.addEventListener("DOMContentLoaded", async () => {
         li.addEventListener("click", activate);
         li.addEventListener("keydown", (e) => {
           if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); }
+          else if (e.key === "ArrowDown") { e.preventDefault(); updateActiveOption(idx + 1); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); updateActiveOption(idx - 1); }
+          else if (e.key === "Escape") {
+            e.preventDefault();
+            clearResults();
+            if (searchInput) { try { searchInput.focus(); } catch (_) {} }
+          }
         });
         resultsEl.appendChild(li);
       });
       resultsEl.style.display = "block";
+      if (searchInput) searchInput.setAttribute("aria-expanded", "true");
       if (statusEl) statusEl.textContent = `${total} match${total === 1 ? "" : "es"}${total >= CROSS_REPORT_SEARCH_CAP ? " (capped)" : ""}.`;
     }
     if (searchInput) {
@@ -941,6 +984,13 @@ document.addEventListener("DOMContentLoaded", async () => {
           const hits = searchReports(reports, q, CROSS_REPORT_SEARCH_CAP);
           renderHits(hits);
         }, 120);
+      });
+      searchInput.addEventListener("keydown", (e) => {
+        const options = getOptionEls();
+        if (!options.length) return;
+        if (e.key === "ArrowDown") { e.preventDefault(); updateActiveOption(0); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); updateActiveOption(options.length - 1); }
+        else if (e.key === "Escape") { e.preventDefault(); clearResults(); }
       });
     }
   }
