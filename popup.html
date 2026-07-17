@@ -31,6 +31,18 @@
     </div>
   </section>
 
+  <section class="card" id="cross-report-search-card" aria-label="Search reports">
+    <label class="row" for="cross-report-search-input" style="display:block">
+      <span class="hint">Search reports</span>
+      <input id="cross-report-search-input" type="search" autocomplete="off" spellcheck="false"
+             placeholder="Search step text, labels, titles, report names..."
+             style="width:100%;box-sizing:border-box" />
+    </label>
+    <div id="cross-report-search-status" class="hint" aria-live="polite"></div>
+    <ul id="cross-report-search-results" aria-label="Matching steps"
+        style="display:none;list-style:none;margin:4px 0 0;padding:0;max-height:220px;overflow:auto;border:1px solid rgba(127,127,127,0.3);border-radius:4px"></ul>
+  </section>
+
   <section class="card settings-card" aria-label="Capture settings">
     <div class="card-title">Settings</div>
 

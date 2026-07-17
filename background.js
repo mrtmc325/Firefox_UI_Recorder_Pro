@@ -3311,7 +3311,17 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       return { ok: persisted.ok, persisted: persisted.ok };
     }
 
-    if (msgType === "OPEN_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?idx=0" }); return { ok: true }; }
+    if (msgType === "OPEN_REPORT") {
+      // T2B.6: cross-report search deep-link — idx picks report, stepId scrolls to step.
+      const idxRaw = msg && msg.idx;
+      const idxNum = Number(idxRaw);
+      const idx = Number.isFinite(idxNum) && idxNum >= 0 ? Math.floor(idxNum) : 0;
+      const stepIdRaw = msg && typeof msg.stepId === "string" ? msg.stepId : "";
+      const stepId = /^step-\d{1,6}$/.test(stepIdRaw) ? stepIdRaw : "";
+      const suffix = stepId ? `#${stepId}` : "";
+      await browser.tabs.create({ url: browser.runtime.getURL("report.html") + `?idx=${idx}${suffix}` });
+      return { ok: true };
+    }
     if (msgType === "OPEN_DOCS") { await browser.tabs.create({ url: browser.runtime.getURL("docs.html") }); return { ok: true }; }
     if (msgType === "OPEN_PRINTABLE_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?print=1&idx=0" }); return { ok: true }; }
 

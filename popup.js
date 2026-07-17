@@ -46,6 +46,48 @@ const SETTINGS_PRESETS = {
   }
 };
 
+// T2B.6: Cross-report search. Pure function so optest can exercise the filter
+// under a vm sandbox. Matches against event.text, event.label, event.editedTitle,
+// event.type, and report.name/title (case-insensitive substring). Caps results.
+const CROSS_REPORT_SEARCH_CAP = 20;
+function searchReports(reports, query, cap) {
+  const limit = Number.isFinite(cap) && cap > 0 ? Math.floor(cap) : CROSS_REPORT_SEARCH_CAP;
+  const q = String(query == null ? "" : query).trim().toLowerCase();
+  if (!q) return [];
+  const list = Array.isArray(reports) ? reports : [];
+  const hits = [];
+  for (let ri = 0; ri < list.length && hits.length < limit; ri++) {
+    const r = list[ri] || {};
+    const reportName = String(r.name || r.title || "").trim() || `Report ${ri + 1}`;
+    const reportMatch = reportName.toLowerCase().indexOf(q) >= 0;
+    const events = Array.isArray(r.events) ? r.events : [];
+    let anyEventHit = false;
+    for (let si = 0; si < events.length && hits.length < limit; si++) {
+      const ev = events[si] || {};
+      const stepId = ev.stepId ? String(ev.stepId) : `step-${si + 1}`;
+      const parts = [
+        String(ev.text || ""),
+        String(ev.label || ""),
+        String(ev.editedTitle || ""),
+        String(ev.type || "")
+      ];
+      let snippet = "";
+      for (let p = 0; p < parts.length; p++) {
+        if (parts[p] && parts[p].toLowerCase().indexOf(q) >= 0) { snippet = parts[p]; break; }
+      }
+      if (!snippet && !reportMatch) continue;
+      if (!snippet) snippet = reportName;
+      if (snippet.length > 120) snippet = snippet.slice(0, 117) + "...";
+      hits.push({ reportIdx: ri, reportName, stepIdx: si, stepId, snippet });
+      anyEventHit = true;
+    }
+    if (reportMatch && !anyEventHit && hits.length < limit) {
+      hits.push({ reportIdx: ri, reportName, stepIdx: -1, stepId: "", snippet: reportName });
+    }
+  }
+  return hits;
+}
+
 function normalizeHotkeyBurstFps(value) {
   const fps = Math.round(Number(value));
   if (fps === 10 || fps === 15) return fps;
@@ -827,6 +869,81 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("report").addEventListener("click", async () => {
     await sendMessageSafe({ type: "OPEN_REPORT" });
   });
+  // T2B.6: Cross-report search wiring. Reports load lazily on first input.
+  {
+    const searchInput = document.getElementById("cross-report-search-input");
+    const resultsEl = document.getElementById("cross-report-search-results");
+    const statusEl = document.getElementById("cross-report-search-status");
+    let cachedReports = null;
+    let cachedAt = 0;
+    async function loadReportsForSearch() {
+      const now = Date.now();
+      if (cachedReports && (now - cachedAt) < 5000) return cachedReports;
+      try {
+        const got = await browser.storage.local.get(["reports"]);
+        const raw = Array.isArray(got && got.reports) ? got.reports : [];
+        // Skip encrypted envelopes — the popup cannot decrypt them and matching
+        // against ciphertext would be meaningless (also honors secure-at-rest).
+        cachedReports = raw.filter((r) => !(r && r.encryptedVaultV));
+      } catch (_) {
+        cachedReports = [];
+      }
+      cachedAt = now;
+      return cachedReports;
+    }
+    function clearResults() {
+      if (!resultsEl) return;
+      resultsEl.innerHTML = "";
+      resultsEl.style.display = "none";
+      if (statusEl) statusEl.textContent = "";
+    }
+    function renderHits(hits) {
+      if (!resultsEl) return;
+      resultsEl.innerHTML = "";
+      if (!hits.length) {
+        resultsEl.style.display = "none";
+        if (statusEl) statusEl.textContent = "No matches.";
+        return;
+      }
+      const total = hits.length;
+      hits.forEach((hit) => {
+        const li = document.createElement("li");
+        li.tabIndex = 0;
+        li.style.cssText = "padding:6px 8px;border-bottom:1px solid rgba(127,127,127,0.15);cursor:pointer;font-size:12px";
+        const nameDiv = document.createElement("div");
+        nameDiv.textContent = hit.reportName + (hit.stepIdx >= 0 ? ` — step ${hit.stepIdx + 1}` : "");
+        nameDiv.style.cssText = "font-weight:600";
+        const snipDiv = document.createElement("div");
+        snipDiv.textContent = hit.snippet || "";
+        snipDiv.style.cssText = "color:rgba(127,127,127,0.9);white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+        li.appendChild(nameDiv);
+        li.appendChild(snipDiv);
+        const activate = async () => {
+          await sendMessageSafe({ type: "OPEN_REPORT", idx: hit.reportIdx, stepId: hit.stepId });
+        };
+        li.addEventListener("click", activate);
+        li.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); }
+        });
+        resultsEl.appendChild(li);
+      });
+      resultsEl.style.display = "block";
+      if (statusEl) statusEl.textContent = `${total} match${total === 1 ? "" : "es"}${total >= CROSS_REPORT_SEARCH_CAP ? " (capped)" : ""}.`;
+    }
+    if (searchInput) {
+      let searchDebounce = null;
+      searchInput.addEventListener("input", () => {
+        const q = String(searchInput.value || "").trim();
+        clearTimeout(searchDebounce);
+        if (!q) { clearResults(); return; }
+        searchDebounce = setTimeout(async () => {
+          const reports = await loadReportsForSearch();
+          const hits = searchReports(reports, q, CROSS_REPORT_SEARCH_CAP);
+          renderHits(hits);
+        }, 120);
+      });
+    }
+  }
   document.getElementById("docs").addEventListener("click", async () => {
     await sendMessageSafe({ type: "OPEN_DOCS" });
   });

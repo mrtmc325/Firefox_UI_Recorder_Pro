@@ -26,7 +26,7 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 | Auto-resume on tab focus | `resumeOnFocus` = true | background.js:33 | Also resumes from idle pause. |
 | Prune noisy input steps | `pruneInputs` = true | background.js:34 | Merges same-field input/change events within `pruneWindowMs` at report-snapshot time. |
 | GIF capture FPS | `hotkeyBurstFps` = 5 | background.js:38, 1354-1360 | Only 5/10/15 accepted (`normalizeHotkeyBurstFps`); anything else snaps to 5. Effective FPS is further capped by stability mode and pressure tiers. |
-| Report retention | `reportRetention` = 3 (clamp 1–10) | background.js:1400-1401, 2471-2491 | Popup Privacy & Stability panel. `saveReportSnapshotDetached` slices to this bound; imports honor the same value (report.js:13575) with a visible notice when older reports are trimmed. Raising grows storage payload and spool footprint linearly. |
+| Report retention | `reportRetention` = 3 (clamp 1–10) | background.js:1400-1401, 2471-2491 | Popup Privacy & Stability panel. `saveReportSnapshotDetached` slices to this bound; imports honor the same value (report.js:13592) with a visible notice when older reports are trimmed. Raising grows storage payload and spool footprint linearly. |
 | Custom redaction rules | `customRedactRules` = [] (cap `CUSTOM_REDACT_RULES_MAX` = 32) | background.js:63-66, `probeRedactRuleReDoS`/`normalizeCustomRedactRules` | Popup Privacy & Stability textarea (`name: pattern` per line, one JS regex each). Layered ON TOP of the built-in `redactRules`, never replacing them (`applyRedactionToText`). Each pattern is ReDoS-probed against `'a'*200 + '!'` with a 50 ms wall-clock budget at save time; anything slow/invalid is dropped. Export/import as JSON via the extension's downloads permission. |
 | Recording presets (popup dropdown) | `SETTINGS_PRESETS` (fixed-shape map: `default` / `spa` / `sensitive` / `long-session`) | popup.js:15 | Fixed lookup — not a runtime tunable. Each preset is a partial `UPDATE_SETTINGS` payload mirroring README how-to templates; unmentioned settings are left untouched. Applying a preset is non-destructive; individual settings remain editable after. Edit the map to add or retune presets; reload the popup. |
 
@@ -75,7 +75,7 @@ One-line summary: Every tunable constant, threshold, and setting in the extensio
 | Normal compaction trigger/target | ≥600 events or ≥220 inline shots → 160 | background.js:121-123 | Strips oldest inline screenshots (never events); priority events (submit/nav/outcome/note/login clicks) preserved. |
 | Burst compaction trigger/target | ≥480 → 360 inline shots | background.js:124-125 | Only matters when spool is unavailable and frames fall back inline; inline-fallback burst frames trigger it during the loop (background.js:1269), bounding fallback memory at the keep target. |
 | Preserved click frames per tab / recency window | 160 / 180 s | background.js:126-127 | Recent clicks always survive compaction. |
-| Report retention | see §1 | background.js:1400-1401, 2471-2491 · report.js:13575 | Moved to a user setting (`reportRetention`, default 3, clamp 1–10). Enforced in `saveReportSnapshotDetached` and at import time with a visible notice when older reports are trimmed. |
+| Report retention | see §1 | background.js:1400-1401, 2471-2491 · report.js:13592 | Moved to a user setting (`reportRetention`, default 3, clamp 1–10). Enforced in `saveReportSnapshotDetached` and at import time with a visible notice when older reports are trimmed. |
 
 ## 5. Content script (capture, redaction, page watch)
 

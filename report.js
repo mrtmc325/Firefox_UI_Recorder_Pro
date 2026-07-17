@@ -13366,6 +13366,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   if (hasReport) render();
+  // T2B.6: cross-report search deep-link. When popup opens with #step-N, scroll
+  // that step into view once the render has painted. Native hash-scroll fires
+  // before render() populates #steps, so we do it explicitly here.
+  (function consumeCrossReportSearchFragment() {
+    const rawHash = String(location.hash || "").replace(/^#/, "");
+    if (!/^step-\d{1,6}$/.test(rawHash)) return;
+    const attempt = (tries) => {
+      const target = document.getElementById(rawHash);
+      if (target) {
+        try { target.scrollIntoView({ behavior: "smooth", block: "start" }); }
+        catch (_) { try { target.scrollIntoView(); } catch (__) {} }
+        return;
+      }
+      if (tries > 0) setTimeout(() => attempt(tries - 1), 60);
+    };
+    setTimeout(() => attempt(20), 0);
+  })();
   if (expandSectionsBtn) {
     expandSectionsBtn.addEventListener("click", () => {
       collapsiblePanels.forEach((panel) => { panel.open = true; });

@@ -1740,6 +1740,80 @@ function runStatic() {
         && !/SETTINGS_PRESETS/.test(bgjs));
   }
 
+  // T2B.6 — cross-report search from popup. Verify HTML surface, popup search fn
+  // semantics (match / cap / empty), background OPEN_REPORT param handling, and
+  // report.js fragment-consume regex.
+  {
+    const popupHtmlB6 = fs.readFileSync(path.join(REPO, "popup.html"), "utf8");
+    const popupJsB6 = fs.readFileSync(path.join(REPO, "popup.js"), "utf8");
+    const bgJsB6 = fs.readFileSync(path.join(REPO, "background.js"), "utf8");
+    const rptJsB6 = fs.readFileSync(path.join(REPO, "report.js"), "utf8");
+    check("T2B.6", "popup.html has cross-report search input + results list",
+      /id="cross-report-search-input"/.test(popupHtmlB6) && /id="cross-report-search-results"/.test(popupHtmlB6));
+    check("T2B.6", "popup.js defines searchReports + CROSS_REPORT_SEARCH_CAP=20",
+      /function searchReports\(/.test(popupJsB6) && /CROSS_REPORT_SEARCH_CAP\s*=\s*20/.test(popupJsB6));
+    check("T2B.6", "popup.js click handler sends OPEN_REPORT with idx + stepId",
+      /OPEN_REPORT[\s\S]{0,200}idx:\s*hit\.reportIdx[\s\S]{0,200}stepId:\s*hit\.stepId/.test(popupJsB6));
+    check("T2B.6", "background OPEN_REPORT validates stepId as step-\\d+",
+      /OPEN_REPORT[\s\S]{0,400}\/\^step-\\d\{1,6\}\$\//.test(bgJsB6));
+    check("T2B.6", "report.js consumes #step-N hash after render",
+      /consumeCrossReportSearchFragment[\s\S]{0,400}step-\\d\{1,6\}/.test(rptJsB6));
+    // Behavioral: load popup.js in vm and exercise searchReports.
+    const searchCtx = loadContext(["popup.js"], {
+      epilogue: "globalThis.__searchReports = searchReports; globalThis.__CAP = CROSS_REPORT_SEARCH_CAP;"
+    });
+    const S = searchCtx.__searchReports;
+    const CAP = searchCtx.__CAP;
+    check("T2B.6", "searchReports exposed with cap=20", typeof S === "function" && CAP === 20);
+    const sampleReports = [
+      { name: "Login flow", events: [
+        { stepId: "step-1", type: "click", text: "Sign in", label: "primary" },
+        { stepId: "step-2", type: "input", text: "user@example.com", label: "email" },
+        { stepId: "step-3", type: "click", text: "Submit", label: "primary" }
+      ]},
+      { title: "Checkout demo", events: [
+        { stepId: "step-1", type: "nav", text: "Cart page", label: "" },
+        { stepId: "step-2", type: "click", text: "Buy now", editedTitle: "Purchase button" }
+      ]}
+    ];
+    const hitsSignIn = S(sampleReports, "sign in");
+    check("T2B.6", "query matches trivial event.text hit",
+      hitsSignIn.length === 1 && hitsSignIn[0].reportIdx === 0 && hitsSignIn[0].stepId === "step-1");
+    const hitsPurchase = S(sampleReports, "purchase");
+    check("T2B.6", "query matches editedTitle (step title) hit",
+      hitsPurchase.length === 1 && hitsPurchase[0].reportIdx === 1 && hitsPurchase[0].stepId === "step-2");
+    const hitsReportName = S(sampleReports, "checkout");
+    check("T2B.6", "query matches report name/title",
+      hitsReportName.length >= 1 && hitsReportName.every((h) => h.reportIdx === 1));
+    check("T2B.6", "empty query returns [] (results panel hidden)", S(sampleReports, "").length === 0
+      && S(sampleReports, "   ").length === 0);
+    check("T2B.6", "null/undefined query safe", S(sampleReports, null).length === 0 && S(sampleReports, undefined).length === 0);
+    // Cap enforcement: build 30 events matching, expect 20 back.
+    const bigReports = [{ name: "Big", events: [] }];
+    for (let i = 0; i < 30; i++) bigReports[0].events.push({ stepId: `step-${i + 1}`, type: "click", text: "needle-hit-" + i });
+    const hitsCap = S(bigReports, "needle-hit");
+    check("T2B.6", "cap 20 results even when 30 events match", hitsCap.length === 20);
+    const hitsCapCustom = S(bigReports, "needle-hit", 5);
+    check("T2B.6", "custom cap honored", hitsCapCustom.length === 5);
+    // Fragment format parseable by report.js consumer.
+    const fragmentRe = /^step-\d{1,6}$/;
+    check("T2B.6", "hit.stepId format matches report.js consumer regex",
+      hitsSignIn[0] && fragmentRe.test(hitsSignIn[0].stepId));
+    // No matches → empty array (drives the "no matches" empty panel path).
+    check("T2B.6", "unmatched query returns []", S(sampleReports, "zzz-never-present").length === 0);
+    // Report-name match with no events still surfaces one hit.
+    const nameOnlyReports = [{ name: "Solo report", events: [] }];
+    const hitsSolo = S(nameOnlyReports, "solo");
+    check("T2B.6", "report-name match with no events surfaces one hit",
+      hitsSolo.length === 1 && hitsSolo[0].stepIdx === -1);
+    // Case-insensitive match.
+    check("T2B.6", "match is case-insensitive",
+      S(sampleReports, "SIGN IN").length === 1 && S(sampleReports, "sign in").length === 1);
+    // Encrypted envelopes must not appear in cachedReports (verified via filter form).
+    check("T2B.6", "popup.js filters out encryptedVaultV envelopes before search",
+      /encryptedVaultV/.test(popupJsB6));
+  }
+
   // Behavioral: exercise the vault crypto roundtrip under Node's SubtleCrypto.
   (async () => {
     const nodeCrypto = require("crypto").webcrypto;
