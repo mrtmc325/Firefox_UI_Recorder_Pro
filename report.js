@@ -8226,6 +8226,63 @@ document.addEventListener("DOMContentLoaded", async () => {
   refreshMeta();
 
   const hasReport = !!(report && Array.isArray(report.events) && report.events.length);
+
+  // T2B.3 — bounded in-memory undo ring for destructive step edits on the active report.
+  // Each entry holds a shallow-cloned events array; screenshotRef and other media
+  // ref ids are strings and are NOT duplicated (identity/value preserved across
+  // shallow clone). Binary payloads live in the shared media store — the ring
+  // only records structural changes to report.events, not any bytes.
+  // Ring is per-report / per-page-session and lives only in memory. Cleared when
+  // the tab closes or the user leaves the report.
+  // Coordination with 2B.2 report-delete: the report-list-level delete is a
+  // separate concern (see T2B.3 report-undo below) and uses its own transient
+  // sessionStorage snapshot because the delete handler navigates via
+  // location.href reload — this keeps the in-memory step ring simple and
+  // scoped to a single active report.
+  const STEP_UNDO_MAX = 10;
+  const stepUndoRing = [];
+  function stepUndoSnapshot(label) {
+    if (!hasReport || !Array.isArray(report.events)) return;
+    const clone = report.events.map((ev) => (ev && typeof ev === "object") ? Object.assign({}, ev) : ev);
+    stepUndoRing.push({ reportId: report && report.id, events: clone, label: String(label || "Step edit") });
+    while (stepUndoRing.length > STEP_UNDO_MAX) stepUndoRing.shift();
+    renderStepUndoBar();
+  }
+  function stepUndoDiscardTop() {
+    if (stepUndoRing.length) stepUndoRing.pop();
+    renderStepUndoBar();
+  }
+  async function stepUndoInvoke() {
+    if (!stepUndoRing.length || !hasReport) return;
+    const entry = stepUndoRing.pop();
+    if (!entry || (report && report.id) !== entry.reportId) { renderStepUndoBar(); return; }
+    report.events = entry.events;
+    try { await saveReports(reports); } catch (_) {}
+    render();
+    renderStepUndoBar();
+  }
+  function renderStepUndoBar() {
+    const bar = document.getElementById("step-undo-bar");
+    if (!bar) return;
+    if (!stepUndoRing.length || !hasReport) {
+      bar.textContent = "";
+      bar.style.display = "none";
+      return;
+    }
+    const last = stepUndoRing[stepUndoRing.length - 1];
+    bar.textContent = "";
+    bar.style.display = "";
+    const label = document.createElement("span");
+    label.textContent = `${last.label} — `;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn ghost";
+    btn.textContent = "Undo last change";
+    btn.addEventListener("click", () => { stepUndoInvoke().catch(() => {}); });
+    bar.appendChild(label);
+    bar.appendChild(btn);
+  }
+
   const DENSE_LAYOUT_THRESHOLD = 100;
   const ANNOTATION_SESSION_IDLE_MS = 15_000;
   let activeAnnotationTeardown = null;
@@ -9762,7 +9819,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function moveEventAndRefresh(ev, delta) {
-    if (!moveEventByOffset(ev, delta)) return;
+    if (!canMoveEventByOffset(ev, delta)) return;
+    stepUndoSnapshot(`Moved step ${Number(delta) < 0 ? "up" : "down"}`);
+    if (!moveEventByOffset(ev, delta)) { stepUndoDiscardTop(); return; }
     await saveReports(reports);
     render();
   }
@@ -9806,7 +9865,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function dragDropEventAndRefresh(draggedEv, targetEv, place, context) {
-    if (!moveEventRelative(draggedEv, targetEv, place, context)) return;
+    stepUndoSnapshot("Reordered step");
+    if (!moveEventRelative(draggedEv, targetEv, place, context)) { stepUndoDiscardTop(); return; }
     await saveReports(reports);
     render();
   }
@@ -9860,7 +9920,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function moveBurstAndRefresh(burst, delta) {
-    if (!moveBurstByOffset(burst, delta)) return;
+    if (!canMoveBurstByOffset(burst, delta)) return;
+    stepUndoSnapshot(`Moved section ${Number(delta) < 0 ? "up" : "down"}`);
+    if (!moveBurstByOffset(burst, delta)) { stepUndoDiscardTop(); return; }
     await saveReports(reports);
     render();
   }
@@ -9901,7 +9963,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function dragDropBurstAndRefresh(draggedBurst, targetItem, place, context) {
-    if (!moveBurstRelative(draggedBurst, targetItem, place, context)) return;
+    stepUndoSnapshot("Reordered section");
+    if (!moveBurstRelative(draggedBurst, targetItem, place, context)) { stepUndoDiscardTop(); return; }
     await saveReports(reports);
     render();
   }
@@ -11888,12 +11951,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       const active = reports[idx];
       if (!active) return;
       const ok = (typeof window !== "undefined" && typeof window.confirm === "function")
-        ? window.confirm("Delete this report? This cannot be undone.")
+        ? window.confirm("Delete this report?")
         : false;
       if (!ok) return;
       const activeId = active.id;
       const removeAt = reports.findIndex((r) => r && r.id === activeId);
       if (removeAt < 0) return;
+      // T2B.3 — snapshot the deleted report to sessionStorage so the next
+      // page (post-reload) can offer an Undo delete. Chose sessionStorage
+      // (not a live in-memory ring) because the delete handler navigates via
+      // location.href; sessionStorage lifetime matches "cleared when the tab
+      // closes" without requiring a delete-flow refactor. This ring is
+      // separate from the per-report step undo ring above (different scope,
+      // different lifetime — coordination via separate DOM anchors).
+      try {
+        const snapshot = { at: removeAt, ts: Date.now(), report: JSON.parse(JSON.stringify(active)) };
+        sessionStorage.setItem("firefox-ui-recorder-report-undo", JSON.stringify(snapshot));
+      } catch (_) { /* quota or other; undo simply won't be available */ }
       reports.splice(removeAt, 1);
       try {
         await saveReports(reports);
@@ -11913,6 +11987,45 @@ document.addEventListener("DOMContentLoaded", async () => {
       location.href = url.toString();
     });
   }
+
+  // T2B.3 — render report-list Undo bar (populated by the delete handler above
+  // via sessionStorage snapshot). Snapshot expires after 5 minutes.
+  (function renderReportUndoBar() {
+    const bar = document.getElementById("report-undo-bar");
+    if (!bar) return;
+    let snap = null;
+    try {
+      const raw = sessionStorage.getItem("firefox-ui-recorder-report-undo");
+      if (raw) snap = JSON.parse(raw);
+    } catch (_) {}
+    if (!snap || !snap.report || (Date.now() - Number(snap.ts || 0)) > 5 * 60_000) {
+      try { sessionStorage.removeItem("firefox-ui-recorder-report-undo"); } catch (_) {}
+      return;
+    }
+    bar.textContent = "";
+    bar.style.display = "";
+    const nameLabel = (snap.report.name && String(snap.report.name))
+      || (snap.report.brand && snap.report.brand.title)
+      || "Untitled";
+    const label = document.createElement("span");
+    label.textContent = `Deleted report '${nameLabel}' — `;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn ghost";
+    btn.textContent = "Undo delete";
+    btn.addEventListener("click", async () => {
+      const at = Math.max(0, Math.min(reports.length, Number(snap.at || 0)));
+      reports.splice(at, 0, snap.report);
+      try { await saveReports(reports); } catch (_) {}
+      try { sessionStorage.removeItem("firefox-ui-recorder-report-undo"); } catch (_) {}
+      const url = new URL(location.href);
+      url.searchParams.set("idx", String(at));
+      if (isPrint) url.searchParams.set("print", "1");
+      location.href = url.toString();
+    });
+    bar.appendChild(label);
+    bar.appendChild(btn);
+  })();
 
   if (!hasReport) {
     document.body.classList.remove("report-dense");
@@ -12789,7 +12902,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const deleteStep = el("button", "btn danger", "Delete step");
       deleteStep.addEventListener("click", async () => {
         const pos = eventPositionMap.has(ev) ? eventPositionMap.get(ev) : report.events.indexOf(ev);
-        if (pos >= 0) report.events.splice(pos, 1);
+        if (pos < 0) return;
+        const evLabel = (ev && (ev.label || ev.title || ev.type)) ? String(ev.label || ev.title || ev.type) : "step";
+        stepUndoSnapshot(`Deleted step '${evLabel}'`);
+        report.events.splice(pos, 1);
         await saveReports(reports);
         render();
       });

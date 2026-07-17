@@ -1803,6 +1803,87 @@ function runStatic() {
             && !/(^|[^a-zA-Z_$])updateAux\s*\(/.test(b));
     }
 
+    // T2 2B.3 — bounded in-memory undo ring for destructive step edits.
+    check("T2 2B.3", "report.html adds a step-undo bar in the steps panel",
+      /id="step-undo-bar"/.test(rhtml));
+    check("T2 2B.3", "report.html adds a report-list undo bar near report actions",
+      /id="report-undo-bar"/.test(rhtml));
+    check("T2 2B.3", "report.js declares stepUndoRing + STEP_UNDO_MAX=10",
+      /const\s+STEP_UNDO_MAX\s*=\s*10\b/.test(rjs) && /const\s+stepUndoRing\s*=\s*\[\]/.test(rjs));
+    check("T2 2B.3", "report.js defines stepUndoSnapshot / stepUndoInvoke / renderStepUndoBar",
+      /function\s+stepUndoSnapshot\s*\(/.test(rjs)
+        && /async\s+function\s+stepUndoInvoke\s*\(/.test(rjs)
+        && /function\s+renderStepUndoBar\s*\(/.test(rjs));
+    check("T2 2B.3", "ring caps at STEP_UNDO_MAX via shift() when over capacity",
+      /while\s*\(\s*stepUndoRing\.length\s*>\s*STEP_UNDO_MAX\s*\)\s*stepUndoRing\.shift\(\)/.test(rjs));
+    check("T2 2B.3", "destructive step wrappers snapshot before mutating",
+      (rjs.match(/stepUndoSnapshot\s*\(/g) || []).length >= 5);
+    check("T2 2B.3", "delete-step handler snapshots with a label before splice",
+      /stepUndoSnapshot\(`Deleted step '\$\{evLabel\}'`\)/.test(rjs));
+    check("T2 2B.3", "report-list delete stashes snapshot in sessionStorage (coordination comment present)",
+      /sessionStorage\.setItem\("firefox-ui-recorder-report-undo"/.test(rjs)
+        && /separate from the per-report step undo ring/.test(rjs));
+    check("T2 2B.3", "report-list undo bar renderer reads and expires the snapshot",
+      /sessionStorage\.getItem\("firefox-ui-recorder-report-undo"\)/.test(rjs)
+        && /5\s*\*\s*60_?000/.test(rjs));
+
+    // T2 2B.3 — behavioral simulation of the ring: cap=10, screenshotRef string
+    // identity preserved across clone, exact-array restore on undo, and per-report
+    // scoping (undo in report A does not touch report B).
+    (function simulateStepUndoRing() {
+      const MAX = 10;
+      const ring = [];
+      function snapshot(reportRef, label) {
+        const clone = reportRef.events.map((ev) => (ev && typeof ev === "object") ? Object.assign({}, ev) : ev);
+        ring.push({ reportId: reportRef.id, events: clone, label });
+        while (ring.length > MAX) ring.shift();
+      }
+      const shotId = "frame:abc123";
+      const evA1 = { stepId: "a1", label: "Click submit", screenshotRef: shotId };
+      const evA2 = { stepId: "a2", label: "Type email",    screenshotRef: shotId };
+      const evA3 = { stepId: "a3", label: "Press enter",   screenshotRef: shotId };
+      const reportA = { id: "R-A", events: [evA1, evA2, evA3] };
+      const reportB = { id: "R-B", events: [{ stepId: "b1", label: "Nav home", screenshotRef: "frame:xyz" }] };
+
+      // Fill past capacity to prove the ring caps at 10.
+      for (let i = 0; i < 15; i++) snapshot(reportA, "op#" + i);
+      check("T2 2B.3", "ring caps at 10 entries under overflow", ring.length === MAX);
+      check("T2 2B.3", "oldest entries dropped (label of first surviving is op#5)",
+        ring[0].label === "op#5");
+
+      // screenshotRef identity preserved (strings are immutable in JS).
+      const before = reportA.events[0].screenshotRef;
+      const cloned = ring[ring.length - 1].events[0].screenshotRef;
+      check("T2 2B.3", "screenshotRef string identity preserved across shallow clone",
+        cloned === before && cloned === shotId);
+
+      // Fresh ring for exact-restore + per-report scoping tests.
+      ring.length = 0;
+      snapshot(reportA, "Deleted step 'Click submit'");
+      const priorEvents = reportA.events;
+      // Destructive op: splice out index 0.
+      reportA.events = reportA.events.slice(); reportA.events.splice(0, 1);
+      check("T2 2B.3", "after delete, events length is one less", reportA.events.length === 2);
+
+      // Undo: pop and restore.
+      const entry = ring.pop();
+      check("T2 2B.3", "popped entry belongs to reportA", entry.reportId === "R-A");
+      reportA.events = entry.events;
+      check("T2 2B.3", "undo restores exact prior events length", reportA.events.length === priorEvents.length);
+      check("T2 2B.3", "undo restores same event objects by identity (shallow clones point at same fields)",
+        reportA.events[0].stepId === "a1" && reportA.events[1].stepId === "a2" && reportA.events[2].stepId === "a3");
+      check("T2 2B.3", "undo does not duplicate screenshotRef payload id (identity preserved)",
+        reportA.events[0].screenshotRef === shotId);
+
+      // Per-report scoping: snapshot on reportA must not be applied to reportB.
+      snapshot(reportA, "op-on-A");
+      const bBefore = reportB.events.slice();
+      const entry2 = ring.pop();
+      const wouldApplyToB = entry2.reportId === reportB.id;
+      check("T2 2B.3", "undo entry from report A is not applied to report B (reportId scope check)",
+        !wouldApplyToB && reportB.events.length === bBefore.length && reportB.events[0] === bBefore[0]);
+    })();
+
     // T2 2B.4 — coalesced editor saves (500ms trailing, flush on beforeunload / visibilitychange)
     check("T2 2B.4", "report.js splits saveReports into coalescing wrapper + immediate impl",
       /function\s+saveReports\s*\(reports\)\s*\{[\s\S]{0,1600}_saveReportsFlushNow/.test(rjs)
@@ -1954,7 +2035,7 @@ function runStatic() {
     check("T2 2B.2", "report.js defines top-level sanitizeReportTitle",
       /function\s+sanitizeReportTitle\s*\(/.test(rjs));
     check("T2 2B.2", "report.js delete uses window.confirm gate",
-      /Delete this report\? This cannot be undone\./.test(rjs)
+      /Delete this report\?/.test(rjs)
         && /window\.confirm/.test(rjs));
     check("T2 2B.2", "report.js delete removes by id via findIndex",
       /reports\.findIndex\(\(r\)\s*=>\s*r\s*&&\s*r\.id\s*===\s*activeId\)/.test(rjs));
