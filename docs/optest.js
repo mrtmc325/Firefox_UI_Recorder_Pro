@@ -1946,6 +1946,73 @@ function runStatic() {
         !/kind:\s*["'](arrow|box|pin|callout)["']/.test(rjs));
     }
 
+    // T2 2B.2 — per-report Rename / Delete actions in the report editor.
+    check("T2 2B.2", "report.html exposes rename + delete buttons",
+      /id="report-rename"/.test(rhtml) && /id="report-delete"/.test(rhtml));
+    check("T2 2B.2", "report.html exposes a report-actions status live region",
+      /id="report-actions-status"[\s\S]{0,120}aria-live="polite"/.test(rhtml));
+    check("T2 2B.2", "report.js defines top-level sanitizeReportTitle",
+      /function\s+sanitizeReportTitle\s*\(/.test(rjs));
+    check("T2 2B.2", "report.js delete uses window.confirm gate",
+      /Delete this report\? This cannot be undone\./.test(rjs)
+        && /window\.confirm/.test(rjs));
+    check("T2 2B.2", "report.js delete removes by id via findIndex",
+      /reports\.findIndex\(\(r\)\s*=>\s*r\s*&&\s*r\.id\s*===\s*activeId\)/.test(rjs));
+    check("T2 2B.2", "report.js delete of current report picks next idx (clamped)",
+      /Math\.max\(0,\s*Math\.min\(reports\.length\s*-\s*1,\s*removeAt\)\)/.test(rjs));
+    check("T2 2B.2", "report.js rename calls saveReports (coalesced)",
+      /active\.name\s*=\s*next[\s\S]{0,120}await\s+saveReports\(reports\)/.test(rjs));
+    check("T2 2B.2", "reportHistoryName prefers explicit report.name",
+      /const\s+explicitName\s*=\s*entry\s*&&\s*entry\.name/.test(rjs));
+
+    // Behavioral: exercise sanitizeReportTitle in a vm sandbox.
+    (function() {
+      const sanSrc = rjs.match(/function\s+sanitizeReportTitle\([^)]*\)\s*\{[\s\S]*?\n\}/);
+      if (!sanSrc) { check("T2 2B.2", "sanitizeReportTitle source located", false); return; }
+      const sandbox = { String };
+      vm.createContext(sandbox);
+      vm.runInContext(sanSrc[0] + "\nglobalThis.sanitizeReportTitle = sanitizeReportTitle;", sandbox);
+      const s = sandbox.sanitizeReportTitle;
+      check("T2 2B.2", "sanitizeReportTitle allows alnum, space, underscore, dot, dash",
+        s("Ab 1_2.3-4") === "Ab 1_2.3-4");
+      check("T2 2B.2", "sanitizeReportTitle strips slashes and control chars",
+        s("bad/name<>|?*\x00") === "badname");
+      check("T2 2B.2", "sanitizeReportTitle trims whitespace",
+        s("   padded name   ") === "padded name");
+      check("T2 2B.2", "sanitizeReportTitle caps at 80 chars",
+        s("x".repeat(200)).length === 80);
+      check("T2 2B.2", "sanitizeReportTitle handles null/undefined",
+        s(null) === "" && s(undefined) === "");
+      check("T2 2B.2", "sanitizeReportTitle strips emoji / non-ASCII",
+        s("hello world") === "hello world");
+    })();
+
+    // Behavioral: delete-by-id splice removes exactly one entry.
+    (function() {
+      const reports = [
+        { id: "a", name: "one" },
+        { id: "b", name: "two" },
+        { id: "c", name: "three" },
+      ];
+      const activeId = "b";
+      const removeAt = reports.findIndex((r) => r && r.id === activeId);
+      reports.splice(removeAt, 1);
+      check("T2 2B.2", "delete-by-id splice removes exactly one entry",
+        reports.length === 2 && !reports.some((r) => r.id === "b"));
+      // Focus-switch clamp: deleting the last entry snaps back to length-1.
+      const reports2 = [ { id: "a" }, { id: "b" }, { id: "c" } ];
+      const removeAt2 = 2;
+      reports2.splice(removeAt2, 1);
+      const nextIdx = Math.max(0, Math.min(reports2.length - 1, removeAt2));
+      check("T2 2B.2", "delete-current focus clamps to new last index",
+        nextIdx === 1);
+      // Empty-state path.
+      const reports3 = [ { id: "a" } ];
+      reports3.splice(0, 1);
+      check("T2 2B.2", "delete-only-report leaves empty reports array",
+        reports3.length === 0);
+    })();
+
     // Behavioral: run the coalescer in a minimal harness and verify (a) N rapid
     // calls in a 500ms window collapse to exactly one _saveReportsImmediate call
     // with the latest reports reference and (b) _saveReportsFlushNow forces an

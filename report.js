@@ -2670,6 +2670,14 @@ let _saveReportsCoalesceResolve = null;
 let _saveReportsCoalesceReject = null;
 const SAVE_REPORTS_COALESCE_MS = 500;
 
+// T2B.2 — sanitize a user-supplied report title to a safe filename token.
+// Strips anything outside [A-Za-z0-9 _.-], trims whitespace, caps at 80 chars.
+function sanitizeReportTitle(input) {
+  const raw = input == null ? "" : String(input);
+  const cleaned = raw.replace(/[^A-Za-z0-9 _.-]+/g, "").trim();
+  return cleaned.slice(0, 80);
+}
+
 function saveReports(reports) {
   _saveReportsCoalescePending = reports;
   if (!_saveReportsCoalescePromise) {
@@ -11802,6 +11810,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (select) {
     select.innerHTML = "";
     function reportHistoryName(entry, index) {
+      const explicitName = entry && entry.name ? String(entry.name).trim() : "";
+      if (explicitName) return explicitName;
       const rawTitle = entry && entry.brand && entry.brand.title ? String(entry.brand.title).trim() : "";
       if (rawTitle) return rawTitle;
       const firstEvent = entry && Array.isArray(entry.events) && entry.events.length ? entry.events[0] : null;
@@ -11828,6 +11838,77 @@ document.addEventListener("DOMContentLoaded", async () => {
       const next = select.value || "0";
       const url = new URL(location.href);
       url.searchParams.set("idx", next);
+      if (isPrint) url.searchParams.set("print", "1");
+      location.href = url.toString();
+    });
+  }
+
+  // T2B.2 — per-report Rename / Delete actions (operate on the active report).
+  const reportRenameBtn = document.getElementById("report-rename");
+  const reportDeleteBtn = document.getElementById("report-delete");
+  const reportActionsStatus = document.getElementById("report-actions-status");
+  function setReportActionsStatus(msg, isError) {
+    if (!reportActionsStatus) return;
+    reportActionsStatus.textContent = msg || "";
+    reportActionsStatus.classList.toggle("error", !!isError);
+  }
+  if (!reports.length) {
+    if (reportRenameBtn) reportRenameBtn.disabled = true;
+    if (reportDeleteBtn) reportDeleteBtn.disabled = true;
+  }
+  if (reportRenameBtn) {
+    reportRenameBtn.addEventListener("click", async () => {
+      const active = reports[idx];
+      if (!active) return;
+      const currentName = (active.name && String(active.name)) || (active.brand && active.brand.title) || "";
+      const raw = (typeof window !== "undefined" && typeof window.prompt === "function")
+        ? window.prompt("Rename report:", currentName)
+        : null;
+      if (raw == null) return;
+      const next = sanitizeReportTitle(raw);
+      if (!next) { setReportActionsStatus("Rename cancelled: name is empty after sanitizing.", true); return; }
+      active.name = next;
+      try {
+        await saveReports(reports);
+      } catch (e) {
+        setReportActionsStatus("Rename failed: " + (e && e.message ? e.message : String(e)), true);
+        return;
+      }
+      const opt = select && select.options ? select.options[idx] : null;
+      if (opt) {
+        const shownAt = new Date(active.createdAt || Date.now()).toLocaleString();
+        const stepCount = (active.events || []).length;
+        opt.textContent = `${idx + 1}. ${next} (${stepCount} steps • ${shownAt})`;
+      }
+      setReportActionsStatus(`Renamed report to '${next}'.`);
+    });
+  }
+  if (reportDeleteBtn) {
+    reportDeleteBtn.addEventListener("click", async () => {
+      const active = reports[idx];
+      if (!active) return;
+      const ok = (typeof window !== "undefined" && typeof window.confirm === "function")
+        ? window.confirm("Delete this report? This cannot be undone.")
+        : false;
+      if (!ok) return;
+      const activeId = active.id;
+      const removeAt = reports.findIndex((r) => r && r.id === activeId);
+      if (removeAt < 0) return;
+      reports.splice(removeAt, 1);
+      try {
+        await saveReports(reports);
+      } catch (e) {
+        setReportActionsStatus("Delete failed: " + (e && e.message ? e.message : String(e)), true);
+        return;
+      }
+      setReportActionsStatus("Report deleted.");
+      const url = new URL(location.href);
+      if (reports.length === 0) {
+        url.searchParams.delete("idx");
+      } else {
+        const nextIdx = Math.max(0, Math.min(reports.length - 1, removeAt));
+        url.searchParams.set("idx", String(nextIdx));
+      }
       if (isPrint) url.searchParams.set("print", "1");
       location.href = url.toString();
     });
