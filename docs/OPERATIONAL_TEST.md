@@ -16,7 +16,7 @@ node --check background.js && node --check content.js && node --check frame_spoo
   && node --check popup.js && node --check report.js
 node docs/verify-tuning-refs.js  # TUNING.md line refs still resolve against source
 python3 -c "import json; json.load(open('manifest.json')); print('manifest ok')"
-npx --yes web-ext lint --source-dir .
+npx --yes web-ext lint --source-dir .   # web-ext-config.mjs limits lint + build to runtime files
 ```
 
 Pass: all `node --check` silent; `verify-tuning-refs.js` prints `0 stale`; lint reports 0 errors / 0 warnings / 0 notices; and `node docs/verify-tuning-refs.js` exits 0 (no stale TUNING.md line references).

@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.22.0 - 2026-09-03
+
+### Added (store readiness)
+- `web-ext-config.mjs`: `web-ext build` / `lint` now cover runtime files only (manifest, six code files, `docs.html`, icons, LICENSE, PRIVACY.md); docs, tests, READMEs, and CHANGELOG stay out of the AMO package.
+- `docs/store/`: copy-ready AMO listing text, rasterized 64/128 px icons, and four real screenshots captured with the GUI harness; `docs/AMO_SUBMISSION.md` rewritten for the first listed submission.
+- Privacy policy and docs page now state the vault's plaintext window (encryption happens when the report editor saves), the audio-file transcription upload, and that `api.openai.com` is the only remote endpoint.
+- `.gitignore` excludes `*.xpi` and `dist/`.
+
 ### Fixed (functional verification pass, driven end-to-end in headless Firefox)
 - Report editor saves: `_saveReportsImmediate` referenced an undeclared `mergedReports`, so every save from the report page (rename, delete, tags, templates, annotations, import) rejected. The cross-writer merge line is restored, and a deleted report is now tracked so the merge cannot resurrect it.
 - Popup Start: `permissions.request` was called after awaited tab/permission lookups, which Firefox rejects outside the synchronous user-input handler, so non-active-tab and multi-tab scopes could never obtain host permission. The request is now issued first; scope errors open the Recording Scope group instead of landing in a collapsed one; an already-running recording no longer reports a false "started".
@@ -15,7 +23,7 @@ All notable changes to this project are documented in this file.
 - Watch mode now adds a newly activated recordable tab to the live recording scope, as its status text always claimed.
 - Recording survives same-tab navigations: the tab-update handler called `rememberUsableWebTab`, a function that does not exist anywhere, so it threw on its first line for every active-tab update (watch-mode draft updates on navigation never worked either), and it never re-injected the content script after a full page load. The dangling calls are gone and the content script is re-injected on load completion for in-scope tabs (login -> dashboard flows now keep capturing).
 - A click that navigates away (link, "Go to" button) is no longer lost: the click handler parks its payload while it probes for a UI update and a `pagehide` flush sends it if the page unloads first.
-- Table of Contents header lost the curved left accent that rendered as a "(" on the rounded panel.
+- Table of Contents header lost the curved left accent that rendered as a "(" on the rounded panel; the same accent is now an inner pill on the live page's section, timeline, burst, and hero cards and on the exported report's brand, banner, overlay, caption bar, and burst cards.
 
 ### Security
 - Screenshots are masked in the background before hashing/storage: the sensitive-field rects content.js already collected (password inputs, login usernames, secret-keyword labels, verified child-iframe fields) are blacked out when redaction is on, instead of being stored beside unmasked pixels. Applies to step screenshots, GIF burst frames, and the start/stop lifecycle screenshots; rects always come from the top frame (its own events or an on-demand `UIR_COLLECT_RECTS` request), scale is derived from the captured image vs the page viewport (HiDPI/zoom safe), and masking failure fails closed (no frame).

@@ -1,9 +1,9 @@
-# UI Workflow Recorder Pro (Firefox) v1.21.0
+# UI Workflow Recorder Pro (Firefox) v1.22.0
 
 UI Recorder Pro captures click/input/change/submit/navigation activity, stores local workflow history, and produces editable reports with screenshots, annotations, timeline tooling, and export/import bundles.
 
 ## Current Release
-- Version: `1.21.0`
+- Version: `1.22.0`
 - Release notes: `CHANGELOG.md`
 
 ## Highlights
@@ -24,7 +24,7 @@ UI Recorder Pro captures click/input/change/submit/navigation activity, stores l
   - Exported burst playback now uses stable contain-fit canvas rendering, preventing frame-to-frame media alignment jitter in carousel view.
   - Exported burst autoplay now resumes on slide re-entry unless explicitly paused by the user.
   - Cursor trails now segment cleanly at tab/page/viewport boundaries to avoid cross-tab connector lines during multi-tab bursts.
-  - GIF mode remains hotkey-only; popup allows lightweight pre-record tuning for capture FPS (5/10/15).
+  - GIF mode remains hotkey-only; popup allows lightweight pre-record tuning for capture FPS (5/10).
   - Popup includes GIF loop diagnostics (`burstLoopActive`, last frame time, pause reason) to prove whether capture is actively running.
   - Burst frame bytes are spooled to IndexedDB (`uir-frame-spool-v1`) with strict byte budgets per queue stage (capture/process/write), so local storage only keeps lightweight `screenshotRef` metadata.
   - Burst capture defaults to JPEG in burst mode with stability-first quality tuning to reduce payload pressure.

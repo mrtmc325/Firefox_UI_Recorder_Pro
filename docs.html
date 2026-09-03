@@ -8,7 +8,7 @@
 <body class="report">
   <main class="docs">
     <h1>UI Recorder Pro — Documentation</h1>
-    <p>Version 1.21.0. Ships the three items deferred from v1.20.0: per-report Rename + Delete actions (title sanitizer + confirm gate + focus management + immediate save flush), a dual-ring undo stack for destructive step edits (in-memory 10-entry step ring; 5-minute sessionStorage report-delete undo gated on vault-off AND secure-at-rest-off), and cross-report search from the popup (arrow-key-navigable combobox+listbox that opens the target report via ?idx=N#step-K deep link, with a burst-wrap fallback when the target step was folded into a click burst). Deep-link stepId validator loosened to accept template and burst step ids while still rejecting fragment-injection shapes.</p>
+    <p>Version 1.22.0 — a verification, hardening, and dead-code cleanup release (notes below) on top of 1.21.0, which shipped the three items deferred from v1.20.0: per-report Rename + Delete actions (title sanitizer + confirm gate + focus management + immediate save flush), a dual-ring undo stack for destructive step edits (in-memory 10-entry step ring; 5-minute sessionStorage report-delete undo gated on vault-off AND secure-at-rest-off), and cross-report search from the popup (arrow-key-navigable combobox+listbox that opens the target report via ?idx=N#step-K deep link, with a burst-wrap fallback when the target step was folded into a click burst). Deep-link stepId validator loosened to accept template and burst step ids while still rejecting fragment-injection shapes.</p>
 
     <h2>Security &amp; Privacy Hardening (current build)</h2>
     <ul>
@@ -18,7 +18,22 @@
       <li><strong>Trusted-event capture</strong>: only real user events (<code>isTrusted</code>) are recorded, with per-event-type rate limits. Script-generated (synthetic) events are ignored — automation-driven flows will not produce steps.</li>
       <li><strong>Minimized permissions</strong>: host access is limited to <code>http://*/*</code> and <code>https://*/*</code> (no <code>&lt;all_urls&gt;</code>), no web-accessible resources, no <code>about:blank</code> frame injection.</li>
       <li><strong>Hardened raw ZIP import</strong>: strict archive-size, entry-count, and per-entry caps (sized to accept anything the extension itself exports), Store-only method, path-traversal and duplicate-name rejection, image magic-byte validation, and MIME allow-lists for restored media.</li>
-      <li>The deprecated microphone-capture subsystem is fully removed; residual mic requests are rejected with <code>mic-capture-removed</code>.</li>
+      <li><strong>Screenshot masking</strong>: with redaction on, detected sensitive fields are blacked out in step, burst, and lifecycle screenshots before storage (top-frame field report, fails closed). Detection is heuristic: review before sharing.</li>
+      <li><strong>URL scrubbing</strong>: recorded URLs are length-capped and secret-bearing query/fragment parameters (token, key, session, code, ...) are replaced with <code>[REDACTED]</code>.</li>
+      <li><strong>Popup-only messages</strong>: settings changes, diagnostics reads, notes, and page-opening messages are rejected from any sender with a tab (content scripts, extension pages in tabs).</li>
+      <li><strong>Encrypted-at-rest vault</strong>: encryption happens when the report editor saves; a freshly stopped recording is plaintext in local storage until the report page is opened. Secure-at-rest mode keeps recordings memory-only instead.</li>
+      <li>The deprecated microphone-capture subsystem is fully removed.</li>
+    </ul>
+
+    <h2>Version Notes (v1.22.0)</h2>
+    <ul>
+      <li>Report editor saves were failing silently (an undeclared variable in the save path); rename, delete, tags, templates, annotations, and imports now persist.</li>
+      <li>Popup Start requests host permission inside the click gesture (Firefox rejects it after awaits), drops the port from origin patterns, and re-checks granted origins after the tab list resyncs; errors are visible.</li>
+      <li>Recording survives same-tab navigations (content script re-injected after a full page load) and a click that navigates away is no longer lost.</li>
+      <li>Screenshots mask detected sensitive fields (password inputs, login usernames, secret-keyword labels, verified iframe fields) in step, GIF burst, and start/stop screenshots when redaction is on; masking fails closed.</li>
+      <li>Recorded URLs are capped and secret-bearing query/fragment parameters are redacted; popup-only runtime messages are rejected from any sender with a tab; optional host permissions are <code>http://*/*</code> + <code>https://*/*</code>.</li>
+      <li>Markdown and Playwright exports read step notes and resolve spool-backed screenshots; the templates panel stays usable without an open report; step moves are undoable; the unreachable 15 FPS option is gone (stored 15 normalizes to 10).</li>
+      <li>Removed dead code: the never-enabled decode-worker subsystem, orphan controls' JS, the vector-annotations placeholder button, unused CSS and helpers. Added a headless-Firefox GUI harness (<code>docs/e2e/run.mjs</code>).</li>
     </ul>
 
     <h2>Version Notes (v1.21.0)</h2>

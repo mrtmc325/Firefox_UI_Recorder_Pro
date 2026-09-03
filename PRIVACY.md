@@ -9,7 +9,7 @@ UI Workflow Recorder Pro is designed for local-first workflow capture in Firefox
 1. Recorded workflow events (click/input/change/submit/navigation metadata).
 2. Report metadata and editor settings.
 3. Screenshots and section assets (text/audio) in local browser storage/IndexedDB.
-4. Optional OpenAI API key for cloud narration, held only in the report tab's session storage (cleared when the tab closes; never persisted to disk, exported, or logged).
+4. Optional OpenAI API key for cloud narration and transcription, held only in the report tab's session storage (cleared when the tab closes; never written to extension storage, exported, or logged).
 
 ## Where Data Is Stored
 
@@ -17,6 +17,7 @@ UI Workflow Recorder Pro is designed for local-first workflow capture in Firefox
 2. `browser.storage.session` (memory-only, cleared when the browser closes) for events/reports when Secure-at-rest mode is enabled; on Firefox without session storage the recorder falls back to local storage with screenshots stripped.
 3. IndexedDB frame/text/audio spool for larger media assets.
 4. Exported files only when the user explicitly downloads them.
+5. With the encrypted-at-rest vault enabled, the report editor AES-GCM-encrypts reports when it saves them. A recording that has just been stopped from the popup stays in plaintext local storage until the report page is opened and saves it; use Secure-at-rest mode to keep recordings memory-only instead.
 
 ## Network Use
 
@@ -29,6 +30,8 @@ Optional OpenAI cloud narration:
 3. Requires Firefox website content data permission when requested.
 4. Sends section text to OpenAI only for narration generation after explicit user action.
 5. The `Play cloud voice tour` preview sends only a short fixed voice-sample phrase to OpenAI text-to-speech under the same key/permission gate (no report content).
+6. `Transcribe audio file` uploads the audio file the user selects (up to 24 MB) to OpenAI's transcription endpoint under the same key/permission gate, only when the user clicks it.
+7. `https://api.openai.com` is the only remote endpoint the extension can contact; every call is bounded by a 60-second deadline. There is no telemetry, update check, or other network use.
 
 ## Telemetry and Tracking
 
