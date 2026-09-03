@@ -2,6 +2,7 @@
 // Owner CLI: node cli.mjs gen-secret | hash-password | add-license <email> <seats> [note] | list
 import { randomBytes } from "node:crypto";
 import { hashPassword } from "./server.mjs";
+import { generateSigningKeyPair } from "./token.mjs";
 import { openDb } from "./db.mjs";
 
 const [cmd, ...args] = process.argv.slice(2);
@@ -9,6 +10,12 @@ const readStdin = () => new Promise((r) => { let s = ""; process.stdin.setEncodi
 
 if (cmd === "gen-hmac") {
   process.stdout.write(randomBytes(32).toString("hex") + "\n");
+} else if (cmd === "gen-signing-key") {
+  const kp = generateSigningKeyPair();
+  console.log("LICENSE_SIGNING_KEY (server .env, keep secret):");
+  console.log("  " + kp.privateKeyB64);
+  console.log("LICENSE_SIGNING_PUBLIC_KEY (bake into background.js LICENSE_SIGNING_PUBLIC_KEY):");
+  console.log("  " + kp.publicKeyB64);
 } else if (cmd === "hash-password") {
   // Password comes from LICENSE_ADMIN_PASSWORD or stdin so it never lands in shell history.
   const pw = (process.env.LICENSE_ADMIN_PASSWORD || (await readStdin())).replace(/\r?\n$/, "");
@@ -26,6 +33,6 @@ if (cmd === "gen-hmac") {
   for (const l of store.listLicenses()) console.log(`#${l.id}\t${l.email}\t${l.active_seats}/${l.seats}\t${l.note}`);
   store.close();
 } else {
-  console.error("usage: node cli.mjs gen-hmac | hash-password | add-license <email> <seats> [note] | list");
+  console.error("usage: node cli.mjs gen-hmac | gen-signing-key | hash-password | add-license <email> <seats> [note] | list");
   process.exit(2);
 }

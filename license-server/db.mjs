@@ -5,6 +5,10 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 const nowIso = () => new Date().toISOString();
+// Throttle last_seen_at writes: at 500 req/s of validate, updating on every check-in is the dominant
+// write. Once per hour per activation keeps the admin view "recent" without the write pressure.
+const LAST_SEEN_THROTTLE_MS = 60 * 60 * 1000;
+const lastSeenStale = (iso) => { const t = Date.parse(iso || ""); return !Number.isFinite(t) || (Date.now() - t) > LAST_SEEN_THROTTLE_MS; };
 
 export function openDb(path) {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -121,16 +125,16 @@ export class Store {
       const existing = this.findActiveByInstall(lic.id, installId);
       const ts = nowIso();
       if (existing) {
-        this.db.prepare("UPDATE activations SET last_seen_at = ?, ext_version = ? WHERE id = ?").run(ts, String(extVersion || "").slice(0, 40), existing.id);
+        if (lastSeenStale(existing.last_seen_at)) this.db.prepare("UPDATE activations SET last_seen_at = ?, ext_version = ? WHERE id = ?").run(ts, String(extVersion || "").slice(0, 40), existing.id);
         this.audit(lic.email, "activation.reuse", { activation: existing.activation_id.slice(0, 8), install: String(installId).slice(0, 8) });
-        return { ok: true, status: "active", activationId: existing.activation_id, seats: lic.seats, activeSeats: this.countActive(lic.id) };
+        return { ok: true, status: "active", activationId: existing.activation_id, email: lic.email, installId: String(installId), seats: lic.seats, activeSeats: this.countActive(lic.id) };
       }
       const activationId = randomBytes(32).toString("hex");
       this.db.prepare("INSERT INTO activations (license_id, install_id, activation_id, ext_version, status, activated_at, last_seen_at) VALUES (?, ?, ?, ?, 'active', ?, ?)")
         .run(lic.id, String(installId).slice(0, 80), activationId, String(extVersion || "").slice(0, 40), ts, ts);
       const demoted = this.enforceSeats(lic.id, "seat-limit");
       this.audit(lic.email, "activation.create", { activation: activationId.slice(0, 8), install: String(installId).slice(0, 8), demoted: demoted.length });
-      return { ok: true, status: "active", activationId, seats: lic.seats, activeSeats: this.countActive(lic.id), demoted: demoted.length };
+      return { ok: true, status: "active", activationId, email: lic.email, installId: String(installId), seats: lic.seats, activeSeats: this.countActive(lic.id), demoted: demoted.length };
     });
   }
   validate({ email, installId, activationId }) {
@@ -138,8 +142,8 @@ export class Store {
     const act = this.getActivationByActivationId(activationId);
     if (!lic || !act || act.license_id !== lic.id || act.install_id !== String(installId)) return { ok: false, status: "unknown" };
     if (act.status !== "active") return { ok: false, status: "revoked", reason: act.revoke_reason || "revoked" };
-    this.db.prepare("UPDATE activations SET last_seen_at = ? WHERE id = ?").run(nowIso(), act.id);
-    return { ok: true, status: "active", seats: lic.seats };
+    if (lastSeenStale(act.last_seen_at)) this.db.prepare("UPDATE activations SET last_seen_at = ? WHERE id = ?").run(nowIso(), act.id);
+    return { ok: true, status: "active", email: lic.email, installId: act.install_id, activationId: act.activation_id, seats: lic.seats };
   }
   deactivate({ email, installId, activationId }) {
     const lic = this.getLicenseByEmail(email);

@@ -2,11 +2,12 @@
 services:
   license-server:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
     env_file: ../.env
     ports:
-      - "8443:8443"          # TLS terminates in the container (LICENSE_TLS_CERT_FILE/KEY_FILE point into /certs)
+      - "8443:8443"                 # public API (TLS terminates in the container via LICENSE_TLS_CERT_FILE/KEY_FILE)
+      - "127.0.0.1:8444:8444"       # admin UI — host loopback ONLY (set LICENSE_ADMIN_PORT=8444; reach via SSH tunnel)
     volumes:
       - license-data:/data
       - ./certs:/certs:ro    # server.crt / server.key (chmod 600, owned by uid 100)

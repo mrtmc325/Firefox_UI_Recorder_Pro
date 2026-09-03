@@ -938,7 +938,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     licenseStatus("Contacting the license server...", "muted");
     const result = await sendMessageSafe({ type: "LICENSE_ACTIVATE", email });
     if (result && result.ok) {
-      licenseStatus(`Activated. ${result.activeSeats || 1} of ${result.seats} seat(s) in use${result.demoted ? "; the oldest device moved to the free tier" : ""}.`, "success");
+      licenseStatus("Activated. This device is licensed.", "success");
     } else {
       licenseStatus(describeLicenseFailure(result), "error");
     }

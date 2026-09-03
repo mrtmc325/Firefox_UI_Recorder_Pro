@@ -82,7 +82,8 @@ answer "No" to the source-code question, and point reviewers at the public repos
      requested at that moment. 60 s deadline.
    - The owner-operated **license server** (host baked into `background.js` as `LICENSE_SERVER_ORIGIN`, HTTPS) — contacted
      only after the user enters a purchase email in the popup to activate a paid license, and every 48 hours thereafter
-     while licensed. Sends only the email, a random install id, and the extension version. Free installs never contact it.
+     while licensed. Sends only the email, a random install id, and the extension version, and receives back a signed
+     activation token. Free installs never contact it.
      Enforces the free-tier caps (5 s / 3 GIF bursts and 10 screenshots per report) with no network call.
 3. **Permissions**: `tabs`/`activeTab` (active-tab capture and screenshots), `storage` (reports/settings),
    `downloads` (exports), `idle` (auto-pause). `http://*/*` and `https://*/*` are optional: the popup requests the
@@ -117,3 +118,5 @@ only), listing copy/assets under `docs/store/`, AGPL-as-custom-license note, pre
 hand, and reviewer notes reflecting the 1.22.0 hardening (masking, sender gate, URL scrubbing).
 
 Updated 2026-09-03: added the licensing disclosure (free-tier caps enforced locally; optional activation + 48 h check-in to the owner-hosted license server) and noted that `license-server/` is excluded from the package.
+
+Updated 2026-09-03: v1.24.0 — activation now returns an Ed25519-signed token; removed the in-popup workflow text (PRIVACY.md remains the disclosure); admin server moved to a loopback-only listener.
