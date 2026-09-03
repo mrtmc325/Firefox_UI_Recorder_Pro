@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:002e6210-2747-47d8-8fdf-083801294d85",
+  "serialNumber": "urn:uuid:5653eb38-4d93-43dc-a33f-2d69d898bf8f",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-09-03T15:17:41.877Z",
+    "timestamp": "2026-09-03T16:01:51.470Z",
     "authors": [
       {
         "name": "Tristan Conner"
@@ -19,8 +19,8 @@
     "component": {
       "type": "application",
       "name": "uir-license-server",
-      "version": "1.24.0",
-      "bom-ref": "uir-license-server@1.24.0",
+      "version": "1.24.1",
+      "bom-ref": "uir-license-server@1.24.1",
       "description": "UI Recorder Pro license server: activation, seat enforcement, Ed25519-signed tokens, admin UI. Node.js stdlib only.",
       "licenses": [
         {
@@ -32,7 +32,7 @@
       "properties": [
         {
           "name": "source.commit",
-          "value": "09cd2ee3c1bc3d033364cd3d09385851936ccb07"
+          "value": "b48a04f783a06cea46b020f9ca4405ab70201c68"
         }
       ]
     }
@@ -53,7 +53,7 @@
     {
       "type": "file",
       "name": "license-server/cli.mjs",
-      "version": "1.24.0",
+      "version": "1.24.1",
       "hashes": [
         {
           "alg": "SHA-256",
@@ -71,7 +71,7 @@
     {
       "type": "file",
       "name": "license-server/db.mjs",
-      "version": "1.24.0",
+      "version": "1.24.1",
       "hashes": [
         {
           "alg": "SHA-256",
@@ -89,7 +89,7 @@
     {
       "type": "file",
       "name": "license-server/preamble.mjs",
-      "version": "1.24.0",
+      "version": "1.24.1",
       "hashes": [
         {
           "alg": "SHA-256",
@@ -107,7 +107,7 @@
     {
       "type": "file",
       "name": "license-server/server.mjs",
-      "version": "1.24.0",
+      "version": "1.24.1",
       "hashes": [
         {
           "alg": "SHA-256",
@@ -125,7 +125,7 @@
     {
       "type": "file",
       "name": "license-server/token.mjs",
-      "version": "1.24.0",
+      "version": "1.24.1",
       "hashes": [
         {
           "alg": "SHA-256",
@@ -143,7 +143,7 @@
     {
       "type": "file",
       "name": "license-server/test/server.test.mjs",
-      "version": "1.24.0",
+      "version": "1.24.1",
       "hashes": [
         {
           "alg": "SHA-256",
@@ -161,7 +161,7 @@
     {
       "type": "file",
       "name": "license-server/test/token.test.mjs",
-      "version": "1.24.0",
+      "version": "1.24.1",
       "hashes": [
         {
           "alg": "SHA-256",

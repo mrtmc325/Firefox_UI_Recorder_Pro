@@ -25,7 +25,7 @@ Core recorder and report features do not require external network services. Free
 
 Licensing (only after the user enters a purchase email to activate):
 
-1. To activate, the extension sends the purchase email, a random per-install identifier, and the extension version to the owner-operated license server over HTTPS.
+1. To activate, the extension sends the purchase email, a random per-install identifier, and the extension version to the owner-operated license server (https://uiprofirefox.conner.house) over HTTPS.
 2. While licensed, the extension re-validates every 48 hours by sending the install identifier and an activation token to the same server.
 3. No recorded page content, screenshots, report data, URLs, or personal data beyond the activation email and the random install id are ever sent to the license server.
 4. The email is used only to look up the purchase and count seats; the server stores a hashed prefix of it in logs, not the full address.
