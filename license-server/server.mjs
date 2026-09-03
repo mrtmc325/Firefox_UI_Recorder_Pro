@@ -12,6 +12,7 @@ import { randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual, createHas
 import { promisify } from "node:util";
 import { openDb, normalizeEmail, clampSeats } from "./db.mjs";
 import { verifyPreamble, NonceCache, PREAMBLE_HEADER, CLIENT_HEADER } from "./preamble.mjs";
+import { loadPrivateKey, signActivationToken } from "./token.mjs";
 
 const scrypt = promisify(scryptCb);
 const API_ROUTES = new Set(["/api/v1/activate", "/api/v1/validate", "/api/v1/deactivate"]);
@@ -26,7 +27,13 @@ export function loadConfig(env = process.env) {
     bind: env.LICENSE_BIND || "0.0.0.0",
     dbPath: env.LICENSE_DB_PATH || "./data/license.db",
     clientHmac: String(env.LICENSE_CLIENT_HMAC || ""),
+    clientHmacPrev: String(env.LICENSE_CLIENT_HMAC_PREV || ""), // accepted during a key rotation
+    signingKeyB64: String(env.LICENSE_SIGNING_KEY || ""),        // Ed25519 PKCS8 (base64) from cli.mjs gen-signing-key
     adminPasswordHash: String(env.LICENSE_ADMIN_PASSWORD_HASH || ""),
+    adminPort: Number(env.LICENSE_ADMIN_PORT || 0),             // if set, /admin is served ONLY on this port
+    adminBind: env.LICENSE_ADMIN_BIND || "127.0.0.1",           // admin listener interface (loopback by default)
+    adminPublic: env.LICENSE_ADMIN_PUBLIC === "1",               // serve /admin on the PUBLIC port too (discouraged)
+    adminAllowIps: String(env.LICENSE_ADMIN_ALLOW_IPS || "").split(",").map((x) => x.trim()).filter(Boolean),
     tlsCertFile: env.LICENSE_TLS_CERT_FILE || "",
     tlsKeyFile: env.LICENSE_TLS_KEY_FILE || "",
     allowHttp: env.LICENSE_ALLOW_HTTP === "1",
@@ -36,6 +43,7 @@ export function loadConfig(env = process.env) {
   };
   if (cfg.clientHmac.length < 32) throw new Error("LICENSE_CLIENT_HMAC must be at least 32 characters (node cli.mjs gen-hmac)");
   if (!cfg.adminPasswordHash.startsWith("scrypt$")) throw new Error("LICENSE_ADMIN_PASSWORD_HASH must come from `node cli.mjs hash-password`");
+  if (!cfg.signingKeyB64) throw new Error("LICENSE_SIGNING_KEY (Ed25519 PKCS8 base64) is required — run `node cli.mjs gen-signing-key`");
   if (!cfg.tlsCertFile && !cfg.allowHttp) throw new Error("Set LICENSE_TLS_CERT_FILE/LICENSE_TLS_KEY_FILE, or LICENSE_ALLOW_HTTP=1 only behind a TLS-terminating proxy");
   return cfg;
 }
@@ -87,6 +95,9 @@ export function createLicenseServer(cfg, store) {
   const nonces = new NonceCache();
   const rate = new RateLimiter();
   const sessions = new Map();
+  const signingKey = loadPrivateKey(cfg.signingKeyB64);
+  const hmacs = [cfg.clientHmac, cfg.clientHmacPrev].filter(Boolean);
+  const loginFails = new Map(); // ip -> { count, until } exponential lockout on top of the rate limit
   const tls = !!cfg.tlsCertFile;
 
   const baseHeaders = () => ({
@@ -126,7 +137,7 @@ export function createLicenseServer(cfg, store) {
     if (!String(req.headers[CLIENT_HEADER] || "").startsWith(cfg.clientNamePrefix)) return notFound(res);
     const body = await readBody(req, 4096);
     if (body === null) return notFound(res);
-    const check = verifyPreamble(cfg.clientHmac, req.headers[PREAMBLE_HEADER], { method: "POST", path, body, nonces });
+    const check = verifyPreamble(hmacs, req.headers[PREAMBLE_HEADER], { method: "POST", path, body, nonces });
     if (!check.ok) { log("api.rejected", { cid, ip, path, reason: check.reason }); return notFound(res); }
     let payload;
     try { payload = JSON.parse(body); } catch (_) { return notFound(res); }
@@ -146,7 +157,12 @@ export function createLicenseServer(cfg, store) {
       result = action === "validate" ? store.validate({ email, installId, activationId }) : store.deactivate({ email, installId, activationId });
     }
     log(`api.${action}`, { cid, ip, email: emailTag(email), install: installId.slice(0, 8), status: result.status, ok: !!result.ok, demoted: result.demoted || 0 });
-    return json(res, 200, origin, { ...result, validateEveryHours: cfg.validateEveryHours });
+    // Minimal response: never leak seat counts / activation ids / demotion flags. On success, hand back a
+    // short-lived Ed25519-signed token the extension can verify offline; on failure, only the status.
+    if (action === "deactivate") return json(res, 200, origin, { ok: !!result.ok, status: result.status });
+    if (!result.ok) return json(res, 200, origin, { ok: false, status: result.status, ...(result.reason ? { reason: result.reason } : {}) });
+    const signed = signActivationToken(signingKey, { installId: result.installId, email: result.email, activationId: result.activationId });
+    return json(res, 200, origin, { ok: true, status: "active", token: signed.token, sig: signed.sig, validateEveryHours: cfg.validateEveryHours });
   }
 
   // ---------------- Admin ----------------
@@ -173,17 +189,38 @@ export function createLicenseServer(cfg, store) {
   }
   const loginPage = (msg = "") => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>License server · Log in</title><style>body{font:14px system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;background:#f6f7f9}form{background:#fff;padding:24px 28px;border-radius:10px;border:1px solid #e5e7eb;min-width:300px}input,button{font:inherit;padding:8px 10px;width:100%;box-sizing:border-box;margin-top:6px;border-radius:6px;border:1px solid #cbd5e1}button{background:#1f2937;color:#fff;border-color:#1f2937;margin-top:12px}.err{color:#b91c1c}</style></head><body><form method="post" action="/admin/login"><h1 style="margin:0 0 10px;font-size:18px">License server</h1>${msg ? `<p class="err">${esc(msg)}</p>` : ""}<label>Admin password<input type="password" name="password" autocomplete="current-password" required autofocus></label><button>Log in</button></form></body></html>`;
 
-  async function handleAdmin(req, res, url, ip, cid) {
+  function adminReachable(req, ip, onAdminListener) {
+    if (onAdminListener) return true;   // the dedicated admin listener is bound to loopback (or an interface the owner controls)
+    if (cfg.adminPublic) return true;   // owner opted the public port in
+    if (isLoopback(req.socket.remoteAddress)) return true;
+    return cfg.adminAllowIps.includes(ip);
+  }
+  async function handleAdmin(req, res, url, ip, cid, onAdminListener) {
     if (!tls && !cfg.allowHttp) return notFound(res);
+    // Admin is not internet-reachable by default. Preferred: run a dedicated LICENSE_ADMIN_PORT bound to
+    // loopback and reach it over an SSH tunnel. On the public port, admin is refused unless the caller is
+    // loopback / allowlisted / LICENSE_ADMIN_PUBLIC=1. This is the primary server-takeover mitigation.
+    if (!adminReachable(req, ip, onAdminListener)) { log("admin.blocked", { cid, ip, path: url.pathname }); return notFound(res); }
     const path = url.pathname;
     if (path === "/admin/login") {
       if (req.method === "GET") return html(res, 200, loginPage());
       if (req.method !== "POST") return notFound(res);
+      const lock = loginFails.get(ip);
+      if (lock && lock.until > Date.now()) { log("admin.login.locked", { cid, ip, until: lock.until }); return html(res, 429, loginPage("Too many attempts. Try again later.")); }
       if (!rate.take(`login:${ip}`, 5)) { log("admin.login.ratelimited", { cid, ip }); return html(res, 429, loginPage("Too many attempts. Wait a minute.")); }
       const form = await readForm(req);
       const ok = form && await verifyPassword(String(form.password || ""), cfg.adminPasswordHash);
       log("admin.login", { cid, ip, ok: !!ok });
-      if (!ok) return html(res, 401, loginPage("Wrong password."));
+      if (!ok) {
+        const prev = loginFails.get(ip) || { count: 0 };
+        const count = prev.count + 1;
+        // exponential backoff: lock after 5 fails, doubling from 30 s up to 1 h
+        const until = count >= 5 ? Date.now() + Math.min(60 * 60 * 1000, 30 * 1000 * 2 ** (count - 5)) : 0;
+        loginFails.set(ip, { count, until });
+        if (loginFails.size > 10000) for (const [k, v] of loginFails) if (!v.until || v.until < Date.now()) loginFails.delete(k);
+        return html(res, 401, loginPage("Wrong password."));
+      }
+      loginFails.delete(ip);
       const sid = randomBytes(32).toString("hex");
       sessions.set(sid, { csrf: randomBytes(16).toString("hex"), exp: Date.now() + SESSION_TTL_MS });
       return redirect(res, "/admin", { "Set-Cookie": cookieFor(sid) });
@@ -238,34 +275,47 @@ export function createLicenseServer(cfg, store) {
     return notFound(res);
   }
 
-  async function handle(req, res) {
+  const makeHandler = (onAdminListener) => async (req, res) => {
     const cid = randomUUID().slice(0, 8);
     const ip = clientIp(req);
     let url;
     try { url = new URL(req.url, "http://localhost"); } catch (_) { return notFound(res); }
     try {
+      const isAdmin = url.pathname === "/admin" || url.pathname.startsWith("/admin/");
+      // The dedicated admin listener serves ONLY /admin; the public listener serves ONLY the API/health and
+      // hides /admin entirely whenever a dedicated admin port is configured.
+      if (onAdminListener) {
+        if (!isAdmin) return notFound(res);
+        return await handleAdmin(req, res, url, ip, cid, true);
+      }
       if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url.pathname, ip, cid);
       if (url.pathname === "/healthz") return isLoopback(req.socket.remoteAddress) ? (res.writeHead(200, baseHeaders()), res.end("ok")) : notFound(res);
-      if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return await handleAdmin(req, res, url, ip, cid);
+      if (isAdmin) { if (cfg.adminPort) return notFound(res); return await handleAdmin(req, res, url, ip, cid, false); }
       return notFound(res);
     } catch (err) {
       log("error", { cid, ip, path: url.pathname, error: String((err && err.message) || err).slice(0, 200) });
       if (!res.headersSent) { res.writeHead(url.pathname.startsWith("/admin") ? 500 : 404, baseHeaders()); res.end(url.pathname.startsWith("/admin") ? `Error ${cid}` : ""); }
     }
-  }
+  };
 
-  const server = tls
-    ? https.createServer({ cert: readFileSync(cfg.tlsCertFile), key: readFileSync(cfg.tlsKeyFile), minVersion: "TLSv1.2", honorCipherOrder: true }, handle)
-    : http.createServer(handle);
-  server.headersTimeout = 10_000; server.requestTimeout = 15_000; server.keepAliveTimeout = 5_000;
-  return { server, sessions, close: () => new Promise((r) => server.close(() => r())) };
+  const mk = (handler) => {
+    const srv = tls
+      ? https.createServer({ cert: readFileSync(cfg.tlsCertFile), key: readFileSync(cfg.tlsKeyFile), minVersion: "TLSv1.2", honorCipherOrder: true }, handler)
+      : http.createServer(handler);
+    srv.headersTimeout = 10_000; srv.requestTimeout = 15_000; srv.keepAliveTimeout = 5_000; srv.maxConnections = 4096;
+    return srv;
+  };
+  const server = mk(makeHandler(false));
+  const adminServer = cfg.adminPort ? mk(makeHandler(true)) : null;
+  return { server, adminServer, sessions, close: () => Promise.all([new Promise((r) => server.close(() => r())), adminServer ? new Promise((r) => adminServer.close(() => r())) : Promise.resolve()]) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const cfg = loadConfig();
   const store = openDb(cfg.dbPath);
-  const { server } = createLicenseServer(cfg, store);
+  const { server, adminServer } = createLicenseServer(cfg, store);
   server.listen(cfg.port, cfg.bind, () => log("listening", { port: cfg.port, bind: cfg.bind, tls: !!cfg.tlsCertFile, db: cfg.dbPath }));
-  const stop = () => { log("shutdown"); server.close(() => { store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 3000).unref(); };
+  if (adminServer) adminServer.listen(cfg.adminPort, cfg.adminBind, () => log("admin-listening", { port: cfg.adminPort, bind: cfg.adminBind }));
+  const stop = () => { log("shutdown"); server.close(); if (adminServer) adminServer.close(); setTimeout(() => { store.close(); process.exit(0); }, 500).unref(); };
   process.on("SIGTERM", stop); process.on("SIGINT", stop);
 }

@@ -870,19 +870,19 @@ function clearRecordingTabSelection(reason = "clear") {
 }
 
 // ---------------- Licensing ----------------
-// Free installs never contact the license server. Activation is a user action from the popup; while
-// licensed the background re-validates every LICENSE_VALIDATE_INTERVAL_MS and drops back to free after
-// LICENSE_MAX_FAILURES consecutive failed check-ins or a revoked/unknown answer. Seats are enforced by
-// the server (the oldest device is demoted when a purchase's seat count is exceeded).
-const LICENSE_SERVER_ORIGIN = "https://license.example.invalid"; // placeholder: set to the owner's host before the store build
-// Shared HMAC key with the license server (LICENSE_CLIENT_HMAC on the server side), set by the owner
-// before the store build and kept empty in the repo so no key is committed. It ships inside a public
-// extension, so it only filters scanners and casual abuse; seats and revocation are enforced server-side.
+// Free installs never contact the license server. Activation is a user action from the popup. Licensed
+// status is proven by a short-lived Ed25519 token the server signs; the extension marks itself licensed
+// only when that signature verifies against the baked public key and the token has not expired — editing
+// stored data cannot forge it. The token is refreshed on a 48 h check-in and expires after ~7 days
+// offline. Seats are enforced by the server (the oldest device is demoted when a purchase is oversubscribed).
+const LICENSE_SERVER_ORIGIN = ""; // owner: set to the HTTPS license host before the store build
 const LICENSE_CLIENT_HMAC = ""; // owner: paste the value from `node license-server/cli.mjs gen-hmac`
-const LICENSE_CLIENT_HMAC_OVERRIDE_KEY = "__uiRecorderLicenseClientSecretOverride"; // honored only with the loopback origin override (local harness)
+const LICENSE_SIGNING_PUBLIC_KEY = ""; // owner: raw Ed25519 public key (base64) from `node license-server/cli.mjs gen-signing-key`
 const LICENSE_STORAGE_KEY = "__uiRecorderLicense";
 const LICENSE_INSTALL_ID_KEY = "__uiRecorderInstallId";
-const LICENSE_SERVER_OVERRIDE_KEY = "__uiRecorderLicenseServerOverride"; // honored for loopback http only (local harness)
+const LICENSE_SERVER_OVERRIDE_KEY = "__uiRecorderLicenseServerOverride"; // loopback http only (local harness)
+const LICENSE_CLIENT_HMAC_OVERRIDE_KEY = "__uiRecorderLicenseClientSecretOverride"; // loopback only (local harness)
+const LICENSE_SIGNING_PUB_OVERRIDE_KEY = "__uiRecorderLicenseSigningPubOverride"; // loopback only (local harness)
 const LICENSE_VALIDATE_INTERVAL_MS = 48 * 60 * 60 * 1000;
 const LICENSE_MAX_FAILURES = 10;
 const LICENSE_REQUEST_TIMEOUT_MS = 15000;
@@ -891,13 +891,25 @@ const LICENSE_EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,63}$/;
 let licenseState = freeLicenseState();
 let licenseInstallId = "";
 let licenseTimer = null;
+let licenseVerifyKeyCache = null; // { pub, keyPromise }
 
 function freeLicenseState(extra = {}) {
-  return { status: "free", email: "", activationId: "", activatedAt: 0, lastValidatedAt: 0, lastCheckAt: 0, failures: 0, lastError: "", ...extra };
+  return { status: "free", email: "", activationId: "", exp: 0, token: "", sig: "", activatedAt: 0, lastValidatedAt: 0, lastCheckAt: 0, failures: 0, lastError: "", ...extra };
 }
 
+// Licensed iff the in-memory status is "active", which is set ONLY after a token signature verifies. The
+// persisted blob carries no status field, so there is nothing a user can flip in storage to become licensed.
 function isLicensed() {
   return licenseState.status === "active";
+}
+
+function b64urlToBytes(str) {
+  let s = String(str || "").replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 // Step screenshots only: GIF burst frames live in the spool and are capped separately.
@@ -926,21 +938,86 @@ function licenseSummary() {
     activatedAt: licenseState.activatedAt,
     lastValidatedAt: licenseState.lastValidatedAt,
     lastCheckAt: licenseState.lastCheckAt,
+    expiresAt: licenseState.exp,
     failures: licenseState.failures,
     maxFailures: LICENSE_MAX_FAILURES,
     lastError: licenseState.lastError,
-    server: LICENSE_SERVER_ORIGIN,
     freeTier: FREE_TIER,
     usage: { screenshots: countReportScreenshots(events), bursts: countBurstRuns(events) }
   };
 }
 
+// Persist only the signed token and timing/counters — never a status/email/activationId the user could edit
+// to gain license. Status, email, activation id, and expiry are re-derived by verifying the token on load.
 async function saveLicenseState() {
   try {
-    await browser.storage.local.set({ [LICENSE_STORAGE_KEY]: licenseState });
+    const tok = licenseState.token || "";
+    const sg = licenseState.sig || "";
+    await browser.storage.local.set({ [LICENSE_STORAGE_KEY]: {
+      token: tok, sig: sg,
+      activatedAt: licenseState.activatedAt || 0, lastValidatedAt: licenseState.lastValidatedAt || 0,
+      lastCheckAt: licenseState.lastCheckAt || 0, failures: licenseState.failures || 0, lastError: licenseState.lastError || ""
+    } });
   } catch (err) {
     bgWarn("license:save-failed", { error: formatError(err) });
   }
+}
+
+async function resolveLicenseEndpoint() {
+  try {
+    const stored = await browser.storage.local.get([LICENSE_SERVER_OVERRIDE_KEY, LICENSE_CLIENT_HMAC_OVERRIDE_KEY, LICENSE_SIGNING_PUB_OVERRIDE_KEY]);
+    const override = stored[LICENSE_SERVER_OVERRIDE_KEY];
+    if (typeof override === "string" && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(override)) {
+      const hmac = stored[LICENSE_CLIENT_HMAC_OVERRIDE_KEY];
+      const pub = stored[LICENSE_SIGNING_PUB_OVERRIDE_KEY];
+      return {
+        origin: override,
+        hmac: typeof hmac === "string" ? hmac : LICENSE_CLIENT_HMAC,
+        pub: typeof pub === "string" ? pub : LICENSE_SIGNING_PUBLIC_KEY
+      };
+    }
+  } catch (_) {}
+  return { origin: LICENSE_SERVER_ORIGIN, hmac: LICENSE_CLIENT_HMAC, pub: LICENSE_SIGNING_PUBLIC_KEY };
+}
+
+async function licenseVerifyKey(pub) {
+  if (!pub) return null;
+  if (!licenseVerifyKeyCache || licenseVerifyKeyCache.pub !== pub) {
+    licenseVerifyKeyCache = { pub, keyPromise: crypto.subtle.importKey("raw", b64urlToBytes(pub), { name: "Ed25519" }, false, ["verify"]).catch(() => null) };
+  }
+  return licenseVerifyKeyCache.keyPromise;
+}
+
+// Verify a server-signed token: Ed25519 over the token string's UTF-8 bytes, then claim checks. Returns the
+// claims on success, null otherwise. Fails closed on any error (missing key, bad sig, expired, wrong install).
+async function verifyLicenseToken(token, sig, pub) {
+  try {
+    const key = await licenseVerifyKey(pub);
+    if (!key || !token || !sig) return null;
+    const ok = await crypto.subtle.verify("Ed25519", key, b64urlToBytes(sig), new TextEncoder().encode(String(token)));
+    if (!ok) return null;
+    const claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(token)));
+    if (claims.v !== 1) return null;
+    if (!(Number(claims.exp) > Date.now())) return null;
+    if (claims.installId !== licenseInstallId) return null;
+    if (!LICENSE_EMAIL_RE.test(String(claims.email || ""))) return null;
+    return claims;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function applyLicenseToken(token, sig, pub) {
+  const claims = await verifyLicenseToken(token, sig, pub);
+  if (!claims) return false;
+  const now = Date.now();
+  licenseState = {
+    status: "active", email: claims.email, activationId: claims.activationId, exp: Number(claims.exp),
+    token, sig, activatedAt: licenseState.activatedAt || now, lastValidatedAt: now, lastCheckAt: now, failures: 0, lastError: ""
+  };
+  await saveLicenseState();
+  scheduleLicenseValidation();
+  return true;
 }
 
 async function loadLicenseState() {
@@ -952,31 +1029,28 @@ async function loadLicenseState() {
     await browser.storage.local.set({ [LICENSE_INSTALL_ID_KEY]: licenseInstallId });
   }
   const raw = stored[LICENSE_STORAGE_KEY];
-  const validActive = raw && typeof raw === "object" && raw.status === "active"
-    && /^[0-9a-f]{64}$/.test(String(raw.activationId || "")) && LICENSE_EMAIL_RE.test(String(raw.email || ""));
-  licenseState = validActive
-    ? { ...freeLicenseState(), ...raw, status: "active", failures: Math.max(0, Number(raw.failures) || 0) }
-    : freeLicenseState({ email: raw && typeof raw.email === "string" ? raw.email : "" });
-  scheduleLicenseValidation();
-  bgLog("license:loaded", { status: licenseState.status, failures: licenseState.failures });
-}
-
-async function resolveLicenseEndpoint() {
-  try {
-    const stored = await browser.storage.local.get([LICENSE_SERVER_OVERRIDE_KEY, LICENSE_CLIENT_HMAC_OVERRIDE_KEY]);
-    const override = stored[LICENSE_SERVER_OVERRIDE_KEY];
-    if (typeof override === "string" && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(override)) {
-      const hmac = stored[LICENSE_CLIENT_HMAC_OVERRIDE_KEY];
-      return { origin: override, hmac: typeof hmac === "string" ? hmac : LICENSE_CLIENT_HMAC };
+  licenseState = freeLicenseState();
+  if (raw && typeof raw === "object" && raw.token && raw.sig) {
+    const { pub } = await resolveLicenseEndpoint();
+    const claims = await verifyLicenseToken(raw.token, raw.sig, pub);
+    if (claims) {
+      licenseState = {
+        status: "active", email: claims.email, activationId: claims.activationId, exp: Number(claims.exp),
+        token: raw.token, sig: raw.sig, activatedAt: Number(raw.activatedAt) || Date.now(),
+        lastValidatedAt: Number(raw.lastValidatedAt) || 0, lastCheckAt: Number(raw.lastCheckAt) || 0,
+        failures: Math.max(0, Number(raw.failures) || 0), lastError: ""
+      };
     }
-  } catch (_) {}
-  return { origin: LICENSE_SERVER_ORIGIN, hmac: LICENSE_CLIENT_HMAC };
+  }
+  scheduleLicenseValidation();
+  bgLog("license:loaded", { status: licenseState.status, exp: licenseState.exp });
+  return licenseState;
 }
 
 const hexOfBytes = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
-// Request preamble the server checks before anything else: v1.<ts>.<nonce>.<HMAC-SHA256>, where the
-// MAC covers the timestamp, nonce, method, path, and a hash of the JSON body (see license-server/preamble.mjs).
+// Request preamble the server checks first: v1.<ts>.<nonce>.<HMAC-SHA256> over ts, nonce, method, path,
+// and a hash of the JSON body (see license-server/preamble.mjs).
 async function licensePreamble(hmac, path, body) {
   const enc = new TextEncoder();
   const ts = String(Date.now());
@@ -988,7 +1062,7 @@ async function licensePreamble(hmac, path, body) {
 }
 
 async function licenseRequest(action, payload) {
-  const { origin, hmac } = await resolveLicenseEndpoint();
+  const { origin, hmac, pub } = await resolveLicenseEndpoint();
   if (!/^https:\/\/[^/]+$/.test(origin) && !/^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(origin)) throw new Error("License server origin must be https");
   if (!hmac) throw new Error("License client HMAC key is not configured");
   const path = `/api/v1/${action}`;
@@ -997,11 +1071,7 @@ async function licenseRequest(action, payload) {
   const timer = setTimeout(() => controller.abort(), LICENSE_REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(origin + path, {
-      method: "POST",
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "error",
-      signal: controller.signal,
+      method: "POST", cache: "no-store", credentials: "omit", redirect: "error", signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         "X-UIR-Client": `ui-recorder-pro/${browser.runtime.getManifest().version}`,
@@ -1012,33 +1082,26 @@ async function licenseRequest(action, payload) {
     if (res.status !== 200) throw new Error(`license server answered ${res.status}`);
     const data = await res.json();
     if (!data || typeof data !== "object" || typeof data.status !== "string") throw new Error("malformed license response");
-    return data;
+    return { data, pub };
   } finally {
     clearTimeout(timer);
   }
 }
 
 function scheduleLicenseValidation() {
-  if (licenseTimer) {
-    clearTimeout(licenseTimer);
-    licenseTimer = null;
-  }
+  if (licenseTimer) { clearTimeout(licenseTimer); licenseTimer = null; }
   if (!isLicensed()) return;
   const base = Math.max(Number(licenseState.lastCheckAt) || 0, Number(licenseState.activatedAt) || 0);
-  const wait = Math.max(60 * 1000, base + LICENSE_VALIDATE_INTERVAL_MS - Date.now());
-  licenseTimer = setTimeout(() => {
-    licenseTimer = null;
-    validateLicense("timer").catch(() => {});
-  }, Math.min(wait, 2147483647));
+  const byInterval = base + LICENSE_VALIDATE_INTERVAL_MS - Date.now();
+  // Always re-check at least an hour before the token expires, so a valid device never lapses on cadence alone.
+  const beforeExpiry = (Number(licenseState.exp) || Date.now()) - Date.now() - 60 * 60 * 1000;
+  const wait = Math.max(60 * 1000, Math.min(byInterval, beforeExpiry));
+  licenseTimer = setTimeout(() => { licenseTimer = null; validateLicense("timer").catch(() => {}); }, Math.min(wait, 2147483647));
 }
 
 function demoteLicense(reason) {
-  const email = licenseState.email;
-  licenseState = freeLicenseState({ email, lastError: reason });
-  if (licenseTimer) {
-    clearTimeout(licenseTimer);
-    licenseTimer = null;
-  }
+  licenseState = freeLicenseState({ lastError: reason });
+  if (licenseTimer) { clearTimeout(licenseTimer); licenseTimer = null; }
   bgLog("license:demoted", { reason });
 }
 
@@ -1046,43 +1109,42 @@ async function activateLicense(emailRaw) {
   const email = String(emailRaw || "").trim().toLowerCase();
   if (!LICENSE_EMAIL_RE.test(email)) return { ok: false, status: "invalid-email" };
   if (!licenseInstallId) await loadLicenseState();
-  let data;
+  let res;
   try {
-    data = await licenseRequest("activate", { email, installId: licenseInstallId, extVersion: browser.runtime.getManifest().version });
+    res = await licenseRequest("activate", { email, installId: licenseInstallId, extVersion: browser.runtime.getManifest().version });
   } catch (err) {
     licenseState.lastError = formatError(err);
     await saveLicenseState();
     bgWarn("license:activate-failed", { error: licenseState.lastError });
     return { ok: false, status: "unreachable", error: licenseState.lastError };
   }
-  if (!data.ok || data.status !== "active" || !/^[0-9a-f]{64}$/.test(String(data.activationId || ""))) {
+  const { data, pub } = res;
+  if (!data.ok || data.status !== "active" || !data.token || !data.sig) {
     licenseState.lastError = String(data.status || "rejected");
     await saveLicenseState();
     return { ok: false, status: String(data.status || "rejected") };
   }
-  const now = Date.now();
-  licenseState = { status: "active", email, activationId: data.activationId, activatedAt: now, lastValidatedAt: now, lastCheckAt: now, failures: 0, lastError: "" };
-  await saveLicenseState();
-  scheduleLicenseValidation();
-  bgLog("license:activated", { seats: data.seats, activeSeats: data.activeSeats, demoted: data.demoted || 0 });
-  return { ok: true, status: "active", seats: data.seats, activeSeats: data.activeSeats, demoted: data.demoted || 0 };
+  if (!(await applyLicenseToken(data.token, data.sig, pub))) {
+    licenseState.lastError = "token-verify-failed";
+    await saveLicenseState();
+    return { ok: false, status: "token-invalid" };
+  }
+  bgLog("license:activated", {});
+  return { ok: true, status: "active" };
 }
 
 async function validateLicense(reason) {
   if (!isLicensed()) return { ok: false, status: "free" };
   const now = Date.now();
   try {
-    const data = await licenseRequest("validate", { email: licenseState.email, installId: licenseInstallId, activationId: licenseState.activationId });
+    const { data, pub } = await licenseRequest("validate", { email: licenseState.email, installId: licenseInstallId, activationId: licenseState.activationId });
     licenseState.lastCheckAt = now;
-    if (data.ok && data.status === "active") {
-      licenseState.failures = 0;
-      licenseState.lastValidatedAt = now;
-      licenseState.lastError = "";
+    if (data.ok && data.status === "active" && data.token && data.sig) {
+      if (!(await applyLicenseToken(data.token, data.sig, pub))) { licenseState.failures += 1; licenseState.lastError = "token-verify-failed"; }
     } else if (data.status === "revoked" || data.status === "unknown") {
-      demoteLicense(`server:${data.status}${data.reason ? ":" + data.reason : ""}`);
+      demoteLicense(`server:${data.status}`);
     } else {
-      licenseState.failures += 1;
-      licenseState.lastError = String(data.status);
+      licenseState.failures += 1; licenseState.lastError = String(data.status);
     }
   } catch (err) {
     licenseState.lastCheckAt = now;
@@ -1090,6 +1152,8 @@ async function validateLicense(reason) {
     licenseState.lastError = formatError(err);
     bgWarn("license:validate-failed", { reason, failures: licenseState.failures, error: licenseState.lastError });
   }
+  // Hard stops that tampering/offline use cannot extend: an expired token, or too many failed check-ins.
+  if (isLicensed() && !(Number(licenseState.exp) > Date.now())) demoteLicense("token-expired");
   if (isLicensed() && licenseState.failures >= LICENSE_MAX_FAILURES) demoteLicense(`check-in-failures:${licenseState.failures}`);
   await saveLicenseState();
   scheduleLicenseValidation();

@@ -10,6 +10,10 @@ import { startSite } from "./site.mjs";
 // the harness and inject it into both the server (env) and the extension (loopback-only override key).
 import { randomBytes } from "node:crypto";
 const SECRET = randomBytes(24).toString("hex");
+// The hardened server signs activation tokens with an Ed25519 key; the extension verifies with the matching
+// public key. Generate a pair for the harness: private -> server env, public -> loopback-only override.
+const { generateSigningKeyPair } = await import(`${REPO}/license-server/token.mjs`);
+const SIGKEYS = generateSigningKeyPair();
 
 let pass = 0, fail = 0;
 const check = (name, cond, detail) => { if (cond) { pass++; console.log(`  PASS  ${name}`); } else { fail++; console.log(`  FAIL  ${name}${detail ? " — " + detail : ""}`); } };
@@ -22,7 +26,8 @@ async function hashPw(pw) {
 
 async function startServer(port) {
   const env = { ...process.env, LICENSE_PORT: String(port), LICENSE_BIND: "127.0.0.1", LICENSE_DB_PATH: ":memory:",
-    LICENSE_CLIENT_HMAC: SECRET, LICENSE_ADMIN_PASSWORD_HASH: await hashPw("harness-admin-password"), LICENSE_ALLOW_HTTP: "1" };
+    LICENSE_CLIENT_HMAC: SECRET, LICENSE_ADMIN_PASSWORD_HASH: await hashPw("harness-admin-password"), LICENSE_ALLOW_HTTP: "1",
+    LICENSE_SIGNING_KEY: SIGKEYS.privateKeyB64 }; // gitleaks:allow  — SIGKEYS is generated per run (randomBytes), not a stored secret
   const proc = spawn("node", [`${REPO}/license-server/server.mjs`], { env, stdio: ["ignore", "pipe", "pipe"] });
   await new Promise((res, rej) => {
     const to = setTimeout(() => rej(new Error("server did not start")), 8000);
@@ -62,7 +67,7 @@ async function main() {
 
     const page = ff.ctx; await ff.viewport(page, 1100, 800); await ff.goto(page, site.url);
     const pop = await ff.openExt(`${EXT}/popup.html`); await ff.viewport(pop, 420, 1200); await sleep(600);
-    await ff.evalIn(pop, `browser.storage.local.set({ __uiRecorderLicenseServerOverride: ${JSON.stringify(base)}, __uiRecorderLicenseClientSecretOverride: ${JSON.stringify(SECRET)} })`);
+    await ff.evalIn(pop, `browser.storage.local.set({ __uiRecorderLicenseServerOverride: ${JSON.stringify(base)}, __uiRecorderLicenseClientSecretOverride: ${JSON.stringify(SECRET)}, __uiRecorderLicenseSigningPubOverride: ${JSON.stringify(SIGKEYS.publicKeyB64)} })`);
     // grant host permission (needed to record for the screenshot-cap check)
     await ff.grantHostPermissions();
 
@@ -87,7 +92,7 @@ async function main() {
     // second device (simulated) takes the only seat and demotes device 1 on its next validate
     const install2 = "22222222-2222-4222-8222-222222222222";
     const a2 = await apiCall(ff, pop, base, "activate", { email: "team@example.test", installId: install2, extVersion: "harness" });
-    check("second device activates (server side)", a2.body && a2.body.ok === true && a2.body.demoted === 1, JSON.stringify(a2.body));
+    check("second device activates (server side, response is minimized: no seat/demotion leak)", a2.body && a2.body.ok === true && a2.body.demoted === undefined && a2.body.activeSeats === undefined, JSON.stringify(a2.body));
     await bg(`return bg.validateLicense('manual');`);
     const v = await bg(`return bg.licenseSummary();`);
     check("device 1 is demoted to free after the seat is taken", v.status === "free", JSON.stringify({ status: v.status, err: v.lastError }));

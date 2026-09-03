@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.24.0 - 2026-09-03
+
+### Changed — license hardening (server-authoritative, tamper-resistant client state)
+- Client license state is now an **Ed25519-signed activation token**: the extension marks itself licensed only when the token's signature verifies against a baked public key and it is unexpired. There is no stored `status` flag to edit, so a user can no longer flip a value in `storage.local` from free to active. Forging a token requires the server's private key.
+- The license server signs tokens with `LICENSE_SIGNING_KEY` (new, required; generate with `node cli.mjs gen-signing-key`). API responses are minimized — no seat counts, active-device counts, or demotion flags — so the endpoint cannot be used to enumerate the customer base.
+- Admin UI moved to a dedicated loopback listener (`LICENSE_ADMIN_PORT`, published to host loopback and reached over an SSH tunnel), off the public API port; login gains an exponential per-IP lockout. No API path can create a license.
+- Stability at scale: a single process sustains ~500 requests/second of activation/validation (loopback load test: 0 errors, p99 ≈ 3–5 ms). Nonce replay-tracking is now generational (bounded memory, never refuses legitimate load) and `last_seen` writes are throttled to once/hour/device. The client HMAC key can be rotated without downtime via `LICENSE_CLIENT_HMAC_PREV`.
+- Removed the in-popup text describing the activation request contents (install id / version / check-in cadence) to avoid publishing the license workflow in the UI. `PRIVACY.md` remains the disclosure of what is sent.
+- Added `sbom/generate.mjs` (regenerates the license-server SBOM) and token/tamper + admin-isolation + login-lockout tests. No new dependencies (still Node.js standard library only).
+
 ## v1.23.0 - 2026-09-03
 
 ### Added — licensing (free tier + email activation, owner-hosted server)
