@@ -134,3 +134,9 @@ Updated 2026-07-14: secure-at-rest caveats rewritten for purge-on-enable + skele
 Updated 2026-07-14: Tier-1 — lifecycle diagram now shows `Recording --> Paused : host permission revoked` and `Paused --> Recording : host permission re-granted (manual resume)`, plus a one-line note on the `host-permission-revoked` popup status and `pauseLimitationReason`.
 
 Updated 2026-09-02: redaction setting now also masks detected sensitive fields in screenshots and scrubs secret query/fragment params from recorded URLs; label text updated accordingly.
+
+## License server
+
+Activation and seat enforcement run on an owner-hosted service under `license-server/` (Node.js standard library, `node:sqlite`). It is not part of the extension and is excluded from the AMO package. Setup, deployment (Docker/systemd), the admin UI, and the API contract are documented in `license-server/README.md`. Free installs never contact it.
+
+Updated 2026-09-03: license server added (v1.23.0).

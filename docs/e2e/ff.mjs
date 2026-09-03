@@ -52,6 +52,11 @@ class Marionette {
     try { return (await this.cmd('WebDriver:ExecuteScript', { script, args })).value; }
     finally { await this.cmd('Marionette:SetContext', { value: 'content' }); }
   }
+  async chromeAsync(script, args = []) {
+    await this.cmd('Marionette:SetContext', { value: 'chrome' });
+    try { return (await this.cmd('WebDriver:ExecuteAsyncScript', { script, args, scriptTimeout: 10000 })).value; }
+    finally { await this.cmd('Marionette:SetContext', { value: 'content' }); }
+  }
 }
 
 export async function launch({ headless = true, workDir, dpr = 1.5 } = {}) {
@@ -106,7 +111,7 @@ export async function launch({ headless = true, workDir, dpr = 1.5 } = {}) {
   const tree = await send('browsingContext.getTree', {});
 
   const api = {
-    proc, send, m, events, logs, profile, downloads, shots, workDir, ctx: tree.contexts[0].context, sleep,
+    proc, send, m, events, logs, profile, downloads, shots, workDir, ctx: tree.contexts[0].context, sleep, extContexts: new Set(),
     onEvent: (l) => listeners.push(l),
     async tree() { return (await send('browsingContext.getTree', {})).contexts.map((c) => ({ context: c.context, url: c.url })); },
     async children(c) { return (await send('browsingContext.getTree', { root: c })).contexts[0].children.map((x) => ({ context: x.context, url: x.url })); },
@@ -116,10 +121,15 @@ export async function launch({ headless = true, workDir, dpr = 1.5 } = {}) {
       const bcId = await m.chrome('const tab = gBrowser.addTab(arguments[0], { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() }); gBrowser.selectedTab = tab; return String(tab.linkedBrowser.browsingContext.id);', [url]);
       for (let i = 0; i < 80; i++) {
         const hit = (await api.tree()).find((x) => x.context === bcId || x.url === url);
-        if (hit && hit.url === url) { await sleep(300); return hit.context; }
+        if (hit && hit.url === url) { await sleep(300); api.extContexts.add(hit.context); return hit.context; }
         await sleep(150);
       }
       throw new Error('extension tab did not appear: ' + url);
+    },
+    // Grant optional host permissions without a user gesture (extension pages can load in the parent
+    // process, where BiDi input to click a permission button is unavailable). Chrome-scope only.
+    async grantHostPermissions(origins = ['http://*/*', 'https://*/*'], permissions = []) {
+      return m.chromeAsync(`const resolve = arguments[arguments.length - 1]; (async () => { const { ExtensionPermissions } = ChromeUtils.importESModule('resource://gre/modules/ExtensionPermissions.sys.mjs'); const policy = WebExtensionPolicy.getByID(arguments[0]); if (!policy) return 'no-policy'; await ExtensionPermissions.add(arguments[0], { permissions: arguments[2], origins: arguments[1] }, policy.extension); return 'granted'; })().then(resolve, (e) => resolve('err:' + e.message));`, [EXT_ID, origins, permissions]);
     },
     async selectTabByUrlPrefix(prefix) { return m.chrome('for (const tab of gBrowser.tabs) { if (tab.linkedBrowser.currentURI.spec.startsWith(arguments[0])) { gBrowser.selectedTab = tab; return true; } } return false;', [prefix]); },
     // Fire a manifest command (toggle-recording / toggle-burst-capture) through the extension keyset.
@@ -128,7 +138,15 @@ export async function launch({ headless = true, workDir, dpr = 1.5 } = {}) {
       const widgetId = EXT_ID.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
       return m.chrome(`const ks = document.getElementById('ext-keyset-id-' + arguments[1]); if (!ks) return { ok: false, reason: 'no keyset' }; const hit = [...ks.children].find(k => (k.getAttribute('key') || '').toUpperCase() === arguments[0]); if (!hit) return { ok: false }; hit.doCommand(); return { ok: true };`, [letter, widgetId]);
     },
-    async viewport(c, width, height) { return send('browsingContext.setViewport', { context: c, viewport: { width, height } }); },
+    // BiDi setViewport rejects privileged (moz-extension) contexts, so try it, then fall back to a
+    // Marionette OS-window resize (chrome scope), and finally continue best-effort: rect()/scroll_to
+    // scroll elements into view so a smaller window does not fail clicks.
+    async viewport(c, width, height) {
+      try { return await send('browsingContext.setViewport', { context: c, viewport: { width, height } }); }
+      catch (_) {
+        try { await m.cmd('WebDriver:SetWindowRect', { width: Math.round(width), height: Math.round(Math.min(height, 2000)) }); } catch (__) { /* best effort */ }
+      }
+    },
     async shot(c, name, opts = {}) { fs.mkdirSync(shots, { recursive: true }); const r = await send('browsingContext.captureScreenshot', { context: c, origin: opts.full ? 'document' : 'viewport' }); const file = path.join(shots, name.endsWith('.png') ? name : name + '.png'); fs.writeFileSync(file, Buffer.from(r.data, 'base64')); return file; },
     async evalIn(c, expression, { awaitPromise = true } = {}) {
       const r = await send('script.evaluate', { expression, target: { context: c }, awaitPromise, resultOwnership: 'root', serializationOptions: { maxObjectDepth: 8, maxDomDepth: 0 } });

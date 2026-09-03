@@ -98,6 +98,7 @@ let tabScopeDraftWriteQueue = Promise.resolve();
 let burstHotkeyModeActive = false;
 let burstModeEpoch = 0;
 let burstRunId = 0;
+let burstRunStartedAtMs = 0;
 let burstRunTargetFps = 5;
 let burstCaptureLastTs = 0;
 let burstCaptureQueue = Promise.resolve();
@@ -241,6 +242,7 @@ let frameSpoolMaintenanceTimer = null;
 function normalizeBurstLoopPauseReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
   if (!text) return "mode-off";
+  if (text.includes("free-tier")) return text.includes("burst-time") ? "free-tier-burst-time" : "free-tier-bursts";
   if (text.includes("secure-at-rest")) return "secure-at-rest";
   if (text.includes("redaction")) return "redaction-policy";
   if (text.includes("paused")) return "paused";
@@ -867,6 +869,246 @@ function clearRecordingTabSelection(reason = "clear") {
   });
 }
 
+// ---------------- Licensing ----------------
+// Free installs never contact the license server. Activation is a user action from the popup; while
+// licensed the background re-validates every LICENSE_VALIDATE_INTERVAL_MS and drops back to free after
+// LICENSE_MAX_FAILURES consecutive failed check-ins or a revoked/unknown answer. Seats are enforced by
+// the server (the oldest device is demoted when a purchase's seat count is exceeded).
+const LICENSE_SERVER_ORIGIN = "https://license.example.invalid"; // placeholder: set to the owner's host before the store build
+// Shared HMAC key with the license server (LICENSE_CLIENT_HMAC on the server side), set by the owner
+// before the store build and kept empty in the repo so no key is committed. It ships inside a public
+// extension, so it only filters scanners and casual abuse; seats and revocation are enforced server-side.
+const LICENSE_CLIENT_HMAC = ""; // owner: paste the value from `node license-server/cli.mjs gen-hmac`
+const LICENSE_CLIENT_HMAC_OVERRIDE_KEY = "__uiRecorderLicenseClientSecretOverride"; // honored only with the loopback origin override (local harness)
+const LICENSE_STORAGE_KEY = "__uiRecorderLicense";
+const LICENSE_INSTALL_ID_KEY = "__uiRecorderInstallId";
+const LICENSE_SERVER_OVERRIDE_KEY = "__uiRecorderLicenseServerOverride"; // honored for loopback http only (local harness)
+const LICENSE_VALIDATE_INTERVAL_MS = 48 * 60 * 60 * 1000;
+const LICENSE_MAX_FAILURES = 10;
+const LICENSE_REQUEST_TIMEOUT_MS = 15000;
+const FREE_TIER = Object.freeze({ maxBurstMs: 5000, maxBurstsPerReport: 3, maxScreenshotsPerReport: 10 });
+const LICENSE_EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,63}$/;
+let licenseState = freeLicenseState();
+let licenseInstallId = "";
+let licenseTimer = null;
+
+function freeLicenseState(extra = {}) {
+  return { status: "free", email: "", activationId: "", activatedAt: 0, lastValidatedAt: 0, lastCheckAt: 0, failures: 0, lastError: "", ...extra };
+}
+
+function isLicensed() {
+  return licenseState.status === "active";
+}
+
+// Step screenshots only: GIF burst frames live in the spool and are capped separately.
+function countReportScreenshots(list) {
+  let n = 0;
+  for (const ev of Array.isArray(list) ? list : []) {
+    if (!ev || typeof ev !== "object" || Number.isFinite(Number(ev.burstRunId))) continue;
+    if (ev.screenshot || (ev.screenshotRef && typeof ev.screenshotRef === "object" && ev.screenshotRef.frameId)) n += 1;
+  }
+  return n;
+}
+
+function countBurstRuns(list) {
+  const runs = new Set();
+  for (const ev of Array.isArray(list) ? list : []) {
+    const runId = Number(ev && ev.burstRunId);
+    if (Number.isFinite(runId)) runs.add(runId);
+  }
+  return runs.size;
+}
+
+function licenseSummary() {
+  return {
+    status: licenseState.status,
+    email: licenseState.email,
+    activatedAt: licenseState.activatedAt,
+    lastValidatedAt: licenseState.lastValidatedAt,
+    lastCheckAt: licenseState.lastCheckAt,
+    failures: licenseState.failures,
+    maxFailures: LICENSE_MAX_FAILURES,
+    lastError: licenseState.lastError,
+    server: LICENSE_SERVER_ORIGIN,
+    freeTier: FREE_TIER,
+    usage: { screenshots: countReportScreenshots(events), bursts: countBurstRuns(events) }
+  };
+}
+
+async function saveLicenseState() {
+  try {
+    await browser.storage.local.set({ [LICENSE_STORAGE_KEY]: licenseState });
+  } catch (err) {
+    bgWarn("license:save-failed", { error: formatError(err) });
+  }
+}
+
+async function loadLicenseState() {
+  const stored = await browser.storage.local.get([LICENSE_STORAGE_KEY, LICENSE_INSTALL_ID_KEY]);
+  const storedId = stored[LICENSE_INSTALL_ID_KEY];
+  licenseInstallId = typeof storedId === "string" && /^[0-9a-f-]{36}$/i.test(storedId) ? storedId : "";
+  if (!licenseInstallId) {
+    licenseInstallId = crypto.randomUUID();
+    await browser.storage.local.set({ [LICENSE_INSTALL_ID_KEY]: licenseInstallId });
+  }
+  const raw = stored[LICENSE_STORAGE_KEY];
+  const validActive = raw && typeof raw === "object" && raw.status === "active"
+    && /^[0-9a-f]{64}$/.test(String(raw.activationId || "")) && LICENSE_EMAIL_RE.test(String(raw.email || ""));
+  licenseState = validActive
+    ? { ...freeLicenseState(), ...raw, status: "active", failures: Math.max(0, Number(raw.failures) || 0) }
+    : freeLicenseState({ email: raw && typeof raw.email === "string" ? raw.email : "" });
+  scheduleLicenseValidation();
+  bgLog("license:loaded", { status: licenseState.status, failures: licenseState.failures });
+}
+
+async function resolveLicenseEndpoint() {
+  try {
+    const stored = await browser.storage.local.get([LICENSE_SERVER_OVERRIDE_KEY, LICENSE_CLIENT_HMAC_OVERRIDE_KEY]);
+    const override = stored[LICENSE_SERVER_OVERRIDE_KEY];
+    if (typeof override === "string" && /^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(override)) {
+      const hmac = stored[LICENSE_CLIENT_HMAC_OVERRIDE_KEY];
+      return { origin: override, hmac: typeof hmac === "string" ? hmac : LICENSE_CLIENT_HMAC };
+    }
+  } catch (_) {}
+  return { origin: LICENSE_SERVER_ORIGIN, hmac: LICENSE_CLIENT_HMAC };
+}
+
+const hexOfBytes = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
+// Request preamble the server checks before anything else: v1.<ts>.<nonce>.<HMAC-SHA256>, where the
+// MAC covers the timestamp, nonce, method, path, and a hash of the JSON body (see license-server/preamble.mjs).
+async function licensePreamble(hmac, path, body) {
+  const enc = new TextEncoder();
+  const ts = String(Date.now());
+  const nonce = hexOfBytes(crypto.getRandomValues(new Uint8Array(16)));
+  const bodyHash = hexOfBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(body))));
+  const key = await crypto.subtle.importKey("raw", enc.encode(hmac || ""), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = hexOfBytes(new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(`v1.${ts}.${nonce}.POST.${path}.${bodyHash}`))));
+  return `v1.${ts}.${nonce}.${mac}`;
+}
+
+async function licenseRequest(action, payload) {
+  const { origin, hmac } = await resolveLicenseEndpoint();
+  if (!/^https:\/\/[^/]+$/.test(origin) && !/^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(origin)) throw new Error("License server origin must be https");
+  if (!hmac) throw new Error("License client HMAC key is not configured");
+  const path = `/api/v1/${action}`;
+  const body = JSON.stringify(payload);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LICENSE_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(origin + path, {
+      method: "POST",
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "X-UIR-Client": `ui-recorder-pro/${browser.runtime.getManifest().version}`,
+        "X-UIR-Preamble": await licensePreamble(hmac, path, body)
+      },
+      body
+    });
+    if (res.status !== 200) throw new Error(`license server answered ${res.status}`);
+    const data = await res.json();
+    if (!data || typeof data !== "object" || typeof data.status !== "string") throw new Error("malformed license response");
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function scheduleLicenseValidation() {
+  if (licenseTimer) {
+    clearTimeout(licenseTimer);
+    licenseTimer = null;
+  }
+  if (!isLicensed()) return;
+  const base = Math.max(Number(licenseState.lastCheckAt) || 0, Number(licenseState.activatedAt) || 0);
+  const wait = Math.max(60 * 1000, base + LICENSE_VALIDATE_INTERVAL_MS - Date.now());
+  licenseTimer = setTimeout(() => {
+    licenseTimer = null;
+    validateLicense("timer").catch(() => {});
+  }, Math.min(wait, 2147483647));
+}
+
+function demoteLicense(reason) {
+  const email = licenseState.email;
+  licenseState = freeLicenseState({ email, lastError: reason });
+  if (licenseTimer) {
+    clearTimeout(licenseTimer);
+    licenseTimer = null;
+  }
+  bgLog("license:demoted", { reason });
+}
+
+async function activateLicense(emailRaw) {
+  const email = String(emailRaw || "").trim().toLowerCase();
+  if (!LICENSE_EMAIL_RE.test(email)) return { ok: false, status: "invalid-email" };
+  if (!licenseInstallId) await loadLicenseState();
+  let data;
+  try {
+    data = await licenseRequest("activate", { email, installId: licenseInstallId, extVersion: browser.runtime.getManifest().version });
+  } catch (err) {
+    licenseState.lastError = formatError(err);
+    await saveLicenseState();
+    bgWarn("license:activate-failed", { error: licenseState.lastError });
+    return { ok: false, status: "unreachable", error: licenseState.lastError };
+  }
+  if (!data.ok || data.status !== "active" || !/^[0-9a-f]{64}$/.test(String(data.activationId || ""))) {
+    licenseState.lastError = String(data.status || "rejected");
+    await saveLicenseState();
+    return { ok: false, status: String(data.status || "rejected") };
+  }
+  const now = Date.now();
+  licenseState = { status: "active", email, activationId: data.activationId, activatedAt: now, lastValidatedAt: now, lastCheckAt: now, failures: 0, lastError: "" };
+  await saveLicenseState();
+  scheduleLicenseValidation();
+  bgLog("license:activated", { seats: data.seats, activeSeats: data.activeSeats, demoted: data.demoted || 0 });
+  return { ok: true, status: "active", seats: data.seats, activeSeats: data.activeSeats, demoted: data.demoted || 0 };
+}
+
+async function validateLicense(reason) {
+  if (!isLicensed()) return { ok: false, status: "free" };
+  const now = Date.now();
+  try {
+    const data = await licenseRequest("validate", { email: licenseState.email, installId: licenseInstallId, activationId: licenseState.activationId });
+    licenseState.lastCheckAt = now;
+    if (data.ok && data.status === "active") {
+      licenseState.failures = 0;
+      licenseState.lastValidatedAt = now;
+      licenseState.lastError = "";
+    } else if (data.status === "revoked" || data.status === "unknown") {
+      demoteLicense(`server:${data.status}${data.reason ? ":" + data.reason : ""}`);
+    } else {
+      licenseState.failures += 1;
+      licenseState.lastError = String(data.status);
+    }
+  } catch (err) {
+    licenseState.lastCheckAt = now;
+    licenseState.failures += 1;
+    licenseState.lastError = formatError(err);
+    bgWarn("license:validate-failed", { reason, failures: licenseState.failures, error: licenseState.lastError });
+  }
+  if (isLicensed() && licenseState.failures >= LICENSE_MAX_FAILURES) demoteLicense(`check-in-failures:${licenseState.failures}`);
+  await saveLicenseState();
+  scheduleLicenseValidation();
+  return { ok: isLicensed(), status: licenseState.status, failures: licenseState.failures, lastError: licenseState.lastError };
+}
+
+async function deactivateLicense() {
+  if (isLicensed()) {
+    try {
+      await licenseRequest("deactivate", { email: licenseState.email, installId: licenseInstallId, activationId: licenseState.activationId });
+    } catch (err) {
+      bgWarn("license:deactivate-unreachable", { error: formatError(err) });
+    }
+    demoteLicense("user-deactivated");
+  }
+  await saveLicenseState();
+  return { ok: true, status: licenseState.status };
+}
+
 function isTrustedRuntimeUiSender(sender) {
   const runtimeId = String((browser && browser.runtime && browser.runtime.id) || "").trim();
   const senderId = String((sender && sender.id) || "").trim();
@@ -885,7 +1127,8 @@ function isTrustedRuntimeUiSender(sender) {
 // Message types only the browser-action popup may send (a sender with a tab is never the popup).
 const POPUP_ONLY_MESSAGE_TYPES = new Set([
   "START_RECORDING", "UPDATE_SETTINGS", "GET_DIAGNOSTICS", "ADD_NOTE",
-  "OPEN_REPORT", "OPEN_DOCS", "OPEN_PRINTABLE_REPORT", "TEST_REDACTION"
+  "OPEN_REPORT", "OPEN_DOCS", "OPEN_PRINTABLE_REPORT", "TEST_REDACTION",
+  "LICENSE_STATUS", "LICENSE_ACTIVATE", "LICENSE_VALIDATE_NOW", "LICENSE_DEACTIVATE"
 ]);
 
 function enqueueTabScopeDraftWrite(task) {
@@ -1655,6 +1898,15 @@ async function runContinuousBurstCaptureTick() {
     burstLoopActive = false;
     burstLastLoopPauseReason = "paused";
     scheduleContinuousBurstCaptureTick(frameMs);
+    return;
+  }
+  if (!isLicensed() && burstRunStartedAtMs && (Date.now() - burstRunStartedAtMs) >= FREE_TIER.maxBurstMs) {
+    burstHotkeyModeActive = false;
+    burstRunTargetFps = getHotkeyBurstFps();
+    await persistSafe("free-tier-burst-time");
+    await notifyCaptureModeChanged("free-tier-burst-time");
+    stopContinuousBurstCaptureLoop("free-tier-burst-time");
+    bgLog("capture-mode:free-tier-burst-time", { limitMs: FREE_TIER.maxBurstMs });
     return;
   }
   if (burstContinuousInFlight) {
@@ -2465,6 +2717,10 @@ async function appendLifecycleScreenshotEventToSession(sessionState, kind, sourc
   if (!shouldCaptureScreenshotPixels(effective)) {
     opts.capture = false;
     if (!opts.skipReason) opts.skipReason = screenshotSuppressionReason(effective);
+  }
+  if (!isLicensed() && countReportScreenshots(sessionState.events) >= FREE_TIER.maxScreenshotsPerReport) {
+    opts.capture = false;
+    if (!opts.skipReason) opts.skipReason = "free-tier-screenshots";
   }
   try {
     if (effective.activeTabOnly) {
@@ -3312,6 +3568,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         burstPerf: getBurstPerfSnapshot(),
         spoolRuntime,
         storageQuota: getStorageQuotaSnapshot(),
+        license: licenseSummary(),
         frameMsgToken
       };
     }
@@ -3442,6 +3699,20 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     if (msgType === "OPEN_DOCS") { await browser.tabs.create({ url: browser.runtime.getURL("docs.html") }); return { ok: true }; }
     if (msgType === "OPEN_PRINTABLE_REPORT") { await browser.tabs.create({ url: browser.runtime.getURL("report.html") + "?print=1&idx=0" }); return { ok: true }; }
 
+    if (msgType === "LICENSE_STATUS") return { ok: true, license: licenseSummary() };
+    if (msgType === "LICENSE_ACTIVATE") {
+      const result = await activateLicense(msg.email);
+      return { ...result, license: licenseSummary() };
+    }
+    if (msgType === "LICENSE_VALIDATE_NOW") {
+      const result = await validateLicense("manual");
+      return { ...result, license: licenseSummary() };
+    }
+    if (msgType === "LICENSE_DEACTIVATE") {
+      const result = await deactivateLicense();
+      return { ...result, license: licenseSummary() };
+    }
+
     if (msgType === "TEST_REDACTION") {
       const raw = typeof msg.text === "string" ? msg.text : "";
       // Cap input at 8 KB so the popup can't accidentally choke the background.
@@ -3497,7 +3768,8 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         delete cleaned.typedValue;
 
         const screenshotsAllowed = shouldCaptureScreenshotPixels(effectiveSettings);
-        const includeScreenshot = screenshotsAllowed && !hotkeyBurstActive
+        const freeTierShotCap = !isLicensed() && countReportScreenshots(events) >= FREE_TIER.maxScreenshotsPerReport;
+        const includeScreenshot = screenshotsAllowed && !hotkeyBurstActive && !freeTierShotCap
           ? (
             ["change","input","submit","outcome","note"].includes(e.type)
             || (e.type === "click" && (!!e.forceScreenshot || !!e.clickUiUpdated))
@@ -3520,6 +3792,8 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           cleaned.screenshotSkipped = true;
           if (!screenshotsAllowed) {
             cleaned.screenshotSkipReason = screenshotSuppressionReason(effectiveSettings);
+          } else if (freeTierShotCap && !hotkeyBurstActive) {
+            cleaned.screenshotSkipReason = "free-tier-screenshots";
           } else {
             cleaned.screenshotSkipReason = hotkeyBurstActive ? "gif-loop-owned" : "not-needed";
           }
@@ -3801,10 +4075,16 @@ browser.commands.onCommand.addListener(async (command) => {
     bgLog("capture-mode:toggle-ignored", { reason: "recording-inactive" });
     return;
   }
+  if (!burstHotkeyModeActive && !isLicensed() && countBurstRuns(events) >= FREE_TIER.maxBurstsPerReport) {
+    burstLastLoopPauseReason = "free-tier-bursts";
+    bgLog("capture-mode:toggle-refused", { reason: "free-tier-bursts", bursts: countBurstRuns(events) });
+    return;
+  }
   burstHotkeyModeActive = !burstHotkeyModeActive;
   if (burstHotkeyModeActive) {
     burstModeEpoch += 1;
     burstRunId += 1;
+    burstRunStartedAtMs = Date.now();
     burstRunTargetFps = getHotkeyBurstFps();
     burstLastLoopPauseReason = null;
   } else {
@@ -3823,3 +4103,5 @@ browser.commands.onCommand.addListener(async (command) => {
     effectivePageWatchEnabled: !!effective.pageWatchEnabled
   });
 });
+
+loadLicenseState().catch((err) => bgWarn("license:load-failed", { error: formatError(err) }));

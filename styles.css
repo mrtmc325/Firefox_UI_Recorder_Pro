@@ -489,12 +489,14 @@ body.popup .settings-group-help .settings-summary-meta {
 }
 
 #custom-redact-status[data-kind="error"],
-#redact-test-status[data-kind="error"] {
+#redact-test-status[data-kind="error"],
+#license-status[data-kind="error"] {
   color: #b91c1c;
 }
 
 #custom-redact-status[data-kind="success"],
-#redact-test-status[data-kind="success"] {
+#redact-test-status[data-kind="success"],
+#license-status[data-kind="success"] {
   color: #166534;
 }
 

@@ -76,7 +76,12 @@ const BG = loadContext(["frame_spool.js", "background.js"], {
     "globalThis.__bgLog = (typeof bgLog!=='undefined') ? bgLog : undefined; " +
     "globalThis.__setDebugLogs = (v) => { settings.debugLogsEnabled = !!v; }; " +
     "globalThis.__getDebugLogs = () => !!(settings && settings.debugLogsEnabled); " +
-    "globalThis.__getSettings = () => settings;",
+    "globalThis.__getSettings = () => settings;" +
+    "globalThis.__countReportScreenshots = (typeof countReportScreenshots!=='undefined') ? countReportScreenshots : undefined; " +
+    "globalThis.__countBurstRuns = (typeof countBurstRuns!=='undefined') ? countBurstRuns : undefined; " +
+    "globalThis.__isLicensed = (typeof isLicensed!=='undefined') ? isLicensed : undefined; " +
+    "globalThis.__setLicenseStatus = (v) => { if (typeof licenseState!=='undefined') licenseState.status = v; }; " +
+    "globalThis.__FREE_TIER = (typeof FREE_TIER!=='undefined') ? FREE_TIER : undefined;",
 });
 
 // §3 — isInjectableTabUrl is an http/https allowlist (no capture on file:/about: pages)
@@ -575,6 +580,19 @@ check("T1.1", "permissions.onAdded listener registered", /browser\.permissions\.
 check("T1.1", "onRemoved pauses with host-permission-revoked reason", /pauseRecording\(\s*["']host-permission-revoked["']\s*\)/.test(bgjs));
 check("T1.1", "GET_STATE surfaces pauseLimitationReason", /pauseLimitationReason:\s*pauseLimitationReason/.test(bgjs));
 
+// §L — licensing free-tier caps (background side)
+check("L", "FREE_TIER caps: 5s / 3 bursts / 10 screenshots",
+  BG.__FREE_TIER && BG.__FREE_TIER.maxBurstMs === 5000 && BG.__FREE_TIER.maxBurstsPerReport === 3 && BG.__FREE_TIER.maxScreenshotsPerReport === 10);
+{
+  const evs = [];
+  for (let i = 0; i < 14; i++) evs.push({ type: "click", screenshot: "data:image/png;base64,AAAA" });
+  evs.push({ type: "ui-change", burstRunId: 1, screenshot: "x" });
+  evs.push({ type: "ui-change", burstRunId: 2, screenshot: "x" });
+  check("L", "countReportScreenshots ignores burst frames", BG.__countReportScreenshots(evs) === 14);
+  check("L", "countBurstRuns counts distinct runs", BG.__countBurstRuns(evs) === 2);
+  check("L", "default install is not licensed", BG.__isLicensed() === false);
+}
+
 console.log("\n=== Harness B: report.js (builder/import/export) ===");
 const RPT = loadContext(["report.js"], {
   epilogue: "globalThis.__RPT = { MAXB: RAW_IMPORT_ZIP_MAX_BYTES, MAXE: RAW_IMPORT_ZIP_MAX_ENTRIES, " +
@@ -590,7 +608,9 @@ const RPT = loadContext(["report.js"], {
     "globalThis.__normalizeMarkdownScreenshotMode = normalizeMarkdownScreenshotMode; " +
     "globalThis.__buildPlaywrightScript = buildPlaywrightScript; " +
     "globalThis.__parseStoredZip = parseStoredZip; " +
-    "globalThis.__crc32 = crc32;",
+    "globalThis.__crc32 = crc32;" +
+    "globalThis.__applyFreeTierCaps = applyFreeTierCaps; " +
+    "globalThis.__FREE_TIER_CAPS = FREE_TIER_CAPS;",
 });
 
 // §7.4/7.5 — import caps retuned to round-trip the extension's own exports
@@ -2283,6 +2303,22 @@ function runStatic() {
       }
       check("T2 2B.4", "vault-locked throw in immediate impl rejects the coalesced promise", rejected);
     })().then(() => {
+  // §L — licensing free-tier caps (report side: import/merge)
+  {
+    const evs = [];
+    for (let i = 0; i < 13; i++) evs.push({ type: "click", screenshot: "data:image/png;base64,AAAA" });
+    for (const runId of [1, 2, 3, 4, 5]) { evs.push({ type: "ui-change", burstRunId: runId, screenshot: "f" }); evs.push({ type: "ui-change", burstRunId: runId, screenshot: "f" }); }
+    const rep = { events: evs };
+    const res = RPT.__applyFreeTierCaps(rep);
+    check("L", "report caps: 2 excess bursts dropped", res.droppedBursts === 2, JSON.stringify(res));
+    check("L", "report caps: 3 excess screenshots dropped", res.droppedScreenshots === 3, JSON.stringify(res));
+    const runsKept = new Set(rep.events.filter(e => Number.isFinite(Number(e.burstRunId))).map(e => e.burstRunId));
+    check("L", "report caps: only 3 burst runs survive", runsKept.size === 3, [...runsKept].join(","));
+    const shotsKept = rep.events.filter(e => !Number.isFinite(Number(e.burstRunId)) && e.screenshot).length;
+    check("L", "report caps: only 10 screenshots survive", shotsKept === 10, String(shotsKept));
+    check("L", "report caps: dropped screenshots carry the free-tier reason", rep.events.some(e => e.screenshotSkipReason === "free-tier-screenshots"));
+  }
+
       console.log(`\n================  RESULT: ${pass} passed, ${fail} failed  ================`);
       if (fail) { console.log("\nFailures:"); fails.forEach((f) => console.log("  - " + f)); process.exit(1); }
       process.exit(0);

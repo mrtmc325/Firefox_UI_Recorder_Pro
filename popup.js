@@ -108,6 +108,8 @@ function burstPauseReasonLabel(reason) {
   if (key === "paused") return "recording paused";
   if (key === "no-active-tab") return "no active tab";
   if (key === "capture-failed") return "capture failed";
+  if (key === "free-tier-bursts") return "free tier: 3 GIFs per report";
+  if (key === "free-tier-burst-time") return "free tier: 5 s per GIF";
   return key.replace(/-/g, " ");
 }
 
@@ -750,8 +752,47 @@ async function refresh() {
   pageWatchNode.disabled = burstForcing;
   captureModeNode.title = burstForcing ? "GIF burst mode forces all events while active." : "";
   pageWatchNode.title = burstForcing ? "GIF burst mode pauses page watch while active." : "";
+  renderLicense(st.license);
   await syncTabScopeList(st);
   setTabScopeStatus(tabScopeStatusText, tabScopeStatusKind);
+}
+
+function renderLicense(license) {
+  const lic = license && typeof license === "object" ? license : { status: "free", usage: {}, freeTier: {} };
+  const active = lic.status === "active";
+  const caps = { maxBurstMs: 5000, maxBurstsPerReport: 3, maxScreenshotsPerReport: 10, ...(lic.freeTier || {}) };
+  const usage = lic.usage || {};
+  const chip = document.getElementById("license-tier-chip");
+  if (chip) chip.textContent = active ? "Licensed" : "Free";
+  const summary = document.getElementById("license-summary");
+  if (summary) {
+    summary.textContent = active
+      ? `Licensed to ${lic.email}. Last verified ${lic.lastValidatedAt ? new Date(lic.lastValidatedAt).toLocaleString() : "never"}${lic.failures ? ` (${lic.failures} of ${lic.maxFailures} check-ins failed)` : ""}.`
+      : `Free tier: GIF bursts up to ${Math.round(caps.maxBurstMs / 1000)} s and ${caps.maxBurstsPerReport} per report; ${caps.maxScreenshotsPerReport} screenshots per report.`;
+  }
+  const usageNode = document.getElementById("license-usage");
+  if (usageNode) {
+    usageNode.textContent = active
+      ? ""
+      : `This recording: ${usage.screenshots || 0}/${caps.maxScreenshotsPerReport} screenshots, ${usage.bursts || 0}/${caps.maxBurstsPerReport} GIF bursts.`;
+  }
+  const emailInput = document.getElementById("license-email");
+  if (emailInput && !emailInput.value && lic.email) emailInput.value = lic.email;
+  if (emailInput) emailInput.disabled = active;
+  const show = (id, visible) => { const node = document.getElementById(id); if (node) node.style.display = visible ? "" : "none"; };
+  show("license-activate", !active);
+  show("license-check", active);
+  show("license-deactivate", active);
+}
+
+function describeLicenseFailure(result) {
+  const status = result && result.status ? String(result.status) : "unreachable";
+  if (status === "unknown") return "No license was found for that email.";
+  if (status === "no-seats") return "That license has no seats left to assign.";
+  if (status === "invalid-email") return "Enter the email used for the purchase.";
+  if (status === "revoked") return `This device's seat was revoked${result && result.lastError ? ` (${result.lastError})` : ""}.`;
+  if (status === "unreachable") return `License server unreachable${result && result.error ? `: ${result.error}` : ""}. Check your connection and clock, then try again.`;
+  return `License request failed (${status}).`;
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -883,6 +924,36 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("stop").addEventListener("click", async () => {
     await writeControlSignal();
     await sendMessageSafe({ type: "STOP_RECORDING" });
+    await refresh();
+  });
+  const licenseStatus = (text, kind) => {
+    const node = document.getElementById("license-status");
+    if (!node) return;
+    node.textContent = text;
+    node.dataset.kind = kind || "muted";
+  };
+  document.getElementById("license-activate").addEventListener("click", async () => {
+    const email = String(document.getElementById("license-email").value || "").trim();
+    if (!email) { licenseStatus("Enter the email used for the purchase.", "error"); return; }
+    licenseStatus("Contacting the license server...", "muted");
+    const result = await sendMessageSafe({ type: "LICENSE_ACTIVATE", email });
+    if (result && result.ok) {
+      licenseStatus(`Activated. ${result.activeSeats || 1} of ${result.seats} seat(s) in use${result.demoted ? "; the oldest device moved to the free tier" : ""}.`, "success");
+    } else {
+      licenseStatus(describeLicenseFailure(result), "error");
+    }
+    await refresh();
+  });
+  document.getElementById("license-check").addEventListener("click", async () => {
+    licenseStatus("Checking...", "muted");
+    const result = await sendMessageSafe({ type: "LICENSE_VALIDATE_NOW" });
+    licenseStatus(result && result.ok ? "License verified." : describeLicenseFailure(result), result && result.ok ? "success" : "error");
+    await refresh();
+  });
+  document.getElementById("license-deactivate").addEventListener("click", async () => {
+    if (!window.confirm("Deactivate this device? It returns to the free tier and frees a seat.")) return;
+    await sendMessageSafe({ type: "LICENSE_DEACTIVATE" });
+    licenseStatus("Deactivated. This device is on the free tier.", "muted");
     await refresh();
   });
   document.getElementById("note").addEventListener("click", async () => {

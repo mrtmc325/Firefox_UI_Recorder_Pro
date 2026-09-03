@@ -1,0 +1,144 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:6e9c885c-2eb9-4968-9796-836660efbb71",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-03T13:50:12.287Z",
+    "authors": [
+      {
+        "name": "Tristan Conner"
+      }
+    ],
+    "tools": [
+      {
+        "name": "repo-sbom-script",
+        "version": "1"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "name": "uir-license-server",
+      "version": "1.23.0",
+      "bom-ref": "uir-license-server@1.23.0",
+      "description": "UI Recorder Pro license server: activation, seat enforcement, admin UI. Node.js stdlib only.",
+      "licenses": [
+        {
+          "license": {
+            "id": "AGPL-3.0-only"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "source.commit",
+          "value": "aa9956e9573bf6b9acb84b7276aa0a864d669e04"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "platform",
+      "name": "nodejs",
+      "version": ">=24.0.0",
+      "description": "Runtime. Uses only built-in modules: node:http, node:https, node:sqlite, node:crypto, node:util, node:fs, node:net, node:url. No npm dependencies, no lockfile.",
+      "properties": [
+        {
+          "name": "dependencies",
+          "value": "none (standard library only)"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "license-server/cli.mjs",
+      "version": "1.23.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e5da3b68d925b4dcf2deaa1eb20fb91f8bbad410f367b9758d8935014819ecc2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "AGPL-3.0-only"
+          }
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "license-server/db.mjs",
+      "version": "1.23.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f2c3f10cb28833b68f1512fa49178e32666bac9d0efabfb8665431c5adb982f9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "AGPL-3.0-only"
+          }
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "license-server/preamble.mjs",
+      "version": "1.23.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9e6b2900c44d696a74a39a59bd1d9cddc72a99a9f163bb25703a887657653185"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "AGPL-3.0-only"
+          }
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "license-server/server.mjs",
+      "version": "1.23.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "11e7f875c186419315c17d9691c27a4eae3b2d09ca3bd3756e161e525dde1636"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "AGPL-3.0-only"
+          }
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "name": "license-server/test/server.test.mjs",
+      "version": "1.23.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "751762b94f541e0d2eda4c845af9c714eaf41191cf2215ff89bf56cc7fb7d455"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "AGPL-3.0-only"
+          }
+        }
+      ]
+    }
+  ]
+}

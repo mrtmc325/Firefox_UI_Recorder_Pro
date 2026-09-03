@@ -76,9 +76,14 @@ answer "No" to the source-code question, and point reviewers at the public repos
 1. **Core function**: records UI workflows locally and exports editable or portable reports. All capture data stays in
    `browser.storage.local` / `storage.session` and an IndexedDB media spool. No telemetry, no remote code, no
    minification; source is the public GitHub repository.
-2. **Only remote endpoint**: `https://api.openai.com`, used for optional narration (text-to-speech) and audio-file
-   transcription in the report editor. Every call requires the user's own API key, an explicit click, and the optional
-   `websiteContent` data-collection permission, which is requested at that moment. Calls have a 60 s deadline.
+2. **Remote endpoints**: two, both off by default.
+   - `https://api.openai.com` — optional narration (text-to-speech) and audio-file transcription in the report editor.
+     Every call requires the user's own API key, an explicit click, and the optional `websiteContent` permission,
+     requested at that moment. 60 s deadline.
+   - The owner-operated **license server** (host baked into `background.js` as `LICENSE_SERVER_ORIGIN`, HTTPS) — contacted
+     only after the user enters a purchase email in the popup to activate a paid license, and every 48 hours thereafter
+     while licensed. Sends only the email, a random install id, and the extension version. Free installs never contact it.
+     Enforces the free-tier caps (5 s / 3 GIF bursts and 10 screenshots per report) with no network call.
 3. **Permissions**: `tabs`/`activeTab` (active-tab capture and screenshots), `storage` (reports/settings),
    `downloads` (exports), `idle` (auto-pause). `http://*/*` and `https://*/*` are optional: the popup requests the
    specific origins of the tabs the user selects at Start; the content script is injected with `tabs.executeScript`
@@ -91,7 +96,8 @@ answer "No" to the source-code question, and point reviewers at the public repos
    checked, magic-byte sniffed, and parsed with a prototype-key-stripping reviver.
 6. **Notes on things the validator may flag**: `innerHTML` occurrences in `report.js`/`popup.js` are assignments of the
    empty string (clears); the `unsafe-inline` CSP string appears inside the *exported* standalone HTML file the user
-   downloads, not in any extension page; the quick-preview iframe is `sandbox="allow-scripts"` with a `srcdoc`.
+   downloads, not in any extension page; the quick-preview iframe is `sandbox="allow-scripts"` with a `srcdoc`; the
+   license-server code under `license-server/` is not part of the add-on and is excluded from the package.
 
 ## 7. After upload
 
@@ -109,3 +115,5 @@ answer "No" to the source-code question, and point reviewers at the public repos
 Updated 2026-09-03: rewritten for the first listed submission — packaging via `web-ext-config.mjs` (runtime files
 only), listing copy/assets under `docs/store/`, AGPL-as-custom-license note, prerequisites the maintainer must do by
 hand, and reviewer notes reflecting the 1.22.0 hardening (masking, sender gate, URL scrubbing).
+
+Updated 2026-09-03: added the licensing disclosure (free-tier caps enforced locally; optional activation + 48 h check-in to the owner-hosted license server) and noted that `license-server/` is excluded from the package.
