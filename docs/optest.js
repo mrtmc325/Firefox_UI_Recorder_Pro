@@ -1007,16 +1007,16 @@ const evs = [
   { type: "click" },                          // no tags -> excluded when filter active
   { type: "click", tags: ["smoke"] },
 ];
-const fAll = RPT.filterEvents(evs, "", "all", "", null);
+const fAll = RPT.filterEvents(evs, "", "all", null);
 check("T2 2B.7", "filterEvents with null tag filter returns all", fAll.length === 4);
-const fSmoke = RPT.filterEvents(evs, "", "all", "", new Set(["smoke"]));
+const fSmoke = RPT.filterEvents(evs, "", "all", new Set(["smoke"]));
 check("T2 2B.7", "filterEvents keeps only events carrying an active tag", fSmoke.length === 2);
-const fEmpty = RPT.filterEvents(evs, "", "all", "", new Set());
+const fEmpty = RPT.filterEvents(evs, "", "all", new Set());
 check("T2 2B.7", "empty tag filter Set == no tag filter (all pass)", fEmpty.length === 4);
-const fArr = RPT.filterEvents(evs, "", "all", "", ["Regression"]);
+const fArr = RPT.filterEvents(evs, "", "all", ["Regression"]);
 check("T2 2B.7", "filterEvents accepts array + normalizes case", fArr.length === 1);
 // tag value is searchable via the free-text query
-const fQ = RPT.filterEvents(evs, "regression", "all", "", null);
+const fQ = RPT.filterEvents(evs, "regression", "all", null);
 check("T2 2B.7", "tags feed the free-text search haystack", fQ.length === 1);
 // Exported HTML source contains the data-slide-tags attribute + tag preservation is via getEventTags(ev)
 const rjsSrc = fs.readFileSync(path.join(REPO, "report.js"), "utf8");
@@ -1060,7 +1060,7 @@ check("T2 2B.7", "sanitizeEventForSecurePersistence preserves tags (spread copy)
     { type: "click", label: "Beta needle", tags: [] },
     { type: "click", label: "Gamma", tags: ["needle"] },
   ];
-  const hits = RPT.filterEvents(evList, "needle", "all", "", null);
+  const hits = RPT.filterEvents(evList, "needle", "all", null);
   check("T2 2D.3", "filterEvents uses cached haystack for text and tag matches",
     hits.length === 2 && cache.has(evList[1]) && cache.has(evList[2]));
   // T2 2D.4 — inline edit sites (sectionDescription/tags/text) must invalidate
@@ -1072,10 +1072,10 @@ check("T2 2B.7", "sanitizeEventForSecurePersistence preserves tags (spread copy)
       { type: "note", label: "Beta", text: "unrelated", tags: [] },
     ];
     // Prime the cache with a filter pass that doesn't match the incoming edit.
-    RPT.filterEvents(edited, "old body", "all", "", null);
+    RPT.filterEvents(edited, "old body", "all", null);
     edited[0].text = "fresh needle text";
     invalHay(edited[0]);
-    const post = RPT.filterEvents(edited, "fresh needle", "all", "", null);
+    const post = RPT.filterEvents(edited, "fresh needle", "all", null);
     check("T2 2D.4", "invalidateEventSearchHaystack after a step text edit updates search hits",
       post.length === 1 && post[0] === edited[0]);
   }
@@ -1224,10 +1224,9 @@ const mdReport = {
       stepId: "s1", type: "click", human: "Sign in button", editedTitle: "Open login",
       sectionDescription: "First step of the flow",
       url: "https://example.test/login",
-      notes: "Watch for redirect",
       screenshot: md_png,
     },
-    { stepId: "s2", type: "note", editedTitle: "Enter creds", screenshot: md_jpg },
+    { stepId: "s2", type: "note", editedTitle: "Enter creds", text: "Watch for redirect", screenshot: md_jpg },
     { stepId: "s3", type: "note", editedTitle: "No shot here" },
   ],
 };
@@ -1262,7 +1261,7 @@ check("T2 2B.9", "section description emitted",
   mdInline.markdown.indexOf("First step of the flow") >= 0);
 check("T2 2B.9", "URL emitted inside a fenced code block (no clickable link)",
   /```\nhttps:\/\/example\.test\/login\n```/.test(mdInline.markdown));
-check("T2 2B.9", "notes text emitted",
+check("T2 2B.9", "note text (ev.text, the field the note editor writes) emitted",
   mdInline.markdown.indexOf("Watch for redirect") >= 0);
 check("T2 2B.9", "inline mode embeds base64 data URIs directly in ![]()",
   mdInline.markdown.indexOf("![Screenshot for step 1](data:image/png;base64,") >= 0
@@ -1339,7 +1338,7 @@ check("T2 2B.9", "non-image data URI screenshot is dropped (no entry emitted)",
       { type: "input", label: "Username", human: "Username", value: "alice", tag: "INPUT" },
       { type: "change", label: "Remember me", checked: true, actionKind: "checkbox", tag: "INPUT" },
       { type: "submit", label: "Continue", actionKind: "button", tag: "BUTTON" },
-      { type: "note", notes: "Verify redirect" },
+      { type: "note", text: "Verify redirect" },
     ],
   };
   const script = build(synthReport);
@@ -1550,8 +1549,8 @@ function runStatic() {
     /crypto\.getRandomValues\(\s*new\s+Uint8Array\(\s*12\s*\)\s*\)/.test(rjs));
   check("T2C.1", "vault encrypt path present",
     /sectionNarrationOpenAiVaultEncrypt/.test(rjs) && /crypto\.subtle\.encrypt\(\s*\{\s*name:\s*["']AES-GCM["']/.test(rjs));
-  check("T2C.1", "vault decrypt path present",
-    /sectionNarrationOpenAiVaultDecrypt/.test(rjs) && /crypto\.subtle\.decrypt\(\s*\{\s*name:\s*["']AES-GCM["']/.test(rjs));
+  check("T2C.1", "vault has no decrypt path (encrypted slot is write-only and purged on load)",
+    !/sectionNarrationOpenAiVaultDecrypt/.test(rjs));
   check("T2C.1", "vault falls back to plain sessionStorage when WebCrypto unavailable",
     /sectionNarrationOpenAiVaultHasSubtle\(\)/.test(rjs) && /WebCrypto unavailable/.test(rjs));
   check("T2C.1", "setter clears both plain and encrypted slots on empty value",
@@ -2126,16 +2125,6 @@ function runStatic() {
       // T2B.14 — dev tooling shims (npx-only, no persistent deps)
       const readMaybe = (p) => { try { return fs.readFileSync(p, "utf8"); } catch (_) { return ""; } };
       const root = REPO;
-      const devRun = readMaybe(path.join(root, "docs/dev-run.sh"));
-      check("T2B.14", "docs/dev-run.sh exists", !!devRun);
-      check("T2B.14", "dev-run.sh uses npx --yes web-ext run (no npm install)",
-        /npx\s+--yes\s+web-ext\s+run/.test(devRun) && !/npm\s+install/.test(devRun));
-      check("T2B.14", "dev-run.sh starts at about:debugging",
-        /--start-url\s+about:debugging/.test(devRun));
-      try {
-        const st = require("fs").statSync(path.join(root, "docs/dev-run.sh"));
-        check("T2B.14", "dev-run.sh is executable", (st.mode & 0o111) !== 0);
-      } catch (_) { check("T2B.14", "dev-run.sh is executable", false); }
       const eslintCfgRaw = readMaybe(path.join(root, "docs/eslintrc.json"));
       check("T2B.14", "docs/eslintrc.json exists", !!eslintCfgRaw);
       let eslintCfg = null; try { eslintCfg = JSON.parse(eslintCfgRaw); } catch (_) {}
@@ -2152,36 +2141,13 @@ function runStatic() {
         !fs2.existsSync(path.join(root, "node_modules")));
       const opTest = readMaybe(path.join(root, "docs/OPERATIONAL_TEST.md"));
       check("T2B.14", "OPERATIONAL_TEST.md documents Developer tooling section",
-        /##\s*Developer tooling/.test(opTest) && /docs\/dev-run\.sh/.test(opTest) && /docs\/eslintrc\.json/.test(opTest));
+        /##\s*Developer tooling/.test(opTest) && /web-ext run/.test(opTest) && /docs\/eslintrc\.json/.test(opTest));
     }
     {
-      // T2D.1 — vector annotation primitives: design plan + visible stub toggle
+      // T2D.1 — vector annotations stay design-only (plan doc kept; the placeholder button was removed 2026-09-02)
       const planPath = path.join(REPO, "docs", "plans", "vector-annotations-2026-07-16.md");
       const planExists = fs.existsSync(planPath);
       check("T2D.1", "vector annotations plan doc exists at expected path", planExists);
-      const planMd = planExists ? fs.readFileSync(planPath, "utf8") : "";
-      check("T2D.1", "plan doc carries required sections (Context, Architecture, Risks, Alternatives, Open questions, Out of scope)",
-        /##\s+Context/.test(planMd)
-          && /##\s+Architecture/.test(planMd)
-          && /##\s+Risks and mitigations/.test(planMd)
-          && /##\s+Alternatives considered/.test(planMd)
-          && /##\s+Open questions/.test(planMd)
-          && /##\s+Out of scope/.test(planMd));
-      check("T2D.1", "plan doc has a mermaid architecture diagram",
-        /```mermaid[\s\S]{0,60}flowchart/.test(planMd));
-      // T2 2D.4 — element migrated from checkbox to <button> so state doesn't
-      // persist as "on" after the plan link opens; either form is accepted.
-      check("T2D.1", "report.html exposes vector-annotations-toggle control with 'coming soon' label",
-        (/id="vector-annotations-toggle"\s+type="button"/.test(rhtml)
-          || /<button[^>]*id="vector-annotations-toggle"/.test(rhtml)
-          || /id="vector-annotations-toggle"\s+type="checkbox"/.test(rhtml))
-          && /coming soon/i.test(rhtml));
-      check("T2D.1", "report.html annotations panel wraps the toggle",
-        /id="section-annotations"[\s\S]{0,400}vector-annotations-toggle/.test(rhtml));
-      check("T2D.1", "report.js wires toggle onChange to open the plan via runtime.getURL",
-        /getElementById\(\s*["']vector-annotations-toggle["']\s*\)[\s\S]{0,600}runtime\.getURL\([\s\S]{0,120}vector-annotations-2026-07-16\.md[\s\S]{0,200}window\.open\(/.test(rjs));
-      check("T2D.1", "stub does not ship any actual vector drawing code (kind arrow/box/pin/callout absent from report.js)",
-        !/kind:\s*["'](arrow|box|pin|callout)["']/.test(rjs));
     }
 
     // T2 2B.2 — per-report Rename / Delete actions in the report editor.
@@ -2321,16 +2287,5 @@ function runStatic() {
       if (fail) { console.log("\nFailures:"); fails.forEach((f) => console.log("  - " + f)); process.exit(1); }
       process.exit(0);
     });
-    return;
-    // eslint-disable-next-line no-unreachable
-    console.log(`\n================  RESULT: ${pass} passed, ${fail} failed  ================`);
-    if (fail) { console.log("\nFailures:"); fails.forEach((f) => console.log("  - " + f)); process.exit(1); }
-    process.exit(0);
   })();
-  return;
-  // Legacy exit path (unreachable — kept in case async block ever short-circuits):
-  // eslint-disable-next-line no-unreachable
-  console.log(`\n================  RESULT: ${pass} passed, ${fail} failed  ================`);
-  if (fail) { console.log("\nFailures:"); fails.forEach((f) => console.log("  - " + f)); process.exit(1); }
-  process.exit(0);
 }

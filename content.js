@@ -107,7 +107,7 @@
   function lower(s) { return String(s || "").toLowerCase(); }
   function normalizeHotkeyBurstFps(value) {
     const fps = Math.round(Number(value));
-    if (fps === 10 || fps === 15) return fps;
+    if (fps >= 10) return 10;
     return HOTKEY_BURST_DEFAULT_FPS;
   }
   function getHotkeyBurstInputThrottleMs(st) {
@@ -396,6 +396,7 @@
           pageHasSensitiveText: detectSensitiveTextOrAttrs(),
           redactRects: collectSensitiveRectsWithFrame().rects,
           devicePixelRatio: window.devicePixelRatio || 1,
+          viewportWidth: window.innerWidth,
           forceScreenshot
         });
       } finally {
@@ -758,8 +759,10 @@
   }
 
   // targetOrigin defaults to "*" only for the initial HELLO (parent origin not yet
-  // known). Every response/report path passes the exact origin it learned from the
-  // inbound event so a page-world listener cannot silently receive the token.
+  // known); every response/report path passes the exact origin it learned from the
+  // inbound event. window.postMessage still reaches page-world listeners on the target
+  // window, so the token is a channel tag, not a secret: the trust boundary is the
+  // ev.source identity check (window.parent / a known child iframe), not the token.
   function postFrameMessage(targetWindow, kind, payload, targetOrigin) {
     if (!frameMsgToken || !targetWindow) return;
     try {
@@ -861,7 +864,9 @@
     const fire = () => {
       rectsReportTimerId = null;
       try {
-        const rects = collectSensitiveRects().map(translateRectToTopFrame);
+        // Frame-local coordinates: the parent adds this iframe's own bounding rect, so no
+        // offset learned over postMessage can steer where the child's fields get masked.
+        const rects = collectSensitiveRects();
         if (rects.length) postFrameMessage(window.parent, FRAME_MSG.rects, { frameId: FRAME_ID, rects }, parentOrigin || "*");
       } catch (_) {}
       rectsReportTimerId = setTimeout(fire, FRAME_RECTS_REPORT_INTERVAL_MS);
@@ -894,6 +899,7 @@
         // sibling iframe cannot satisfy ev.source === window.parent, so it cannot
         // steer our reported frameOffset.
         if (ev.source !== window.parent) return;
+        if (frameOffsetKnown) return; // first ASSIGN wins; later ones cannot re-steer the offset
         if (d.frameId !== FRAME_ID) return;
         if (!d.offset || typeof d.offset !== "object") return;
         parentOrigin = ev.origin || null;
@@ -908,7 +914,10 @@
         // regardless of what frameId string the payload claims.
         const srcIframe = findChildIframeElementByWindow(ev.source);
         if (!srcIframe) return;
-        const rects = d.rects.slice(0, 60).filter((r) => r && typeof r === "object");
+        const frameRect = srcIframe.getBoundingClientRect();
+        const rects = d.rects.slice(0, 60)
+          .filter((r) => r && typeof r === "object")
+          .map((r) => ({ x: (Number(r.x) || 0) + frameRect.left, y: (Number(r.y) || 0) + frameRect.top, w: Number(r.w) || 0, h: Number(r.h) || 0 }));
         if (IS_TOP_FRAME) {
           // Key the cache by our own synthetic id for that iframe element, not by
           // attacker-supplied d.frameId — so a compromised child can only overwrite
@@ -1186,6 +1195,7 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
+      viewportWidth: window.innerWidth,
       forceScreenshot: !!forceScreenshot
     });
   }
@@ -1227,6 +1237,7 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
+      viewportWidth: window.innerWidth,
       burstHotkeyMode: !!burstHotkeyMode,
       burstCaptureForced: !!burstHotkeyMode,
       // Force screenshot for first-time login-page input so you see the screen.
@@ -1321,6 +1332,7 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
+      viewportWidth: window.innerWidth,
       forceScreenshot: false
     });
   }, true);
@@ -1386,11 +1398,9 @@
     const human = humanize(el);
     const hint = detectActionHint(label || human || (el && el.innerText) || "");
     const burstHotkeyMode = !!st.burstHotkeyModeActive;
-    const clickUiUpdated = burstHotkeyMode ? true : await detectClickUiUpdateWithin(CLICK_UI_PROBE_MS);
-
     const clickingSensitive = isSensitiveField(el) || (login.isLogin && st.settings?.redactLoginUsernames && isLoginUsernameField(el)) || hasSensitiveKeyword(label);
 
-    await sendEvent({
+    const payload = {
       type: "click",
       url: location.href,
       tag: el && el.tagName ? el.tagName : "",
@@ -1407,18 +1417,35 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
+      viewportWidth: window.innerWidth,
       clickX: Math.max(0, Math.round(Number(e.clientX) || 0)),
       clickY: Math.max(0, Math.round(Number(e.clientY) || 0)),
       viewportW: Math.max(1, Math.round(Number(window.innerWidth) || 1)),
       viewportH: Math.max(1, Math.round(Number(window.innerHeight) || 1)),
       scrollX: Math.round(Number(window.scrollX) || 0),
       scrollY: Math.round(Number(window.scrollY) || 0),
-      clickUiUpdated,
+      clickUiUpdated: true,
       burstHotkeyMode,
       burstBypassUiProbe: burstHotkeyMode,
       burstCaptureForced: burstHotkeyMode,
       forceScreenshot: !!login.isLogin || burstHotkeyMode
-    });
+    };
+    // A click that navigates away would be lost while we probe for a UI update: park the payload so
+    // the pagehide flush below can send it (the navigation itself is the UI update).
+    pendingClickPayload = payload;
+    const clickUiUpdated = burstHotkeyMode ? true : await detectClickUiUpdateWithin(CLICK_UI_PROBE_MS);
+    if (pendingClickPayload !== payload) return; // already flushed by pagehide
+    pendingClickPayload = null;
+    payload.clickUiUpdated = clickUiUpdated;
+    await sendEvent(payload);
+  }, true);
+
+  let pendingClickPayload = null;
+  window.addEventListener("pagehide", () => {
+    if (!pendingClickPayload) return;
+    const payload = pendingClickPayload;
+    pendingClickPayload = null;
+    sendEvent(payload).catch(() => {});
   }, true);
 
   // ---- Change capture ----
@@ -1464,6 +1491,7 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
+      viewportWidth: window.innerWidth,
       burstHotkeyMode,
       burstCaptureForced: burstHotkeyMode,
       forceScreenshot: !!login.isLogin || burstHotkeyMode
@@ -1550,6 +1578,7 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
+      viewportWidth: window.innerWidth,
       forceScreenshot: finalForceScreenshot
     });
   }
@@ -1579,6 +1608,15 @@
       cursorTrackingState.isActiveCaptureTab = true;
       refreshCursorTrackingState(false).catch(() => {});
       emitCursorSampleFromLastPosition();
+    } else if (msgType === "UIR_COLLECT_RECTS") {
+      // Background asks the top frame for the current sensitive-field rects (burst frames,
+      // lifecycle screenshots, and child-frame events are masked with this report).
+      if (!IS_TOP_FRAME) return;
+      return Promise.resolve({
+        redactRects: collectSensitiveRectsWithFrame().rects,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        viewportWidth: window.innerWidth
+      });
     }
     const refreshMessage = msgType === "UIR_ACTIVE_TARGET_UPDATED" || msgType === "UIR_CAPTURE_MODE_CHANGED";
     if (!refreshMessage) return;
@@ -1608,6 +1646,7 @@
       frameIsTop: redaction.frameIsTop,
       frameOffsetKnown: redaction.frameOffsetKnown,
       devicePixelRatio: window.devicePixelRatio || 1,
+      viewportWidth: window.innerWidth,
       forceScreenshot: true
     });
   }, 600);

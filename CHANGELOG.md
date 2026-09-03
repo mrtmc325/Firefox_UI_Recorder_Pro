@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Fixed (functional verification pass, driven end-to-end in headless Firefox)
+- Report editor saves: `_saveReportsImmediate` referenced an undeclared `mergedReports`, so every save from the report page (rename, delete, tags, templates, annotations, import) rejected. The cross-writer merge line is restored, and a deleted report is now tracked so the merge cannot resurrect it.
+- Popup Start: `permissions.request` was called after awaited tab/permission lookups, which Firefox rejects outside the synchronous user-input handler, so non-active-tab and multi-tab scopes could never obtain host permission. The request is now issued first; scope errors open the Recording Scope group instead of landing in a collapsed one; an already-running recording no longer reports a false "started".
+- Markdown and Playwright exports read `ev.notes`/`ev.note`, fields nothing writes; they now read `ev.text` on note events. Markdown export also resolves spool-backed screenshot refs (burst frames, replaced media, imports) instead of silently dropping them.
+- Templates panel: controls stay bound (with a status message) when no report is open, so saved templates remain listable and deletable; the never-applied `editorTheme` field was dropped from templates.
+- Steps-panel Move up/down now goes through the undo-aware path (matches the timeline swap buttons and the v1.21.0 changelog).
+- Expand/Collapse controls now reach the nested export-theme groups; the capture-summary "i" button shows its summary on click; deep-link misses surface a status line; undo bars use `role="region"` + `aria-label` as documented; undo-restore save failures are surfaced instead of swallowed.
+- Popup: "Add note" reports why a note was ignored; capture-mode and page-watch controls are disabled (with a title) while GIF burst mode overrides them; the unreachable 15 FPS option was removed and a stored 15 now normalizes to 10 everywhere; custom-rule / redaction-tester statuses are colour-coded (the `data-kind` hook had no CSS); host-permission patterns drop the port (Firefox rejects `http://localhost:3000/*`), a synchronous `permissions.request` throw is surfaced instead of killing the handler, and the post-sync tab set is re-checked against granted origins before Start.
+- Watch mode now adds a newly activated recordable tab to the live recording scope, as its status text always claimed.
+- Recording survives same-tab navigations: the tab-update handler called `rememberUsableWebTab`, a function that does not exist anywhere, so it threw on its first line for every active-tab update (watch-mode draft updates on navigation never worked either), and it never re-injected the content script after a full page load. The dangling calls are gone and the content script is re-injected on load completion for in-scope tabs (login -> dashboard flows now keep capturing).
+- A click that navigates away (link, "Go to" button) is no longer lost: the click handler parks its payload while it probes for a UI update and a `pagehide` flush sends it if the page unloads first.
+- Table of Contents header lost the curved left accent that rendered as a "(" on the rounded panel.
+
+### Security
+- Screenshots are masked in the background before hashing/storage: the sensitive-field rects content.js already collected (password inputs, login usernames, secret-keyword labels, verified child-iframe fields) are blacked out when redaction is on, instead of being stored beside unmasked pixels. Applies to step screenshots, GIF burst frames, and the start/stop lifecycle screenshots; rects always come from the top frame (its own events or an on-demand `UIR_COLLECT_RECTS` request), scale is derived from the captured image vs the page viewport (HiDPI/zoom safe), and masking failure fails closed (no frame).
+- Popup-only runtime messages (`START_RECORDING`, `UPDATE_SETTINGS`, `GET_DIAGNOSTICS`, `ADD_NOTE`, `OPEN_*`, `TEST_REDACTION`) are rejected from any sender with a tab.
+- Recorded, note, burst, and lifecycle URLs are capped and have secret-bearing query and fragment parameters redacted before persistence (whole-token match, so `zipcode`/`design` are untouched); element ids are capped.
+- `optional_permissions` narrowed from `<all_urls>` to `http://*/*` + `https://*/*` (docs already claimed this).
+- Imported bundle JSON is stripped of `__proto__`/`constructor`/`prototype` keys before merging; OpenAI calls carry a 60 s abort timeout; `bgWarn` console output goes through the diagnostics PII sanitizer; frame-token comments no longer claim page scripts cannot see the token.
+
+### Removed (dead code)
+- Decode-worker subsystem (`frame_spool_worker.js` + ~430 lines in `frame_spool.js` + background options): never enabled in any shipped configuration.
+- Orphan JS for controls deleted from `report.html` in v1.15.3 (`#url-filter`, `#export-theme-toc-size/-layout/-meta`), the URL hint chips they fed, `parseExportUrl` and its four helpers, `containRectForMediaExport`, duplicate `clamp`, write-only vault decrypt helpers, unused constants, the `SECTION_MIC_*` rejection stub and mic-diag purge, `hasScreenshotPayload`, `isFrameSpoolBackpressureActive`.
+- The "View vector annotations plan (coming soon)" placeholder button and its panel (design doc kept).
+- `docs/dev-run.sh` (flagged by `web-ext lint`; the command is documented instead), two tracked v1.12.x `.xpi` build artifacts, five unused CSS rules, five duplicated CSS blocks, unreachable exit paths in `docs/optest.js`.
+
 ## v1.21.0 - 2026-07-17
 
 ### Added
