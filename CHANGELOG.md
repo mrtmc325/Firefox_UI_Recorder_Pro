@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.24.1 - 2026-09-03
+
+### Changed — first store release / production license endpoint
+- `LICENSE_SERVER_ORIGIN` set to the production license host `https://uiprofirefox.conner.house`. The client HMAC and Ed25519 signing public key remain owner-baked from the deployed server's secrets before the signed store build (both are public values that ship in the package; the signing private key stays on the server).
+- Synced the version across `manifest.json`, `README.md`, `README.txt`, `docs.html` (the 1.24.0 hardening had left the mirrors at 1.23.0).
+- AMO submission runbook (`docs/AMO_SUBMISSION.md`) expanded with the one-time license-server deployment + secret-baking steps and the production endpoint in the reviewer notes.
+
 ## v1.24.0 - 2026-09-03
 
 ### Changed — license hardening (server-authoritative, tamper-resistant client state)

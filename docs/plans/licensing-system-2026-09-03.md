@@ -109,7 +109,7 @@ while (countActive(licenseId) > license.seats) revokeOldestActive(licenseId, "se
 
 ## Open questions
 
-- Production hostname (placeholder `https://license.example.invalid` until the owner decides).
+- ~~Production hostname~~ Resolved 2026-09-03: **https://uiprofirefox.conner.house** (baked into `LICENSE_SERVER_ORIGIN`).
 - Whether purchases arrive by manual admin entry only, or later via a payment-provider webhook (out of scope now).
 - Whether a licensed export should be watermark-free while free exports carry a notice (not requested; not done).
 
@@ -121,4 +121,4 @@ while (countActive(licenseId) > license.seats) revokeOldestActive(licenseId, "se
 
 Updated 2026-09-03: initial design; server implemented first, extension side and docs follow in the same change.
 
-Updated 2026-09-03: implemented — server (license-server/), extension license module + free-tier caps, popup License group, tests (license.mjs 11/11, optest license assertions, server 4/4), docs, and SBOM. Production hostname and client secret remain owner-set before the store build.
+Updated 2026-09-03: implemented — server (license-server/), extension license module + free-tier caps, popup License group, tests (license.mjs 11/11, optest license assertions, server 4/4), docs, and SBOM. Client HMAC and signing public key remain owner-set (from the deployed server) before the store build; production host resolved to https://uiprofirefox.conner.house.

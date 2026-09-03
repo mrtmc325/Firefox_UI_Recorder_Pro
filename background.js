@@ -875,9 +875,9 @@ function clearRecordingTabSelection(reason = "clear") {
 // only when that signature verifies against the baked public key and the token has not expired — editing
 // stored data cannot forge it. The token is refreshed on a 48 h check-in and expires after ~7 days
 // offline. Seats are enforced by the server (the oldest device is demoted when a purchase is oversubscribed).
-const LICENSE_SERVER_ORIGIN = ""; // owner: set to the HTTPS license host before the store build
-const LICENSE_CLIENT_HMAC = ""; // owner: paste the value from `node license-server/cli.mjs gen-hmac`
-const LICENSE_SIGNING_PUBLIC_KEY = ""; // owner: raw Ed25519 public key (base64) from `node license-server/cli.mjs gen-signing-key`
+const LICENSE_SERVER_ORIGIN = "https://uiprofirefox.conner.house"; // production license host
+const LICENSE_CLIENT_HMAC = ""; // BAKE BEFORE THE SIGNED BUILD: the production server's LICENSE_CLIENT_HMAC (public deterrent, ships in the package)
+const LICENSE_SIGNING_PUBLIC_KEY = ""; // BAKE BEFORE THE SIGNED BUILD: the production server's Ed25519 PUBLIC key (base64); the private half stays on the server
 const LICENSE_STORAGE_KEY = "__uiRecorderLicense";
 const LICENSE_INSTALL_ID_KEY = "__uiRecorderInstallId";
 const LICENSE_SERVER_OVERRIDE_KEY = "__uiRecorderLicenseServerOverride"; // loopback http only (local harness)

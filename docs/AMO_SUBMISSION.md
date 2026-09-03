@@ -11,6 +11,43 @@ Copy-ready listing text and assets live in `docs/store/` (`LISTING.md`, icons, s
    a secrets manager. Not needed for uploads through the web UI. Never commit or paste them.
 3. Firefox 154+ installed for the local acceptance run (`docs/e2e/run.mjs`).
 
+## 0.5 License server & activation secrets (one-time, before the first build)
+
+The extension is wired to the production license host **https://uiprofirefox.conner.house** (`LICENSE_SERVER_ORIGIN` in `background.js`).
+Free installs never contact it; activation and the 48 h check-in only work once that host runs the license server
+with **matching** secrets. Do this once (and whenever you rotate secrets):
+
+1. **DNS** — point `uiprofirefox.conner.house` at the server host.
+2. **TLS** — obtain a certificate for that host (e.g. Let's Encrypt). Terminate TLS either in the app
+   (`LICENSE_TLS_CERT_FILE`/`LICENSE_TLS_KEY_FILE`) or at a reverse proxy in front of it
+   (then set `LICENSE_ALLOW_HTTP=1` and `LICENSE_TRUST_PROXY=1` on the app and bind it to `127.0.0.1`). The extension
+   speaks HTTPS only; never expose plain HTTP to the internet.
+3. **Generate production secrets on the server** (never reuse the local-test values):
+
+   ```bash
+   cd license-server
+   node cli.mjs gen-hmac           # -> LICENSE_CLIENT_HMAC          (public deterrent; also baked into the extension)
+   node cli.mjs gen-signing-key    # -> LICENSE_SIGNING_KEY (private, server-only) + the PUBLIC key (baked into the extension)
+   node cli.mjs hash-password      # type the admin password -> LICENSE_ADMIN_PASSWORD_HASH
+   ```
+
+4. **Configure and deploy** — copy `license-server/env.sample` to `.env`, fill in `LICENSE_CLIENT_HMAC`,
+   `LICENSE_SIGNING_KEY` (required — the server refuses to start without it), `LICENSE_ADMIN_PASSWORD_HASH`, the TLS
+   paths, and `LICENSE_ADMIN_PORT` (admin on its own loopback listener, reached over an SSH tunnel — see
+   `license-server/README.md`). Then `docker compose -f license-server/deploy/compose.yaml up -d` (or the systemd unit).
+5. **Bake the two PUBLIC values into `background.js` before building** (the origin is already set):
+
+   - `LICENSE_CLIENT_HMAC` = the `gen-hmac` value
+   - `LICENSE_SIGNING_PUBLIC_KEY` = the `gen-signing-key` **public** key (base64)
+
+   Both are public and ship in the package; the signing **private** key and the admin hash never leave the server.
+   Committing the two public values keeps builds reproducible (recommended); or bake them as a pre-build working-tree
+   edit. A build with either value blank leaves activation dead (installs stay on the free tier), so never ship blank.
+6. **Verify** — with the two values baked, `node docs/e2e/license.mjs` exercises the full activate → signed-token →
+   seat-enforcement flow against a throwaway local server; for a live smoke test, seed a test email in the admin UI and
+   activate it from a temporary Firefox profile. The extension needs **no host permission** for the license origin — the
+   server sends CORS for the `moz-extension://` origin.
+
 ## 1. Preflight
 
 1. Working tree clean except the intended release changes; on a feature branch (the repo's git-guard blocks
@@ -18,6 +55,7 @@ Copy-ready listing text and assets live in `docs/store/` (`LISTING.md`, icons, s
 2. Version bumped in `manifest.json` and mirrored in `README.md`, `README.txt`, `docs.html`, `CHANGELOG.md`.
 3. Extension ID stable: `browser_specific_settings.gecko.id = "firefox-ui-recorder-pro@mrtmc325"`.
 4. `PRIVACY.md` matches shipped behavior (it is the privacy policy text pasted into the listing).
+5. Activation secrets baked per section 0.5 (`LICENSE_CLIENT_HMAC` and `LICENSE_SIGNING_PUBLIC_KEY` non-empty in `background.js`) — required for paid activation to work; free-tier packaging works without them.
 
 ## 2. Manifest compliance
 
@@ -80,7 +118,7 @@ answer "No" to the source-code question, and point reviewers at the public repos
    - `https://api.openai.com` — optional narration (text-to-speech) and audio-file transcription in the report editor.
      Every call requires the user's own API key, an explicit click, and the optional `websiteContent` permission,
      requested at that moment. 60 s deadline.
-   - The owner-operated **license server** (host baked into `background.js` as `LICENSE_SERVER_ORIGIN`, HTTPS) — contacted
+   - The owner-operated **license server** at `https://uiprofirefox.conner.house` (baked into `background.js` as `LICENSE_SERVER_ORIGIN`, HTTPS) — contacted
      only after the user enters a purchase email in the popup to activate a paid license, and every 48 hours thereafter
      while licensed. Sends only the email, a random install id, and the extension version, and receives back a signed
      activation token. Free installs never contact it.
@@ -120,3 +158,5 @@ hand, and reviewer notes reflecting the 1.22.0 hardening (masking, sender gate, 
 Updated 2026-09-03: added the licensing disclosure (free-tier caps enforced locally; optional activation + 48 h check-in to the owner-hosted license server) and noted that `license-server/` is excluded from the package.
 
 Updated 2026-09-03: v1.24.0 — activation now returns an Ed25519-signed token; removed the in-popup workflow text (PRIVACY.md remains the disclosure); admin server moved to a loopback-only listener.
+
+Updated 2026-09-03: v1.24.1 first store release — production license host https://uiprofirefox.conner.house baked into LICENSE_SERVER_ORIGIN; added section 0.5 (license-server deployment + activation-secret baking) and named the host in the reviewer notes.
