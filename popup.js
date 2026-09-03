@@ -93,7 +93,7 @@ function searchReports(reports, query, cap) {
 
 function normalizeHotkeyBurstFps(value) {
   const fps = Math.round(Number(value));
-  if (fps === 10 || fps === 15) return fps;
+  if (fps >= 10) return 10;
   return 5;
 }
 
@@ -165,8 +165,8 @@ function buildOriginPatternFromUrl(url) {
   try {
     const parsed = new URL(raw);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-    if (!parsed.host) return "";
-    return `${parsed.protocol}//${parsed.host}/*`;
+    if (!parsed.hostname) return "";
+    return `${parsed.protocol}//${parsed.hostname}/*`; // no port: match patterns reject ports and match any port without one
   } catch (_) {
     return "";
   }
@@ -190,6 +190,10 @@ function setTabScopeStatus(text, kind = "muted") {
   node.textContent = tabScopeStatusText;
   node.classList.toggle("tab-scope-error", tabScopeStatusKind === "error");
   node.classList.toggle("tab-scope-success", tabScopeStatusKind === "success");
+  if (tabScopeStatusKind === "error") {
+    const group = node.closest("details");
+    if (group) group.open = true;
+  }
 }
 
 function isSameNumberList(left, right) {
@@ -392,12 +396,12 @@ function getSelectedScopeTabIds() {
     .sort((a, b) => a - b);
 }
 
-async function ensureHostPermissionsForTabIds(tabIds) {
+function collectHostOriginPatterns(tabIds) {
   const selected = normalizeTabIdList(tabIds);
   if (!selected.length) {
     return { ok: false, error: "Select at least one tab before starting recording." };
   }
-  if (!browser || !browser.permissions) {
+  if (!browser || !browser.permissions || typeof browser.permissions.request !== "function") {
     return { ok: false, error: "Host permission API is unavailable in this Firefox context." };
   }
   const candidateTabs = tabScopeTabs.filter((tab) => selected.includes(tab.id));
@@ -406,47 +410,44 @@ async function ensureHostPermissionsForTabIds(tabIds) {
   }
   const origins = [];
   const seen = new Set();
-  const activeSelectedTabIds = new Set(
-    candidateTabs
-      .filter((tab) => !!tab.active)
-      .map((tab) => tab.id)
-  );
   candidateTabs.forEach((tab) => {
-    if (activeSelectedTabIds.has(tab.id)) return;
+    if (tab.active) return; // activeTab already covers the active tab
     const pattern = buildOriginPatternFromUrl(tab.url);
     if (!pattern || seen.has(pattern)) return;
     seen.add(pattern);
     origins.push(pattern);
   });
+  return { ok: true, origins };
+}
+
+// Firefox only honors permissions.request while still inside the synchronous user-input handler:
+// call this before any await in the click handler. Already-granted origins resolve without a prompt.
+async function requestHostPermissions(origins) {
   if (!origins.length) return { ok: true };
-  if (typeof browser.permissions.contains !== "function" || typeof browser.permissions.request !== "function") {
-    return { ok: false, error: "Firefox permissions API is unavailable for host-origin grants." };
-  }
-  const missingOrigins = [];
-  for (const pattern of origins) {
-    try {
-      const granted = !!(await browser.permissions.contains({ origins: [pattern] }));
-      if (!granted) missingOrigins.push(pattern);
-    } catch (_) {
-      missingOrigins.push(pattern);
-    }
-  }
-  if (!missingOrigins.length) return { ok: true };
   try {
-    const granted = !!(await browser.permissions.request({ origins: missingOrigins }));
-    if (!granted) {
-      return {
-        ok: false,
-        error: "Host permission was denied. Recording remains scoped off until access is granted."
-      };
-    }
-    return { ok: true };
+    // Reached synchronously from the click handler (no await before it) so Firefox still sees the
+    // user gesture; the async wrapper only turns a synchronous throw into a handled rejection.
+    const granted = await browser.permissions.request({ origins });
+    return granted
+      ? { ok: true }
+      : { ok: false, error: "Host permission was denied. Recording remains scoped off until access is granted." };
   } catch (err) {
-    return {
-      ok: false,
-      error: String((err && err.message) || "Failed requesting host permission for selected tabs.")
-    };
+    return { ok: false, error: String((err && err.message) || "Failed requesting host permission for selected tabs.") };
   }
+}
+
+// After the tab list is re-synced, confirm every selected non-active tab still has a granted origin
+// (a tab may have navigated, or watch mode may have added one, since the request was built).
+async function findMissingHostOrigins(tabIds) {
+  const scope = collectHostOriginPatterns(tabIds);
+  if (!scope.ok) return [];
+  const missing = [];
+  for (const origin of scope.origins) {
+    let granted = false;
+    try { granted = !!(await browser.permissions.contains({ origins: [origin] })); } catch (_) { granted = false; }
+    if (!granted) missing.push(origin);
+  }
+  return missing;
 }
 
 function syncPopupVersionLabel() {
@@ -602,7 +603,6 @@ async function refresh() {
         queueBytes: 0,
         droppedFrames: 0,
         backpressureLevel: "healthy",
-        decodeMode: "inline-safe",
         safetyCapActive: false,
         queueBytesHighWater: 0,
         effectiveBurstFps: 0
@@ -635,7 +635,6 @@ async function refresh() {
       queueBytes: 0,
       droppedFrames: 0,
       backpressureLevel: "healthy",
-      decodeMode: "inline-safe",
       safetyCapActive: false,
       queueBytesHighWater: 0,
       effectiveBurstFps: 0
@@ -719,7 +718,6 @@ async function refresh() {
       `Spool: depth ${Number(spoolRuntime.queueDepth) || 0}`,
       `bytes ${(Math.max(0, Number(spoolRuntime.queueBytes) || 0) / (1024 * 1024)).toFixed(2)}MB`,
       `pressure ${String(spoolRuntime.backpressureLevel || "healthy")}`,
-      `mode ${String(spoolRuntime.decodeMode || "inline-safe")}`,
       `safety cap ${spoolRuntime.safetyCapActive ? "on" : "off"}`,
       `dropped ${Number(spoolRuntime.droppedFrames) || 0}`
     ].join(" | ");
@@ -744,6 +742,14 @@ async function refresh() {
   document.getElementById("page-watch").checked = !!st.settings?.pageWatchEnabled;
   document.getElementById("page-watch-ms").value = st.settings?.pageWatchMs ?? 500;
   document.getElementById("gif-capture-fps").value = String(configuredBurstFps);
+  // GIF burst mode overrides these two while active; show that instead of silently reverting edits.
+  const burstForcing = !!st.burstHotkeyModeActive;
+  const captureModeNode = document.getElementById("capture-mode");
+  const pageWatchNode = document.getElementById("page-watch");
+  captureModeNode.disabled = burstForcing;
+  pageWatchNode.disabled = burstForcing;
+  captureModeNode.title = burstForcing ? "GIF burst mode forces all events while active." : "";
+  pageWatchNode.title = burstForcing ? "GIF burst mode pauses page watch while active." : "";
   await syncTabScopeList(st);
   setTabScopeStatus(tabScopeStatusText, tabScopeStatusKind);
 }
@@ -833,15 +839,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
   document.getElementById("start").addEventListener("click", async () => {
+    const scope = collectHostOriginPatterns(getSelectedScopeTabIds());
+    if (!scope.ok) {
+      setTabScopeStatus(scope.error, "error");
+      return;
+    }
+    const permissionRequest = requestHostPermissions(scope.origins);
     await syncTabScopeList(null, { force: true });
     const selectedTabIds = getSelectedScopeTabIds();
     if (!selectedTabIds.length) {
       setTabScopeStatus("Select at least one tab before starting recording.", "error");
       return;
     }
-    const permissions = await ensureHostPermissionsForTabIds(selectedTabIds);
+    const permissions = await permissionRequest;
     if (!permissions.ok) {
       setTabScopeStatus(permissions.error || "Host permission request failed.", "error");
+      return;
+    }
+    const missingOrigins = await findMissingHostOrigins(selectedTabIds);
+    if (missingOrigins.length) {
+      setTabScopeStatus(`Tab set changed since the permission request (${missingOrigins.join(", ")}). Press Start again.`, "error");
       return;
     }
     await persistTabScopeDraftSelection(selectedTabIds);
@@ -852,6 +869,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         "Start recording failed."
       );
       setTabScopeStatus(message, "error");
+      await refresh();
+      return;
+    }
+    if (startResult.ignored) {
+      setTabScopeStatus("Recording is already active.", "muted");
       await refresh();
       return;
     }
@@ -866,7 +888,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("note").addEventListener("click", async () => {
     const text = window.prompt("Add note to report:");
     if (!text) return;
-    await sendMessageSafe({ type: "ADD_NOTE", text });
+    const result = await sendMessageSafe({ type: "ADD_NOTE", text });
+    if (!result || !result.ok) {
+      const reason = result && result.reason === "non-active-tab"
+        ? "the active tab is outside the recording scope"
+        : (result && result.reason === "no-active-target" ? "no active capture tab" : "recording is not active");
+      setTabScopeStatus(`Note not added: ${reason}.`, "error");
+    }
     await refresh();
   });
   document.getElementById("report").addEventListener("click", async () => {

@@ -62,8 +62,6 @@ const DEFAULT_CONTENT_SYSTEM_DESCRIPTION = "UI workflow capture";
 const EXPORT_THEME_DEFAULTS = Object.freeze({
   preset: "extension",
   font: "trebuchet",
-  tocLayout: "grid",
-  tocMeta: "host",
   accentColor: "#0ea5e9",
   titleSize: 18,
   subtitleSize: 12,
@@ -83,14 +81,28 @@ const CLICK_BURST_DEFAULTS = Object.freeze({
   clickBurstPlaybackFps: 5,
   clickBurstPlaybackSpeed: 1
 });
-const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
+const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10]);
 const CLICK_BURST_RENDER_MARKER_CAP = 10;
-const CLICK_BURST_CURSOR_TRAIL_CAP = 18;
 const CLICK_BURST_MARKER_SCALE = 3;
 const FRAME_SPOOL_BYTE_CAP = 1536 * 1024 * 1024;
 const FRAME_SPOOL_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TEXT_SPOOL_BYTE_CAP = 256 * 1024 * 1024;
 const AUDIO_SPOOL_BYTE_CAP = 512 * 1024 * 1024;
+// Imported bundles are attacker-controlled JSON: drop prototype-polluting keys while parsing.
+function parseBundleJson(text) {
+  return JSON.parse(text, (key, value) => (key === "__proto__" || key === "constructor" || key === "prototype") ? undefined : value);
+}
+
+const OPENAI_FETCH_TIMEOUT_MS = 60000;
+// Every OpenAI call is bounded so a hung connection cannot leave the narration UI stuck.
+function fetchWithTimeout(url, init, timeoutMs = OPENAI_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  // Not cleared when headers arrive: callers read the body afterwards and the same deadline must
+  // bound a stalled body stream too. Aborting an already-finished request is a no-op.
+  setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...(init || {}), signal: controller.signal });
+}
+
 const RAW_IMPORT_ZIP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const RAW_IMPORT_ZIP_MAX_ENTRIES = 60000;
 const RAW_IMPORT_ZIP_MAX_ENTRY_BYTES = 512 * 1024 * 1024;
@@ -167,8 +179,6 @@ const sectionTextCache = new Map();
 let sectionTextCacheBytes = 0;
 const sectionAudioCache = new Map();
 let sectionAudioCacheBytes = 0;
-let sectionNarrationOpenAiApiKeyCache = "";
-let sectionNarrationOpenAiApiKeyLoaded = false;
 let frameSpoolGcTimer = null;
 let frameSpoolSyncTimer = null;
 let frameSpoolPendingReports = null;
@@ -404,13 +414,6 @@ function normalizeExportTheme(raw) {
   const font = Object.prototype.hasOwnProperty.call(EXPORT_THEME_FONT_STACKS, incoming.font)
     ? incoming.font
     : EXPORT_THEME_DEFAULTS.font;
-  const allowedTocLayouts = ["grid", "list", "minimal", "columns", "bands", "outline"];
-  const tocLayout = allowedTocLayouts.includes(incoming.tocLayout)
-    ? incoming.tocLayout
-    : EXPORT_THEME_DEFAULTS.tocLayout;
-  const tocMeta = incoming.tocMeta === "url" || incoming.tocMeta === "none"
-    ? incoming.tocMeta
-    : EXPORT_THEME_DEFAULTS.tocMeta;
   const accentColor = normalizeHexColor(incoming.accentColor, EXPORT_THEME_DEFAULTS.accentColor);
   const titleSize = normalizeThemeTextSize(
     incoming.titleSize,
@@ -439,8 +442,6 @@ function normalizeExportTheme(raw) {
   return {
     preset,
     font,
-    tocLayout,
-    tocMeta,
     accentColor,
     titleSize,
     subtitleSize,
@@ -516,6 +517,7 @@ function normalizeClickBurstSettings(raw) {
 
 function normalizeHotkeyBurstFpsForReport(value) {
   const fps = Math.round(Number(value));
+  if (fps > 10) return 10;
   if (HOTKEY_BURST_FPS_OPTIONS.has(fps)) return fps;
   return CLICK_BURST_DEFAULTS.clickBurstPlaybackFps;
 }
@@ -695,7 +697,7 @@ async function requestOpenAiSpeechToTextTranscription(audioBlob, options = {}) {
   form.append("model", model);
   form.append("response_format", "json");
   form.append("file", blob, fileName);
-  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`
@@ -728,7 +730,7 @@ async function requestOpenAiTextToSpeechAudio(inputText, options = {}) {
   const model = String(opts.model || SECTION_NARRATION_OPENAI_MODEL).trim() || SECTION_NARRATION_OPENAI_MODEL;
   const voice = normalizeSectionNarrationOpenAiVoice(opts.voice || "");
   const responseFormat = String(opts.responseFormat || "mp3").trim() || "mp3";
-  const response = await fetch("https://api.openai.com/v1/audio/speech", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/audio/speech", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1778,10 +1780,6 @@ function normalizeReportTemplateName(value, fallback) {
   return raw || String(fallback || "Untitled template");
 }
 
-function normalizeReportTemplateEditorTheme(value) {
-  return String(value || "").toLowerCase() === "dark" ? "dark" : "light";
-}
-
 function buildTemplateFromReport(reportLike, options) {
   const opts = isPlainObject(options) ? options : {};
   const source = isPlainObject(reportLike) ? reportLike : {};
@@ -1806,7 +1804,6 @@ function buildTemplateFromReport(reportLike, options) {
     id: String(opts.id || `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
     name: normalizeReportTemplateName(opts.name, nameFallback),
     createdAtMs: Number(opts.createdAtMs) || Date.now(),
-    editorTheme: normalizeReportTemplateEditorTheme(opts.editorTheme),
     exportTheme: normalizeExportTheme(isPlainObject(opts.exportTheme) ? opts.exportTheme : source.exportTheme),
     sections,
   };
@@ -1828,7 +1825,6 @@ function normalizeStoredReportTemplate(raw) {
     id: String(raw.id || `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
     name: normalizeReportTemplateName(raw.name),
     createdAtMs: Number(raw.createdAtMs) || Date.now(),
-    editorTheme: normalizeReportTemplateEditorTheme(raw.editorTheme),
     exportTheme: normalizeExportTheme(raw.exportTheme),
     sections,
   };
@@ -1843,7 +1839,7 @@ function enforceReportTemplatesCap(list) {
 function applyTemplateToReport(reportLike, templateLike) {
   const base = isPlainObject(reportLike) ? reportLike : {};
   const tpl = normalizeStoredReportTemplate(templateLike) || {
-    editorTheme: "light", exportTheme: normalizeExportTheme(null), sections: []
+    exportTheme: normalizeExportTheme(null), sections: []
   };
   if (!Array.isArray(base.events)) base.events = [];
   base.exportTheme = normalizeExportTheme(tpl.exportTheme);
@@ -1937,12 +1933,12 @@ function buildReportMarkdown(reportLike, options) {
       lines.push("```");
       lines.push("");
     }
-    const noteText = String(ev && (ev.notes || ev.note) || "").trim();
+    const noteText = ev && ev.type === "note" ? String(ev.text || "").trim() : "";
     if (noteText) {
       lines.push(escapeMarkdownBlock(noteText));
       lines.push("");
     }
-    const inlineDataUrl = safeDataImageUrl(ev && ev.screenshot || "");
+    const inlineDataUrl = safeDataImageUrl(typeof opts.screenshotFor === "function" ? opts.screenshotFor(ev) : (ev && ev.screenshot || ""));
     if (inlineDataUrl) {
       const mime = (inlineDataUrl.match(/^data:([^;,]+)/i) || [])[1] || "image/png";
       const ext = screenshotExtensionForMime(mime);
@@ -2131,7 +2127,7 @@ function buildPlaywrightScript(reportLike) {
       continue;
     }
     if (type === "note" || type === "outcome") {
-      const text = trimForPlaywrightName(ev.notes || ev.note || ev.outcome || "");
+      const text = trimForPlaywrightName((type === "note" ? ev.text : ev.outcome) || "");
       if (text) lines.push(`  // ${text.replace(/\r?\n/g, " ")}`);
       continue;
     }
@@ -2722,6 +2718,17 @@ try {
   }, { capture: true });
 } catch (_) {}
 
+// Identity keys of every report this page has seen (loaded, imported, or restored here). A stored
+// report NOT in this set was written by the background after load and must survive the save; one
+// that IS in it but is missing from pageReports was removed here (delete, retention trim) and stays gone.
+const knownReportKeys = new Set();
+function rememberReportKeys(list) {
+  (Array.isArray(list) ? list : []).forEach((entry) => {
+    const key = reportIdentityKey(entry);
+    if (key) knownReportKeys.add(key);
+  });
+}
+
 async function _saveReportsImmediate(reports) {
   const storageContext = await resolveReportStorageContext();
   const pageReports = Array.isArray(reports) ? reports : [];
@@ -2730,8 +2737,11 @@ async function _saveReportsImmediate(reports) {
   const knownKeys = new Set(pageReports.map(reportIdentityKey).filter(Boolean));
   const unknownNewer = storedReports.filter((entry) => {
     const key = reportIdentityKey(entry);
-    return key && !knownKeys.has(key);
+    return key && !knownKeys.has(key) && !knownReportKeys.has(key);
   });
+  // Reports written by the background since this page loaded must survive the save.
+  const mergedReports = unknownNewer.length ? [...unknownNewer, ...pageReports] : pageReports;
+  rememberReportKeys(pageReports);
   // T2C.7 remediation: never emit "vault unlock failed" placeholder objects —
   // substitute the raw envelope we captured at load time so ciphertext survives
   // a save cycle when the user could not unlock the vault this session.
@@ -2832,6 +2842,7 @@ async function loadReportsFromStorage() {
   const storageContext = await resolveReportStorageContext();
   const stored = await storageContext.area.get(["reports"]);
   const rawReports = Array.isArray(stored && stored.reports) ? stored.reports : [];
+  rememberReportKeys(rawReports);
   // T2C.7: if any envelope is encrypted, prompt for the passphrase once and try to
   // decrypt. Reports that fail decrypt are surfaced as placeholder entries so the
   // list still renders. Plaintext reports pass through untouched.
@@ -2944,9 +2955,8 @@ function setEventSearchableField(ev, key, value) {
   EVENT_HAYSTACK_CACHE.delete(ev);
 }
 
-function filterEvents(events, query, typeFilter, urlFilter, tagFilters) {
+function filterEvents(events, query, typeFilter, tagFilters) {
   const q = lower(query || "");
-  const uf = lower(urlFilter || "");
   // T2 2B.7 — active tag chips: event must carry at least one of them.
   let tagSet = null;
   if (tagFilters) {
@@ -2956,7 +2966,6 @@ function filterEvents(events, query, typeFilter, urlFilter, tagFilters) {
   }
   return events.filter(ev => {
     if (typeFilter && typeFilter !== "all" && ev.type !== typeFilter) return false;
-    if (uf && !lower(ev.url || "").includes(uf)) return false;
     if (tagSet) {
       const evTags = getEventTags(ev);
       if (!evTags.some((t) => tagSet.has(t))) return false;
@@ -2964,37 +2973,6 @@ function filterEvents(events, query, typeFilter, urlFilter, tagFilters) {
     if (!q) return true;
     return getEventSearchHaystack(ev).includes(q);
   });
-}
-
-function hostFromUrl(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  try {
-    return new URL(raw).host || "";
-  } catch (_) {
-    return "";
-  }
-}
-
-function shortenText(value, maxLen) {
-  const s = String(value || "").trim();
-  if (!s) return "";
-  const limit = Number(maxLen) || 0;
-  if (limit <= 0 || s.length <= limit) return s;
-  return `${s.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
-}
-
-function compactUrlForDisplay(value, maxLen = 64) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  try {
-    const parsed = new URL(raw);
-    const path = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : "";
-    const hasQuery = parsed.search ? " ?" : "";
-    return shortenText(`${parsed.host}${path}${hasQuery}`, maxLen);
-  } catch (_) {
-    return shortenText(raw, maxLen);
-  }
 }
 
 function formatExportTimestamp(value) {
@@ -3016,64 +2994,10 @@ function formatExportTimestamp(value) {
   }
 }
 
-function simpleStableToken(value) {
-  const input = String(value || "");
-  let hash = 2166136261;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36).slice(0, 6).toUpperCase();
-}
-
-function cleanPathToken(value) {
-  const s = String(value || "").trim().toLowerCase();
-  if (!s) return "";
-  return s.replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-}
-
-function parseExportUrl(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return { raw: "", host: "", shortLabel: "", fullLabel: "", safeHref: "", genericLabel: "", uniqueRef: "" };
-  try {
-    const parsed = new URL(raw);
-    const path = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : "/";
-    const queryHint = parsed.search ? " ?params" : "";
-    const fullLabel = `${parsed.host}${path}${queryHint}`;
-    const shortLabel = shortenText(fullLabel, 58);
-    const safeHref = (parsed.protocol === "http:" || parsed.protocol === "https:") ? parsed.toString() : "";
-    const hostLabel = String(parsed.host || "")
-      .replace(/^www\./i, "")
-      .split(".")
-      .filter(Boolean)[0] || "page";
-    const segments = String(parsed.pathname || "/")
-      .split("/")
-      .map((part) => cleanPathToken(part))
-      .filter(Boolean);
-    const routeToken = segments.length ? segments[segments.length - 1] : "";
-    const normalizedRoute = routeToken && routeToken !== hostLabel ? shortenText(routeToken, 22) : "";
-    const genericLabel = normalizedRoute ? `${hostLabel} · ${normalizedRoute}` : hostLabel;
-    const uniqueRef = simpleStableToken(`${parsed.pathname || "/"}${parsed.search || ""}`);
-    return { raw, host: parsed.host, shortLabel, fullLabel, safeHref, genericLabel, uniqueRef };
-  } catch (_) {
-    const shortLabel = compactUrlForDisplay(raw, 58);
-    return {
-      raw,
-      host: "",
-      shortLabel,
-      fullLabel: raw,
-      safeHref: "",
-      genericLabel: shortenText(shortLabel || "page", 32),
-      uniqueRef: simpleStableToken(raw)
-    };
-  }
-}
-
 function buildHints(events) {
   const fields = new Set();
   const buttons = new Set();
   const typeCounts = new Map();
-  const hostCounts = new Map();
   let firstSubmitStepId = "";
   let firstNavStepId = "";
   let firstNoShotStepId = "";
@@ -3081,8 +3005,6 @@ function buildHints(events) {
   events.forEach(ev => {
     const tpe = String((ev && ev.type) || "event");
     typeCounts.set(tpe, (typeCounts.get(tpe) || 0) + 1);
-    const host = hostFromUrl(ev && ev.url);
-    if (host) hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
     const hasShot = !!(
       ev &&
       (
@@ -3108,7 +3030,6 @@ function buildHints(events) {
     fields: Array.from(fields),
     buttons: Array.from(buttons),
     typeCounts: Array.from(typeCounts.entries()).sort((a, b) => b[1] - a[1]),
-    hostCounts: Array.from(hostCounts.entries()).sort((a, b) => b[1] - a[1]),
     firstSubmitStepId,
     firstNavStepId,
     firstNoShotStepId,
@@ -3122,12 +3043,10 @@ function renderHints(target, events, options) {
   target.innerHTML = "";
 
   const applyTypeFilter = options && typeof options.applyTypeFilter === "function" ? options.applyTypeFilter : null;
-  const applyUrlFilter = options && typeof options.applyUrlFilter === "function" ? options.applyUrlFilter : null;
   const applySearch = options && typeof options.applySearch === "function" ? options.applySearch : null;
   const clearFilters = options && typeof options.clearFilters === "function" ? options.clearFilters : null;
   const jumpToStepId = options && typeof options.jumpToStepId === "function" ? options.jumpToStepId : null;
   const currentTypeFilter = options && options.currentTypeFilter ? String(options.currentTypeFilter) : "all";
-  const currentUrlFilter = options && options.currentUrlFilter ? String(options.currentUrlFilter).trim() : "";
 
   const summary = el(
     "div",
@@ -3155,17 +3074,6 @@ function renderHints(target, events, options) {
         `Type: ${type} (${count})`,
         () => applyTypeFilter(type),
         currentTypeFilter === type
-      );
-    });
-  }
-
-  if (applyUrlFilter) {
-    const topHosts = hints.hostCounts.slice(0, 3);
-    topHosts.forEach(([host, count]) => {
-      addActionChip(
-        `URL: ${host} (${count})`,
-        () => applyUrlFilter(host),
-        !!currentUrlFilter && currentUrlFilter === host
       );
     });
   }
@@ -4987,7 +4895,6 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
     const text = `${Math.abs(Math.round(w))} × ${Math.abs(Math.round(h))}`;
     previewCtx.font = "11px sans-serif";
     const padX = 6;
-    const padY = 4;
     const textWidth = previewCtx.measureText(text).width;
     const boxW = Math.ceil(textWidth + padX * 2);
     const boxH = 18;
@@ -5456,7 +5363,7 @@ function setupAnnotationTools(canvas, previewCanvas, screenshotImg, ev, report, 
         clearTimeout(persistTimer);
         persistTimer = null;
       }
-      saveReports(reports);
+      saveReports(reports).catch((err) => console.warn("annotation save failed:", err));
     },
     undo: () => restoreFromHistory(),
     load: (dataUrl) => {
@@ -5842,7 +5749,7 @@ body{
   gap:10px;
   margin-bottom:10px;
   border:1px solid var(--edge);
-  border-left:4px solid var(--accent);
+  box-shadow:inset 4px 0 0 var(--accent);
   border-radius:14px;
   padding:8px 10px;
   background:linear-gradient(180deg,var(--panel),var(--paper));
@@ -5868,7 +5775,7 @@ body{
   margin:0 0 8px;
   padding:6px 8px;
   border:1px dashed var(--edge);
-  border-left:3px solid var(--accent);
+  box-shadow:inset 3px 0 0 var(--accent);
   border-radius:10px;
   color:var(--muted);
   background:linear-gradient(180deg,var(--paper),var(--panel));
@@ -6028,7 +5935,7 @@ body{
   min-height:56px;
   padding:9px 12px;
   border:1px solid color-mix(in srgb, var(--edge) 65%, transparent);
-  border-left:4px solid var(--accent);
+  box-shadow:inset 4px 0 0 var(--accent);
   border-radius:12px;
   background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 90%, transparent), color-mix(in srgb, var(--paper) 90%, transparent));
   backdrop-filter:blur(3px);
@@ -6168,10 +6075,9 @@ body{
 }
 .viewer-cc-bar{
   border:1px solid var(--edge);
-  border-left:4px solid var(--accent);
   border-radius:12px;
   background:linear-gradient(180deg,var(--paper),var(--panel));
-  box-shadow:0 6px 14px rgba(15,23,42,0.12);
+  box-shadow:inset 4px 0 0 var(--accent),0 6px 14px rgba(15,23,42,0.12);
 }
 .viewer-cc-body{
   padding:8px;
@@ -6493,7 +6399,7 @@ body{
   box-sizing:border-box;
   margin:0 auto;
   border:1px solid var(--edge);
-  border-left:4px solid var(--accent);
+  box-shadow:inset 4px 0 0 var(--accent);
   border-radius:10px;
   padding:8px;
   background:linear-gradient(180deg,var(--panel),var(--paper));
@@ -8048,7 +7954,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   const select = document.getElementById("report-select");
   const search = document.getElementById("search");
   const typeFilter = document.getElementById("type-filter");
-  const urlFilter = document.getElementById("url-filter");
   const themeToggle = document.getElementById("theme-toggle");
   const hints = document.getElementById("hints");
   const timeline = document.getElementById("timeline");
@@ -8084,14 +7989,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const exportThemeFont = document.getElementById("export-theme-font");
   const exportThemeTitleSize = document.getElementById("export-theme-title-size");
   const exportThemeSubtitleSize = document.getElementById("export-theme-subtitle-size");
-  const exportThemeTocSize = document.getElementById("export-theme-toc-size");
   const exportThemeSectionSize = document.getElementById("export-theme-section-size");
   const exportThemeTitleStyle = document.getElementById("export-theme-title-style");
   const exportThemeH1Style = document.getElementById("export-theme-h1-style");
   const exportThemeH2Style = document.getElementById("export-theme-h2-style");
   const exportThemeH3Style = document.getElementById("export-theme-h3-style");
-  const exportThemeLayout = document.getElementById("export-theme-layout");
-  const exportThemeMeta = document.getElementById("export-theme-meta");
   const exportThemeAccent = document.getElementById("export-theme-accent");
   const burstPlaybackSpeed = document.getElementById("burst-playback-speed");
   const burstPlaybackSpeedValue = document.getElementById("burst-playback-speed-value");
@@ -8107,7 +8009,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const expandConfigBtn = document.getElementById("expand-config");
   const collapseConfigBtn = document.getElementById("collapse-config");
   const collapsiblePanels = Array.from(document.querySelectorAll(".report-panel, .report-config-shell"));
-  const configRailGroups = Array.from(document.querySelectorAll(".config-rail-group, #section-controls .settings-group"));
+  const configRailGroups = Array.from(document.querySelectorAll(".config-rail-group, #section-controls .settings-group, .export-theme-group"));
   configRailGroups.forEach((group) => {
     if (group && typeof group.open === "boolean") group.open = false;
   });
@@ -8201,11 +8103,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     EXPORT_THEME_DEFAULTS.subtitleSize
   );
   populateTextSizeSelect(
-    exportThemeTocSize,
-    EXPORT_THEME_TEXT_SIZE_BOUNDS.tocTextSize,
-    EXPORT_THEME_DEFAULTS.tocTextSize
-  );
-  populateTextSizeSelect(
     exportThemeSectionSize,
     EXPORT_THEME_TEXT_SIZE_BOUNDS.sectionTextSize,
     EXPORT_THEME_DEFAULTS.sectionTextSize
@@ -8224,6 +8121,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
   refreshMeta();
+  if (metaNode) {
+    metaNode.addEventListener("click", () => setReportActionsStatus(metaNode.getAttribute("title") || ""));
+  }
 
   const hasReport = !!(report && Array.isArray(report.events) && report.events.length);
 
@@ -8257,7 +8157,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const entry = stepUndoRing.pop();
     if (!entry || (report && report.id) !== entry.reportId) { renderStepUndoBar(); return; }
     report.events = entry.events;
-    try { await saveReports(reports); } catch (_) {}
+    try { await saveReports(reports); } catch (err) {
+      stepUndoRing.push(entry);
+      setImportStatus(`Undo failed to save: ${String((err && err.message) || err)}`, true);
+    }
     render();
     renderStepUndoBar();
   }
@@ -8561,13 +8464,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     return btoa(s);
   }
 
-  function sectionNarrationOpenAiVaultB64Decode(str) {
-    const bin = atob(str);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  }
-
   async function sectionNarrationOpenAiVaultEncrypt(plaintext) {
     const key = await sectionNarrationOpenAiVaultGetKey();
     if (!key) return null;
@@ -8579,19 +8475,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       combined.set(iv, 0);
       combined.set(ct, iv.length);
       return sectionNarrationOpenAiVaultB64Encode(combined);
-    } catch (_) { return null; }
-  }
-
-  async function sectionNarrationOpenAiVaultDecrypt(blob) {
-    const key = await sectionNarrationOpenAiVaultGetKey();
-    if (!key) return null;
-    try {
-      const combined = sectionNarrationOpenAiVaultB64Decode(blob);
-      if (combined.length < 13) return null;
-      const iv = combined.subarray(0, 12);
-      const ct = combined.subarray(12);
-      const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
-      return new TextDecoder().decode(pt);
     } catch (_) { return null; }
   }
 
@@ -9059,22 +8942,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     writeCode(endCode);
     if (bitCount > 0) out.push(bitBuffer & 0xff);
     return new Uint8Array(out);
-  }
-
-  function containRectForMediaExport(imgW, imgH, targetW, targetH) {
-    const sourceW = Math.max(1, Number(imgW) || 1);
-    const sourceH = Math.max(1, Number(imgH) || 1);
-    const width = Math.max(1, Number(targetW) || 1);
-    const height = Math.max(1, Number(targetH) || 1);
-    const scale = Math.min(width / sourceW, height / sourceH);
-    const drawW = Math.max(1, Math.round(sourceW * scale));
-    const drawH = Math.max(1, Math.round(sourceH * scale));
-    return {
-      x: Math.round((width - drawW) / 2),
-      y: Math.round((height - drawH) / 2),
-      w: drawW,
-      h: drawH
-    };
   }
 
   function normalizeGifExportSize(widthRaw, heightRaw) {
@@ -10382,7 +10249,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         return false;
       }
       try {
-        const response = await fetch("https://api.openai.com/v1/audio/speech", {
+        const response = await fetchWithTimeout("https://api.openai.com/v1/audio/speech", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -12111,7 +11978,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", async () => {
       const at = Math.max(0, Math.min(reports.length, Number(snap.at || 0)));
       reports.splice(at, 0, snap.report);
-      try { await saveReports(reports); } catch (_) {}
+      try { await saveReports(reports); } catch (err) {
+        reports.splice(at, 1);
+        setImportStatus(`Undo delete failed to save: ${String((err && err.message) || err)}`, true);
+        return;
+      }
       try { sessionStorage.removeItem("firefox-ui-recorder-report-undo"); } catch (_) {}
       const url = new URL(location.href);
       url.searchParams.set("idx", String(at));
@@ -12142,14 +12013,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     exportThemeFont,
     exportThemeTitleSize,
     exportThemeSubtitleSize,
-    exportThemeTocSize,
     exportThemeSectionSize,
     exportThemeTitleStyle,
     exportThemeH1Style,
     exportThemeH2Style,
     exportThemeH3Style,
-    exportThemeLayout,
-    exportThemeMeta,
     exportThemeAccent,
     burstPlaybackSpeed,
     exportThemeReset,
@@ -12176,10 +12044,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       ensureSizeOption(exportThemeSubtitleSize, active.subtitleSize);
       exportThemeSubtitleSize.value = String(active.subtitleSize);
     }
-    if (exportThemeTocSize) {
-      ensureSizeOption(exportThemeTocSize, active.tocTextSize);
-      exportThemeTocSize.value = String(active.tocTextSize);
-    }
     if (exportThemeSectionSize) {
       ensureSizeOption(exportThemeSectionSize, active.sectionTextSize);
       exportThemeSectionSize.value = String(active.sectionTextSize);
@@ -12188,8 +12052,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (exportThemeH1Style) exportThemeH1Style.value = active.h1Style;
     if (exportThemeH2Style) exportThemeH2Style.value = active.h2Style;
     if (exportThemeH3Style) exportThemeH3Style.value = active.h3Style;
-    if (exportThemeLayout) exportThemeLayout.value = active.tocLayout;
-    if (exportThemeMeta) exportThemeMeta.value = active.tocMeta;
     if (exportThemeAccent) exportThemeAccent.value = active.accentColor;
     applyBuilderTypographyTheme(active);
     const burstSettings = normalizeClickBurstSettings(report.settings);
@@ -12270,14 +12132,11 @@ document.addEventListener("DOMContentLoaded", async () => {
           font: exportThemeFont ? exportThemeFont.value : undefined,
           titleSize: exportThemeTitleSize ? exportThemeTitleSize.value : undefined,
           subtitleSize: exportThemeSubtitleSize ? exportThemeSubtitleSize.value : undefined,
-          tocTextSize: exportThemeTocSize ? exportThemeTocSize.value : undefined,
           sectionTextSize: exportThemeSectionSize ? exportThemeSectionSize.value : undefined,
           titleStyle: exportThemeTitleStyle ? exportThemeTitleStyle.value : undefined,
           h1Style: exportThemeH1Style ? exportThemeH1Style.value : undefined,
           h2Style: exportThemeH2Style ? exportThemeH2Style.value : undefined,
           h3Style: exportThemeH3Style ? exportThemeH3Style.value : undefined,
-          tocLayout: exportThemeLayout ? exportThemeLayout.value : undefined,
-          tocMeta: exportThemeMeta ? exportThemeMeta.value : undefined,
           accentColor: exportThemeAccent ? exportThemeAccent.value : undefined
         });
     report.exportTheme = next;
@@ -12320,9 +12179,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (hasReport && exportThemeSubtitleSize) {
     exportThemeSubtitleSize.addEventListener("change", () => { persistExportThemeFromControls(false); });
   }
-  if (hasReport && exportThemeTocSize) {
-    exportThemeTocSize.addEventListener("change", () => { persistExportThemeFromControls(false); });
-  }
   if (hasReport && exportThemeSectionSize) {
     exportThemeSectionSize.addEventListener("change", () => { persistExportThemeFromControls(false); });
   }
@@ -12337,12 +12193,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   if (hasReport && exportThemeH3Style) {
     exportThemeH3Style.addEventListener("change", () => { persistExportThemeFromControls(false); });
-  }
-  if (hasReport && exportThemeLayout) {
-    exportThemeLayout.addEventListener("change", () => { persistExportThemeFromControls(false); });
-  }
-  if (hasReport && exportThemeMeta) {
-    exportThemeMeta.addEventListener("change", () => { persistExportThemeFromControls(false); });
   }
   if (hasReport && exportThemeAccent) {
     exportThemeAccent.addEventListener("input", () => { persistExportThemeFromControls(false); });
@@ -12427,12 +12277,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     renderTemplateSelect();
   }
 
-  if (hasReport && templateSaveBtn) {
+  if (templateSaveBtn) {
     templateSaveBtn.addEventListener("click", async () => {
+      if (!hasReport) { setTemplateStatus("Open a report with steps before saving a template.", true); return; }
       const name = templateNameInput ? templateNameInput.value : "";
       const tpl = buildTemplateFromReport(report, {
         name,
-        editorTheme: currentTheme,
         exportTheme: report.exportTheme,
       });
       const next = enforceReportTemplatesCap(cachedTemplates.concat([tpl]));
@@ -12444,8 +12294,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  if (hasReport && templateLoadBtn) {
+  if (templateLoadBtn) {
     templateLoadBtn.addEventListener("click", async () => {
+      if (!hasReport) { setTemplateStatus("Open a report with steps before loading a template.", true); return; }
       const id = templateSelect ? templateSelect.value : "";
       const tpl = cachedTemplates.find((t) => t.id === id);
       if (!tpl) { setTemplateStatus("Select a template to load.", true); return; }
@@ -12463,7 +12314,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  if (hasReport && templateDeleteBtn) {
+  if (templateDeleteBtn) {
     templateDeleteBtn.addEventListener("click", async () => {
       const id = templateSelect ? templateSelect.value : "";
       if (!id) { setTemplateStatus("Select a template to delete.", true); return; }
@@ -12474,7 +12325,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  if (hasReport) refreshTemplateList();
+  refreshTemplateList();
 
   // T2 2B.7 — tab-session-scoped active tag filter chips. Not persisted across
   // reloads; the request explicitly scopes this to the tab session.
@@ -12524,7 +12375,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       report.events,
       search ? search.value : "",
       typeFilter ? typeFilter.value : "all",
-      urlFilter ? urlFilter.value : "",
       activeTagFilters
     );
   }
@@ -12684,15 +12534,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     updatePanelMeta(timelineEvents, clickBursts);
     renderHints(hints, visibleEvents, {
       currentTypeFilter: typeFilter ? typeFilter.value : "all",
-      currentUrlFilter: urlFilter ? urlFilter.value : "",
       applyTypeFilter: (value) => {
         setTypeFilterValue(value || "all");
         render();
       },
-      applyUrlFilter: urlFilter ? (value) => {
-        urlFilter.value = value || "";
-        render();
-      } : null,
       applySearch: (value) => {
         if (!search) return;
         search.value = value || "";
@@ -12701,7 +12546,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       clearFilters: () => {
         if (search) search.value = "";
         if (typeFilter) typeFilter.value = "all";
-        if (urlFilter) urlFilter.value = "";
         render();
       },
       jumpToStepId: (stepId) => {
@@ -12978,20 +12822,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       const eventPos = eventPositionMap.has(ev) ? eventPositionMap.get(ev) : -1;
       const moveUp = el("button", "btn ghost", "Move up");
       moveUp.disabled = eventPos <= 0;
-      moveUp.addEventListener("click", async () => {
-        if (!moveEventByOffset(ev, -1)) return;
-        await saveReports(reports);
-        render();
-      });
+      moveUp.addEventListener("click", () => moveEventAndRefresh(ev, -1));
       actions.appendChild(moveUp);
 
       const moveDown = el("button", "btn ghost", "Move down");
       moveDown.disabled = eventPos < 0 || eventPos >= (report.events.length - 1);
-      moveDown.addEventListener("click", async () => {
-        if (!moveEventByOffset(ev, 1)) return;
-        await saveReports(reports);
-        render();
-      });
+      moveDown.addEventListener("click", () => moveEventAndRefresh(ev, 1));
       actions.appendChild(moveDown);
 
       const deleteStep = el("button", "btn danger", "Delete step");
@@ -13508,9 +13344,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (tries > 0) { setTimeout(() => attempt(tries - 1), 60); return; }
       // No step or burst match after retries — surface a hint and scroll to top
       // so a broken deep-link degrades gracefully instead of failing silently.
-      try {
-        if (typeof setStatus === "function") setStatus("Deep-link target not found in this report.");
-      } catch (_) {}
+      setImportStatus("Deep-link target not found in this report.", true);
       try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (_) { try { window.scrollTo(0, 0); } catch (__) {} }
     };
     setTimeout(() => attempt(20), 0);
@@ -13617,7 +13451,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   if (search) search.addEventListener("input", () => scheduleRender());
   if (typeFilter) typeFilter.addEventListener("change", () => { if (hasReport) render(); });
-  if (urlFilter) urlFilter.addEventListener("input", () => scheduleRender());
 
   async function importRawBundle(file, mode) {
     if (!file || !(file.size > 0)) {
@@ -13646,8 +13479,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     let manifest;
     let reportPayload;
     try {
-      manifest = JSON.parse(decodeText(manifestBytes));
-      reportPayload = JSON.parse(decodeText(reportBytes));
+      manifest = parseBundleJson(decodeText(manifestBytes));
+      reportPayload = parseBundleJson(decodeText(reportBytes));
     } catch (_) {
       throw new Error("ZIP metadata is not valid JSON.");
     }
@@ -13778,14 +13611,23 @@ document.addEventListener("DOMContentLoaded", async () => {
       const mode = normalizeMarkdownScreenshotMode(markdownBundleMode && markdownBundleMode.value);
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       try {
+        // Spool-backed screenshots (burst frames, replaced media, imports) only exist as refs.
+        const resolvedScreenshots = new Map();
+        for (const ev of Array.isArray(report.events) ? report.events : []) {
+          try {
+            const dataUrl = await resolveEventScreenshotDataUrlForExport(ev);
+            if (dataUrl) resolvedScreenshots.set(ev, dataUrl);
+          } catch (_) {}
+        }
+        const screenshotFor = (ev) => resolvedScreenshots.get(ev) || "";
         if (mode === "zip") {
-          const built = buildReportMarkdownZipEntries(report, { updatedAt: Date.now() });
+          const built = buildReportMarkdownZipEntries(report, { updatedAt: Date.now(), screenshotFor });
           const zipBlob = buildStoredZip(built.entries);
           const filename = `ui-runbook-${stamp}.zip`;
           await downloadBlob(zipBlob, filename);
           setImportStatus(`Exported Markdown runbook + ${built.screenshotEntries.length} screenshot(s): ${filename}`, false);
         } else {
-          const built = buildReportMarkdown(report, { screenshotMode: "inline" });
+          const built = buildReportMarkdown(report, { screenshotMode: "inline", screenshotFor });
           const filename = `ui-runbook-${stamp}.md`;
           await downloadBlob(new Blob([built.markdown], { type: "text/markdown" }), filename);
           setImportStatus(`Exported Markdown runbook: ${filename}`, false);
@@ -14072,33 +13914,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         importFile.value = "";
       }
     });
-  }
-
-  // 2D.1 stub: vector annotations control opens the design plan.
-  // Renderer/editor are not yet shipped; see docs/plans/vector-annotations-2026-07-16.md.
-  // T2 2D.4 — element is a <button> (not a persistent checkbox); handle click.
-  // If it ever regresses to a checkbox, only open the plan on transition to
-  // checked and immediately revert to unchecked (visiting the link is the only
-  // effect; the box must not stay "on").
-  const vectorAnnotToggle = document.getElementById("vector-annotations-toggle");
-  if (vectorAnnotToggle) {
-    const openPlan = () => {
-      try {
-        const planUrl = (typeof browser !== "undefined" && browser.runtime && typeof browser.runtime.getURL === "function")
-          ? browser.runtime.getURL("docs/plans/vector-annotations-2026-07-16.md")
-          : "docs/plans/vector-annotations-2026-07-16.md";
-        window.open(planUrl, "_blank", "noopener");
-      } catch (_) { /* runtime unavailable in preview */ }
-    };
-    if (vectorAnnotToggle.tagName === "BUTTON" || vectorAnnotToggle.type !== "checkbox") {
-      vectorAnnotToggle.addEventListener("click", openPlan);
-    } else {
-      vectorAnnotToggle.addEventListener("change", () => {
-        if (!vectorAnnotToggle.checked) return;
-        openPlan();
-        vectorAnnotToggle.checked = false;
-      });
-    }
   }
 
   if (isPrint) {

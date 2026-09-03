@@ -49,9 +49,9 @@ stateDiagram-v2
 For auth flows, secrets handling, or anything governed:
 
 1. Popup → Privacy & Stability:
-   - `Redact sensitive text in report`: **On** (default).
+   - `Redact sensitive text + mask sensitive fields in screenshots`: **On** (default).
    - `Redact usernames on login pages`: **On** (default).
-   - `Screenshot redaction policy`: **Omit all screenshots** — text redaction never touches pixels, so omit pixels entirely when in doubt.
+   - `Screenshot redaction policy`: **Omit all screenshots** — field masking is heuristic (it can miss unusual widgets), so omit pixels entirely when in doubt.
    - `Secure-at-rest mode`: **On** for session-only storage — events/reports live in `browser.storage.session` (memory, cleared when the browser closes) and all screenshot capture is suppressed.
 2. Record as normal. The GIF burst loop will refuse to run (popup loop reason: `secure mode` / `redaction policy`) — expected.
 3. Export before closing the browser if you need to keep the report (secure-mode reports do not survive browser exit).
@@ -132,3 +132,5 @@ Follow `docs/AMO_SUBMISSION.md`: version bump, README/docs.html/CHANGELOG sync, 
 Updated 2026-07-14: secure-at-rest caveats rewritten for purge-on-enable + skeleton fallback, import caps/modes updated (2 GiB, trim-at-import), troubleshooting rows for drain wait, crash salvage, and SPA nav poll, DEBUG_LOGS line ref fixed, salvage key added to storage table.
 
 Updated 2026-07-14: Tier-1 — lifecycle diagram now shows `Recording --> Paused : host permission revoked` and `Paused --> Recording : host permission re-granted (manual resume)`, plus a one-line note on the `host-permission-revoked` popup status and `pauseLimitationReason`.
+
+Updated 2026-09-02: redaction setting now also masks detected sensitive fields in screenshots and scrubs secret query/fragment params from recorded URLs; label text updated accordingly.

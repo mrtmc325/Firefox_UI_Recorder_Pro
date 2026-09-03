@@ -13,7 +13,7 @@ One-line summary: Repeatable acceptance test that proves the recorder, privacy c
 ```bash
 cd /Users/tristan/Firefox_UI_Recorder_Pro
 node --check background.js && node --check content.js && node --check frame_spool.js \
-  && node --check frame_spool_worker.js && node --check popup.js && node --check report.js
+  && node --check popup.js && node --check report.js
 node docs/verify-tuning-refs.js  # TUNING.md line refs still resolve against source
 python3 -c "import json; json.load(open('manifest.json')); print('manifest ok')"
 npx --yes web-ext lint --source-dir .
@@ -72,7 +72,7 @@ Pass: all `node --check` silent; `verify-tuning-refs.js` prints `0 stale`; lint 
 |---|---|---|
 | 6.1 | Record → `Ctrl+Alt+G` (`Cmd+Opt+G` on macOS) → drag/scroll around → toggle off → stop | Popup chip `GIF: ON (N FPS)` while active; burst replay card appears inline in the report with play/pause and speed control |
 | 6.2 | During burst, watch popup diagnostics | `Loop: Active`, effective FPS ≤ configured (≤10 with stability mode), spool pressure mostly `healthy`/`moderate`, capture fail = 0 |
-| 6.3 | Set 15 FPS, capture a busy animated page ≥60 s | No browser lockup; under pressure effective FPS steps down (8/6/4) and `Dropped` may rise — recording stays responsive; stop completes |
+| 6.3 | Set 10 FPS, capture a busy animated page ≥60 s | No browser lockup; under pressure effective FPS steps down (8/6/4) and `Dropped` may rise — recording stays responsive; stop completes |
 | 6.4 | Stop while burst is active (hotkey, use grace) | Tail frames land during the 2 s grace; finalization reaches `done`; burst plays in report |
 | 6.5 | Cursor trail: burst with mouse movement, export HTML | Replay shows cursor path; no cross-tab connector lines after tab switches |
 
@@ -111,11 +111,11 @@ Pass: all `node --check` silent; `verify-tuning-refs.js` prints `0 stale`; lint 
 
 ## Automated code-level harness (§1 + logic behind §3–§9)
 
-Sections 2, 6, 8, and 9.1 exercise Firefox's privileged UI (the `about:debugging` add-on loader, the browserAction popup, extension-storage inspection, live GIF capture) and must be run by a person in a real Firefox profile — WebDriver drives web content only, not extension chrome. The **logic** behind the non-GUI acceptance criteria is covered headlessly by `docs/optest.js`, which loads the actual shipped `background.js`, `report.js`, and `frame_spool.js` into a Node `vm` context and calls the real functions (plus static gate assertions for the IIFE-wrapped `content.js`, the exported-HTML CSP, and the preview-iframe sandbox):
+Sections 2, 6, 8, and 9.1 exercise Firefox's privileged UI (the `about:debugging` add-on loader, the browserAction popup panel, extension-storage inspection, live GIF capture) and still need a person in a real Firefox profile for the popup *panel* and burst capture. Most of §3, §4, §5 (masking), §7, and the report editor are now driven headlessly against the real extension by `docs/e2e/run.mjs` (see **Automated GUI harness** below). The **logic** behind the non-GUI acceptance criteria is covered headlessly by `docs/optest.js`, which loads the actual shipped `background.js`, `report.js`, and `frame_spool.js` into a Node `vm` context and calls the real functions (plus static gate assertions for the IIFE-wrapped `content.js`, the exported-HTML CSP, and the preview-iframe sandbox):
 
 ```bash
 node --check background.js && node --check content.js && node --check frame_spool.js \
-  && node --check frame_spool_worker.js && node --check popup.js && node --check report.js
+  && node --check popup.js && node --check report.js
 node docs/optest.js
 ```
 
@@ -149,18 +149,37 @@ Updated 2026-07-14: Tier-1 additions —
 - §5.8 added: host-permission revoke reactive pause and regrant clear.
 - Harness assertion count restated as a floor (`≥94 passed`) so incremental additions no longer force doc edits.
 
+## Automated GUI harness (headless Firefox, real extension)
+
+`docs/e2e/run.mjs` installs the working tree as a temporary add-on in a throwaway headless Firefox
+profile and drives it end to end: a Marionette session (chrome context) opens the extension pages as
+tabs and fires the `toggle-recording` command; WebDriver BiDi on the same session supplies trusted
+pointer/keyboard input, screenshots, prompt handling, and file-input uploads. Node stdlib only — no
+`npm install`, no geckodriver.
+
+```bash
+node docs/e2e/run.mjs            # FIREFOX_BIN=/path/to/firefox to override; FF_VERBOSE=1 for browser logs
+```
+
+Pass: `E2E RESULT: N passed, 0 failed`. Checks: host-permission grant from a gesture, recording via
+the keyboard command, page + iframe events captured, URL secret-param scrubbing, screenshot masking
+of the password field, report render, rename, tags, move + undo, template save/load/delete, all six
+exports, raw-ZIP round-trip merge, delete + undo delete, and no unexpected console errors. Screenshots
+and downloads land in the temp directory printed on the result line. The popup is opened as a tab, so
+its Start button cannot be exercised here (`START_RECORDING` is popup-only by design); that path and
+the browser-action panel itself stay in §2/§3 manual steps.
+
 ## Developer tooling
 
 Ad-hoc developer helpers. These are opt-in — no persistent `package.json`, no
 `node_modules`, no `npm install`. Each script fetches its tool via `npx --yes`
 on demand and leaves the tree unchanged.
 
-- **`docs/dev-run.sh`** — launches the extension in a throwaway Firefox profile:
+- **Run in a throwaway Firefox profile** (no wrapper script; a `.sh` in the tree trips the AMO lint):
   ```bash
-  docs/dev-run.sh
+  npx --yes web-ext run --source-dir . --start-url about:debugging
   ```
-  Equivalent to `npx --yes web-ext run --source-dir . --start-url about:debugging`.
-  Any extra args are forwarded to `web-ext run` (e.g. `--firefox=nightly`).
+  Extra args go straight to `web-ext run` (e.g. `--firefox=nightly`).
 
 - **`docs/eslintrc.json`** — on-demand lint config (`eslint:recommended` shape,
   browser + webextensions env, ES2022). Run against any file:
@@ -169,3 +188,5 @@ on demand and leaves the tree unchanged.
   ```
   Neither the config nor the runner is required by CI or the shipped extension;
   they exist purely to shorten the local edit / preflight loop.
+
+Updated 2026-09-02: added the headless-Firefox GUI harness (`docs/e2e/run.mjs`) and moved the checks it automates out of the manual-only list; dropped `frame_spool_worker.js` from the preflight (subsystem removed); replaced the `dev-run.sh` wrapper with the inline `web-ext run` command; §6.3 now uses 10 FPS (15 FPS option removed).

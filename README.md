@@ -154,7 +154,7 @@ Expected behavior:
 Use for auth or security workflows.
 
 - `Capture mode`: `All events`
-- `Redact sensitive text in report`: `On`
+- `Redact sensitive text + mask sensitive fields in screenshots`: `On`
 - `Redact usernames on login pages`: `On`
 - `Page watch (dynamic UI)`: `On`
 - `Page watch interval (ms)`: `600` to `1000`
@@ -239,8 +239,8 @@ Expected behavior:
 - `Ctrl+Shift+Y`: start/stop recording.
 - Hotkey stop grace is applied on `Ctrl+Shift+Y` stop: first press schedules stop in 2000ms, second press during grace stops immediately.
 - `Cmd+Opt+G` (macOS target) / `Ctrl+Alt+G` (default): toggle high-speed GIF burst mode while recording.
-- While ON, GIF burst mode attempts unconditional screenshot capture at the selected 5/10/15 FPS target cadence until toggled OFF.
-- GIF burst behavior is hotkey-only; popup provides only lightweight controls for FPS (5/10/15).
+- While ON, GIF burst mode attempts unconditional screenshot capture at the selected 5/10 FPS target cadence until toggled OFF.
+- GIF burst behavior is hotkey-only; popup provides only lightweight controls for FPS (5/10).
 - Burst replay speed is configured in the report builder and carried into exported HTML replay cards.
 - Replay `1.0x` is based on measured source FPS for each burst (not fixed 5 FPS playback).
 - Actual FPS can be lower on slower systems due to browser capture throughput limits.

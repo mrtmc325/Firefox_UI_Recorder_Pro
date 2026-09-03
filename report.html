@@ -112,7 +112,7 @@
                 >i</button>
               </div>
               <div class="hint">
-                Step titles are auto-cleaned for readability. Screenshots remain original; only report text is redacted.
+                Step titles are auto-cleaned for readability. With redaction on, report text is redacted and sensitive fields are masked in screenshots.
               </div>
             </div>
           </details>
@@ -131,7 +131,7 @@
                 <button id="report-rename" type="button">Rename</button>
                 <button id="report-delete" type="button">Delete</button>
                 <div id="report-actions-status" class="hint" role="status" aria-live="polite"></div>
-                <div id="report-undo-bar" class="hint" role="status" aria-live="polite" style="display:none"></div>
+                <div id="report-undo-bar" class="hint" role="region" aria-label="Undo delete" style="display:none"></div>
               </div>
               <label class="row">
                 Search
@@ -171,16 +171,14 @@
               <button id="bundle-preview" class="btn ghost">Quick HTML preview</button>
               <button id="bundle-raw" class="btn">Export raw ZIP</button>
               <button id="bundle-media" class="btn">Export section media ZIP</button>
-              <div class="row">
-                <button id="bundle-markdown" class="btn" type="button">Export as Markdown</button>
-                <label class="row">
-                  Screenshots
-                  <select id="bundle-markdown-mode">
-                    <option value="inline">Inline (single .md, large)</option>
-                    <option value="zip">Sibling files in ZIP</option>
-                  </select>
-                </label>
-              </div>
+              <button id="bundle-markdown" class="btn" type="button">Export as Markdown</button>
+              <label class="row">
+                Markdown screenshots
+                <select id="bundle-markdown-mode">
+                  <option value="inline">Inline (single .md, large)</option>
+                  <option value="zip">Sibling files in ZIP</option>
+                </select>
+              </label>
               <button id="bundle-playwright" class="btn" type="button">Export as Playwright script</button>
               <a id="docs-link" class="btn ghost docs-link-inline" href="docs.html" target="_blank" rel="noopener">Docs</a>
               <label class="row">
@@ -443,24 +441,13 @@
         </div>
       </details>
 
-      <details id="section-annotations" class="report-section report-panel noprint">
-        <summary class="panel-summary">
-          <span class="panel-title">Annotations</span>
-          <span class="panel-meta-count">Preview</span>
-        </summary>
-        <div class="panel-body">
-          <button id="vector-annotations-toggle" type="button" class="btn ghost">View vector annotations plan (coming soon)</button>
-          <div class="hint">Arrow, box, pin, and callout primitives stored alongside raster strokes. Toggling opens the design plan.</div>
-        </div>
-      </details>
-
       <details id="section-steps" class="report-section report-panel">
         <summary class="panel-summary">
           <span class="panel-title">Workflow Steps</span>
           <span id="steps-count" class="panel-meta-count"></span>
         </summary>
         <div class="panel-body">
-          <div id="step-undo-bar" class="hint" role="status" aria-live="polite" style="display:none"></div>
+          <div id="step-undo-bar" class="hint" role="region" aria-label="Undo last change" style="display:none"></div>
           <div id="steps"></div>
         </div>
       </details>

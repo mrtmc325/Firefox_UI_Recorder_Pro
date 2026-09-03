@@ -47,6 +47,6 @@ Users can:
 
 ## Sensitive Data Note
 
-Text redaction applies to report text fields; captured screenshot pixels are not automatically masked.
+Text redaction applies to report text fields and to secret-bearing URL query parameters; with redaction on, detected sensitive fields (password inputs, login usernames, secret-keyword labels) are masked in screenshot pixels before storage. Detection is heuristic, and fields inside iframes are covered only after the frame handshake completes (about half a second after a page is first injected), so review screenshots before sharing.
 For sensitive workflows, the Screenshot redaction policy (`Omit all screenshots`) and Secure-at-rest mode suppress screenshot capture entirely.
 Users should review reports before sharing exported artifacts.

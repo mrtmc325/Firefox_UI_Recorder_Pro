@@ -118,3 +118,5 @@ if (vectorAnnotToggle) {
 - Undo/redo beyond a single-level stack.
 - Animated / time-based annotations.
 - Import of external annotation formats (JSON, Figma, SVG).
+
+Updated 2026-09-02: the placeholder "View vector annotations plan (coming soon)" button was removed from the report editor during the dead-code cleanup (a front-end control with no backing feature). This document remains design-only; nothing in the shipped extension references it.

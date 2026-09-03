@@ -7,9 +7,10 @@ let events = [];
 let reports = [];
 let sessionId = null;
 // Per-boot random token shared with every injected content script (top + iframes) via
-// GET_STATE. Content scripts use it to authenticate cross-frame `window.postMessage`
-// traffic (frame offset handshake + rects reporting) — page scripts never see it because
-// they never receive a GET_STATE reply.
+// GET_STATE. Content scripts tag cross-frame `window.postMessage` traffic (frame offset
+// handshake + rects reporting) with it. postMessage is visible to page-world listeners,
+// so the token only filters unrelated traffic; the trust boundary is the ev.source
+// identity check in content.js.
 const frameMsgToken = (function () {
   try {
     if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
@@ -156,7 +157,7 @@ const HOTKEY_BURST_SCREENSHOT_KEEP_TARGET = 360;
 const HOTKEY_BURST_MAX_PRESERVED_CLICK_FRAMES_PER_TAB = 160;
 const HOTKEY_BURST_RECENT_WINDOW_MS = 180000;
 const HOTKEY_BURST_DEFAULT_FPS = 5;
-const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10, 15]);
+const HOTKEY_BURST_FPS_OPTIONS = new Set([5, 10]);
 const HOTKEY_BURST_IMAGE_FORMAT_OPTIONS = new Set(["jpeg", "png"]);
 const HOTKEY_BURST_DEFAULT_IMAGE_FORMAT = "jpeg";
 const HOTKEY_BURST_DEFAULT_JPEG_QUALITY = 38;
@@ -231,10 +232,6 @@ const frameSpool = (
   captureQueueBytesCap: 12 * 1024 * 1024,
   processQueueBytesCap: 24 * 1024 * 1024,
   writeQueueBytesCap: 24 * 1024 * 1024,
-  decodeWorkerEnabled: false,
-  decodeWorkerCount: 1,
-  decodeBatchSize: 1,
-  decodeDispatchPolicy: "single-worker-safe",
   log: (event, payload) => bgLog(event, payload),
   warn: (event, payload) => bgWarn(event, payload)
 }) : null;
@@ -312,18 +309,6 @@ function getFrameSpoolQueueState() {
   }
 }
 
-function getFrameSpoolWorkerSnapshot() {
-  return {
-    enabled: false,
-    workerCount: 0,
-    batchSize: 0,
-    dispatchCursor: 0,
-    inflightBatches: 0,
-    decodeQueueDepth: 0,
-    workerHealth: []
-  };
-}
-
 function getFrameSpoolCaps() {
   return {
     captureQueueCap: Math.max(1, Number(frameSpool && frameSpool.captureQueueMax) || 6),
@@ -364,7 +349,6 @@ function getFrameSpoolRuntimeSnapshot(queueState = null) {
           queueBytes: Math.max(0, Number(runtime.queueBytes) || 0),
           droppedFrames: Math.max(0, Number(runtime.droppedFrames) || 0),
           backpressureLevel: String(runtime.backpressureLevel || "healthy"),
-          decodeMode: String(runtime.decodeMode || "inline-safe"),
           safetyCapActive: !!runtime.safetyCapActive,
           queueBytesHighWater: Math.max(0, Number(runtime.queueBytesHighWater) || Number(burstPerf.queueBytesHighWater) || 0),
           effectiveBurstFps: Number(burstPerf.effectiveBurstFps) || 0
@@ -384,16 +368,12 @@ function getFrameSpoolRuntimeSnapshot(queueState = null) {
     : 0;
   const queueBytes = Math.max(0, Number(state && state.queueBytes) || 0);
   const level = getFrameSpoolBackpressureLevel(state);
-  const decodeMode = state && state.decodeMode
-    ? String(state.decodeMode)
-    : "inline-safe";
   const safetyCapActive = !!(state && state.safetyCapActive);
   return {
     queueDepth,
     queueBytes,
     droppedFrames: Number(burstPerf.droppedFrames) || 0,
     backpressureLevel: level,
-    decodeMode,
     safetyCapActive,
     queueBytesHighWater: Number(burstPerf.queueBytesHighWater) || 0,
     effectiveBurstFps: Number(burstPerf.effectiveBurstFps) || 0
@@ -471,11 +451,6 @@ function startStorageQuotaPolling(reason) {
     }
   }, STORAGE_QUOTA_POLL_INTERVAL_MS);
   bgLog("storage-quota:poll-started", { reason, intervalMs: STORAGE_QUOTA_POLL_INTERVAL_MS });
-}
-
-function isFrameSpoolBackpressureActive(queueState) {
-  const level = getFrameSpoolBackpressureLevel(queueState);
-  return level === "high" || level === "severe";
 }
 
 function isFrameSpoolPressureHigh(queueState) {
@@ -806,7 +781,7 @@ function bgWarn(message, data) {
   pushDiagnosticsEntry("warn", message, data);
   const prefix = `[UIR BG ${new Date().toISOString()}]`;
   if (data === undefined) console.warn(prefix, message);
-  else console.warn(prefix, message, data);
+  else console.warn(prefix, message, sanitizeDiagnosticsData(data, 0));
 }
 
 function enqueueLifecycleAction(label, action) {
@@ -907,6 +882,12 @@ function isTrustedRuntimeUiSender(sender) {
   }
 }
 
+// Message types only the browser-action popup may send (a sender with a tab is never the popup).
+const POPUP_ONLY_MESSAGE_TYPES = new Set([
+  "START_RECORDING", "UPDATE_SETTINGS", "GET_DIAGNOSTICS", "ADD_NOTE",
+  "OPEN_REPORT", "OPEN_DOCS", "OPEN_PRINTABLE_REPORT", "TEST_REDACTION"
+]);
+
 function enqueueTabScopeDraftWrite(task) {
   const run = tabScopeDraftWriteQueue.then(
     () => task(),
@@ -957,6 +938,25 @@ async function addTabToSelectionDraft(tabId, reason = "watch") {
   });
 }
 
+// Watch mode: a newly activated recordable tab joins the live scope, not only the draft.
+async function extendRecordingScopeForWatch(tabId) {
+  const normalized = normalizeTabId(tabId);
+  if (normalized === null || !isRecording || !recordingScopeEnforced) return false;
+  let tab = null;
+  try {
+    tab = await browser.tabs.get(normalized);
+  } catch (_) {
+    return false;
+  }
+  if (!tab || !isInjectableTabUrl(tab.url)) return false;
+  if (!(await ensureContentScriptInTab(normalized, "watch:extend-scope"))) return false;
+  if (!isRecording || !recordingScopeEnforced) return false;
+  recordingTabSelection.add(normalized);
+  bgLog("recording-scope:watch-added", { tabId: normalized, tabCount: recordingTabSelection.size });
+  await persistSafe("watch:extend-scope");
+  return true;
+}
+
 async function removeTabFromSelectionDraft(tabId, reason = "watch") {
   const normalized = normalizeTabId(tabId);
   if (normalized === null) return { ok: false, ignored: true, reason: "invalid-tab-id" };
@@ -988,8 +988,8 @@ function getOriginPatternForUrl(urlRaw) {
   try {
     const parsed = new URL(raw);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-    if (!parsed.host) return "";
-    return `${parsed.protocol}//${parsed.host}/*`;
+    if (!parsed.hostname) return "";
+    return `${parsed.protocol}//${parsed.hostname}/*`;
   } catch (_) {
     return "";
   }
@@ -1353,6 +1353,7 @@ function normalizeScreenshotRedactionMode(value) {
 
 function normalizeHotkeyBurstFps(value) {
   const fps = Math.round(Number(value));
+  if (fps > 10) return 10;
   if (HOTKEY_BURST_FPS_OPTIONS.has(fps)) return fps;
   return HOTKEY_BURST_DEFAULT_FPS;
 }
@@ -1743,8 +1744,13 @@ async function runContinuousBurstCaptureTick() {
       return;
     }
 
+    const maskedFrame = await maskSensitiveRects(shot.dataUrl, await resolveMaskSpec(tab && tab.id, null, false, 500), shot.mime, null, shot.quality);
+    if (!maskedFrame) {
+      bgLog("burst-loop:mask-skip", { reason: "mask-failed" });
+      return;
+    }
     const spoolStartedAt = Date.now();
-    const spoolResult = await storeBurstFrameInSpool(shot.dataUrl, {
+    const spoolResult = await storeBurstFrameInSpool(maskedFrame, {
       sessionId,
       createdAtMs: Date.now(),
       mime: shot.mime || "image/png",
@@ -1774,7 +1780,7 @@ async function runContinuousBurstCaptureTick() {
     events.push({
       type: "ui-change",
       ts: nowIso(),
-      url: tab.url || "",
+      url: scrubSensitiveUrl(tab.url || ""),
       human: "GIF burst frame",
       label: "GIF burst frame",
       actionKind: "burst",
@@ -2040,7 +2046,7 @@ async function persistReportsSafe(context) {
 }
 
 async function loadPersisted() {
-  // Purge diagnostics persisted by the removed mic-proxy subsystem.
+  // Purge diagnostics persisted by the mic-proxy subsystem removed in v1.17 (upgraders from older builds).
   try { await browser.storage.local.remove("__uiRecorderMicDiag"); } catch (_) {}
   const storedLocal = await browser.storage.local.get([
     "isRecording",
@@ -2168,6 +2174,48 @@ function applyRedactRuleWithBudget(input, rule) {
   return next;
 }
 
+// Whole-token match (bounded by start/end or _ - . ? / &) so zipcode / design / authority are not hit.
+const SENSITIVE_URL_PARAM_RE = /(^|[_\-.?/&])(token|api[_-]?key|apikey|secret|password|passwd|pwd|auth|sig|signature|nonce|session|sessionid|sid|jwt|access[_-]?token|refresh[_-]?token|id[_-]?token|bearer|code|key)([_\-.]|$)/i;
+
+function clipText(value, max) {
+  const text = value === null || value === undefined ? "" : String(value);
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+// Recorded URLs are persisted and exported verbatim: cap them and redact secret-bearing query params.
+function scrubSensitiveUrl(raw) {
+  const text = clipText(raw, 4096);
+  if (!text || !settings.redactEnabled) return text;
+  try {
+    const parsed = new URL(text);
+    let changed = false;
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      if (SENSITIVE_URL_PARAM_RE.test(key)) {
+        parsed.searchParams.set(key, "[REDACTED]");
+        changed = true;
+      }
+    }
+    // OAuth implicit/hybrid flows put tokens in the fragment; SPA hash routes carry ?params there too.
+    if (parsed.hash && parsed.hash.includes("=")) {
+      const hashParams = new URLSearchParams(parsed.hash.slice(1));
+      let hashChanged = false;
+      for (const key of Array.from(hashParams.keys())) {
+        if (SENSITIVE_URL_PARAM_RE.test(key)) {
+          hashParams.set(key, "[REDACTED]");
+          hashChanged = true;
+        }
+      }
+      if (hashChanged) {
+        parsed.hash = "#" + hashParams.toString();
+        changed = true;
+      }
+    }
+    return changed ? parsed.toString() : text;
+  } catch (_) {
+    return text;
+  }
+}
+
 function applyRedactionToText(text) {
   if (!settings.redactEnabled) return text;
   if (text === null || text === undefined) return text;
@@ -2237,7 +2285,7 @@ async function captureVisibleFrame(options = {}) {
       activeTabOnly ? windowId : undefined,
       captureOptions
     );
-    return { dataUrl, mime: formatToMime(format), reason: null };
+    return { dataUrl, mime: formatToMime(format), quality: captureOptions.quality, reason: null };
   } catch (e) {
     console.warn("captureVisibleTab failed:", e);
     return { dataUrl: null, mime: formatToMime(format), reason: "capture-failed" };
@@ -2290,7 +2338,88 @@ async function debouncedScreenshot() {
   });
 }
 
-async function maybeScreenshot(e) {
+// Screenshot masking. Rects come from the TOP frame's content script only (`sender.frameId === 0`
+// events, or an on-demand UIR_COLLECT_RECTS request): child-frame events translate their rects
+// through a parent-window handshake a page script can forge, so they are not trusted for coordinates.
+// The top frame already folds verified child-iframe rects into its own report.
+const TAB_RECTS_FRESH_MS = 1500;
+const latestTabRects = new Map(); // tabId -> { rects, dpr, viewportWidth, ts }
+
+function rememberTabRects(tabId, payload) {
+  if (typeof tabId !== "number" || !payload || !Array.isArray(payload.redactRects)) return;
+  latestTabRects.set(tabId, {
+    rects: payload.redactRects.slice(0, 80),
+    dpr: Number(payload.devicePixelRatio) || 1,
+    viewportWidth: Number(payload.viewportWidth) || 0,
+    ts: Date.now()
+  });
+}
+
+async function requestTabRects(tabId) {
+  if (typeof tabId !== "number") return null;
+  try {
+    const res = await withTimeout(browser.tabs.sendMessage(tabId, { type: "UIR_COLLECT_RECTS" }, { frameId: 0 }), 400, "rects-timeout");
+    if (res && Array.isArray(res.redactRects)) {
+      rememberTabRects(tabId, res);
+      return latestTabRects.get(tabId) || null;
+    }
+  } catch (_) {}
+  return null;
+}
+
+// maxAgeMs: how old a cached top-frame report may be before a fresh one is requested. Per-event
+// screenshots accept TAB_RECTS_FRESH_MS; lifecycle shots pass 0 (the page may have scrolled since
+// the last event); burst frames pass a short window so a 10 FPS loop does not scan the DOM per frame.
+async function resolveMaskSpec(tabId, e, isTopFrameEvent, maxAgeMs = TAB_RECTS_FRESH_MS) {
+  if (!settings.redactEnabled) return null;
+  if (isTopFrameEvent && e && Array.isArray(e.redactRects)) rememberTabRects(tabId, e);
+  let cached = typeof tabId === "number" ? latestTabRects.get(tabId) : null;
+  if (!cached || (Date.now() - cached.ts) > maxAgeMs) cached = (await requestTabRects(tabId)) || cached;
+  if (!cached) return { rects: [], dpr: 1, viewportWidth: 0 };
+  return { rects: cached.rects, dpr: cached.dpr, viewportWidth: cached.viewportWidth };
+}
+
+// Black out the sensitive-field rects before the frame is hashed or stored, so secrets never persist
+// next to their own bounding boxes. Scale comes from the captured image vs the page viewport (exact
+// under HiDPI and zoom); output keeps the capture format so JPEG burst frames stay small.
+let lastMaskMemo = null;
+async function maskSensitiveRects(dataUrl, spec, mime, frameHash, quality) {
+  if (!dataUrl || !spec) return dataUrl;
+  const rects = Array.isArray(spec.rects) ? spec.rects : [];
+  if (!rects.length) return dataUrl;
+  const rectsKey = JSON.stringify(rects.map((r) => [Math.round(Number(r && r.x)), Math.round(Number(r && r.y)), Math.round(Number(r && r.w)), Math.round(Number(r && r.h))]));
+  if (frameHash && lastMaskMemo && lastMaskMemo.frameHash === frameHash && lastMaskMemo.rectsKey === rectsKey) return lastMaskMemo.out;
+  try {
+    const img = new Image();
+    img.src = dataUrl;
+    await img.decode();
+    const scale = spec.viewportWidth > 0 ? img.naturalWidth / spec.viewportWidth : clampNumber(spec.dpr, 0.5, 4, 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    ctx.fillStyle = "#000";
+    let drawn = 0;
+    for (const r of rects) {
+      const x = Number(r && r.x), y = Number(r && r.y), w = Number(r && r.w), h = Number(r && r.h);
+      if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) continue;
+      ctx.fillRect(Math.floor(x * scale), Math.floor(y * scale), Math.ceil(w * scale), Math.ceil(h * scale));
+      drawn += 1;
+    }
+    if (!drawn) return dataUrl;
+    const out = mime === "image/jpeg"
+      ? canvas.toDataURL("image/jpeg", clampNumber(quality, 5, 95, 60) / 100)
+      : canvas.toDataURL("image/png");
+    if (frameHash) lastMaskMemo = { frameHash, rectsKey, out };
+    return out;
+  } catch (err) {
+    bgWarn("screenshot:mask-failed", { error: formatError(err) });
+    return null; // fail closed: never store the unmasked frame when masking was required
+  }
+}
+
+async function maybeScreenshot(e, senderTabId = null, isTopFrameEvent = false) {
   const effectiveSettings = getEffectiveSettings();
   if (!shouldCaptureScreenshotPixels(effectiveSettings)) {
     return {
@@ -2306,7 +2435,8 @@ async function maybeScreenshot(e) {
   const shot = hotkeyBurstActive ? await captureBurstFrameFixedRate() : await debouncedScreenshot();
   if (!shot.dataUrl) return { screenshot: null, screenshotHash: null, skipped: true, reason: shot.reason || "capture-failed" };
 
-  const redacted = shot.dataUrl;
+  const redacted = await maskSensitiveRects(shot.dataUrl, await resolveMaskSpec(senderTabId, e, isTopFrameEvent), shot.mime || "image/png", shot.hash || null, shot.quality);
+  if (!redacted) return { screenshot: null, screenshotHash: null, skipped: true, reason: "mask-failed" };
   const redactedHash = stableHash(redacted);
 
   if (!hotkeyBurstActive && !force && effectiveSettings.diffEnabled && events.length > 0) {
@@ -2376,7 +2506,10 @@ async function appendLifecycleScreenshotEventToSession(sessionState, kind, sourc
       };
     }
   }
-  const screenshot = shot && shot.dataUrl ? shot.dataUrl : null;
+  const rawScreenshot = shot && shot.dataUrl ? shot.dataUrl : null;
+  const screenshot = rawScreenshot
+    ? await maskSensitiveRects(rawScreenshot, await resolveMaskSpec(tab && tab.id, null, false, 0), "image/png", null)
+    : null;
   const screenshotHash = screenshot ? stableHash(screenshot) : null;
   if (screenshot && opts.updateLastShot) {
     const capturedAt = Date.now();
@@ -2386,7 +2519,7 @@ async function appendLifecycleScreenshotEventToSession(sessionState, kind, sourc
   sessionState.events.push({
     type: "outcome",
     ts: nowIso(),
-    url: tab && tab.url ? tab.url : "",
+    url: scrubSensitiveUrl(tab && tab.url ? tab.url : ""),
     human: lifecycleKind === "start" ? "Recording started" : "Recording stopped",
     label: lifecycleKind === "start" ? "Start capture" : "Stop capture",
     outcome: lifecycleKind,
@@ -2720,17 +2853,6 @@ function shouldIgnoreEventType(type) {
     return type === "input" || type === "change";
   }
   return false;
-}
-
-function hasScreenshotPayload(ev) {
-  return !!(
-    ev &&
-    typeof ev === "object" &&
-    (
-      !!ev.screenshot ||
-      (ev.screenshotRef && typeof ev.screenshotRef === "object" && !!ev.screenshotRef.frameId)
-    )
-  );
 }
 
 function hasInlineScreenshotPayload(ev) {
@@ -3140,15 +3262,22 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     bgLog("onMessage:start", { requestId, msgType, senderTabId, isRecording, isPaused, eventCount: events.length, activeRecordEvents, sessionId });
   }
 
-  if (typeof msgType === "string" && msgType.startsWith("SECTION_MIC_")) {
-    return {
-      ok: false,
-      reason: "mic-capture-removed",
-      error: "Live microphone capture has been removed from this extension build. Use audio-file transcription in the report editor."
-    };
-  }
-
   try {
+    if (POPUP_ONLY_MESSAGE_TYPES.has(msgType) && !isTrustedRuntimeUiSender(sender)) {
+      bgWarn("message:unauthorized-sender", {
+        requestId,
+        msgType,
+        senderTabId,
+        senderUrl: sender && sender.url ? String(sender.url) : "",
+        senderId: sender && sender.id ? String(sender.id) : ""
+      });
+      return {
+        ok: false,
+        reason: "unauthorized-sender",
+        error: `${msgType === "START_RECORDING" ? "Start recording" : "This action"} must be initiated from the extension popup.`
+      };
+    }
+
     if (msgType === "GET_STATE") {
       const effectiveSettings = getEffectiveSettings();
       const hasSenderTab = !!(sender && sender.tab && typeof sender.tab.id === "number");
@@ -3158,7 +3287,6 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       const frameSpoolState = getFrameSpoolQueueState();
       updateWriteQueueHighWater(frameSpoolState);
       const spoolRuntime = getFrameSpoolRuntimeSnapshot(frameSpoolState);
-      const spoolWorkers = getFrameSpoolWorkerSnapshot();
       const recordingTabSelectionList = getRecordingTabSelectionArray();
       return {
         isRecording,
@@ -3183,7 +3311,6 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         stopFinalization: getStopFinalizationStateSnapshot(),
         burstPerf: getBurstPerfSnapshot(),
         spoolRuntime,
-        spoolWorkers,
         storageQuota: getStorageQuotaSnapshot(),
         frameMsgToken
       };
@@ -3245,19 +3372,6 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     }
 
     if (msgType === "START_RECORDING") {
-      if (!isTrustedRuntimeUiSender(sender)) {
-        bgWarn("start-recording:unauthorized-sender", {
-          requestId,
-          senderTabId,
-          senderUrl: sender && sender.url ? String(sender.url) : "",
-          senderId: sender && sender.id ? String(sender.id) : ""
-        });
-        return {
-          ok: false,
-          reason: "unauthorized-sender",
-          error: "Start recording must be initiated from the extension popup."
-        };
-      }
       const requestedSelection = normalizeTabIdList(msg.selectedTabIds);
       if (!requestedSelection.length) {
         bgLog("start-recording:selection-required", {
@@ -3296,7 +3410,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       events.push({
         type: "note",
         ts: nowIso(),
-        url: tab && tab.url ? tab.url : "",
+        url: scrubSensitiveUrl(tab && tab.url ? tab.url : ""),
         human: "Note",
         label: "Note",
         text: note,
@@ -3331,7 +3445,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     if (msgType === "TEST_REDACTION") {
       const raw = typeof msg.text === "string" ? msg.text : "";
       // Cap input at 8 KB so the popup can't accidentally choke the background.
-      const bounded = raw.length > 8192 ? raw.slice(0, 8192) : raw;
+      const bounded = clipText(raw, 8192);
       const trace = applyRedactionWithTrace(bounded);
       return { ok: true, trace, truncated: raw.length > 8192, inputLength: raw.length };
     }
@@ -3363,6 +3477,8 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         const cleaned = {
           ...e,
           ts: nowIso(),
+          url: scrubSensitiveUrl(e.url),
+          id: clipText(e.id, 240),
           text: applyRedactionToText(e.text),
           label: applyRedactionToText(e.label),
           value: applyRedactionToText(e.value),
@@ -3391,7 +3507,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           : false;
         if (hotkeyBurstActive && includeScreenshot) cleaned.burstCaptureForced = true;
         if (includeScreenshot) {
-          const shot = await maybeScreenshot(e);
+          const shot = await maybeScreenshot(e, senderTab ? senderTab.id : null, !!(sender && sender.frameId === 0));
           cleaned.screenshot = shot.screenshot;
           cleaned.screenshotRef = null;
           cleaned.screenshotHash = shot.screenshotHash;
@@ -3605,33 +3721,38 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (tab && tab.active) rememberUsableWebTab(tab, "tabs:onUpdated");
+  window.__updProbe = window.__updProbe || [];
+  window.__updProbe.push({ tabId, changeInfo, url: tab && tab.url, isRecording, activeCaptureTabId, recordingScopeEnforced, injectable: tab ? isInjectableTabUrl(tab.url) : null });
   if (tabScopeWatchEnabled && tab && tab.active) {
     const urlChanged = !!(changeInfo && typeof changeInfo.url === "string");
     const completed = !!(changeInfo && changeInfo.status === "complete");
     if (urlChanged || completed) {
       addTabToSelectionDraft(tabId, "tabs:onUpdated").catch(() => {});
+      if (completed && isRecording && recordingScopeEnforced && !isTabIdInRecordingSelection(tabId)) {
+        extendRecordingScopeForWatch(tabId).catch(() => {});
+      }
     }
   }
-  const targetUnavailable = !!(
-    changeInfo &&
-    (
-      (typeof changeInfo.url === "string" && !isInjectableTabUrl(changeInfo.url))
-      || changeInfo.status === "loading"
-    )
-  );
-  if (!targetUnavailable) return;
+  // A real same-tab navigation destroys the injected content script; put it back once the new
+  // document has loaded so the recording keeps capturing in that tab (login -> dashboard flows).
+  if (isRecording && changeInfo && changeInfo.status === "complete" && tab && isInjectableTabUrl(tab.url)) {
+    const inScope = recordingScopeEnforced ? isTabIdInRecordingSelection(tabId) : tabId === activeCaptureTabId;
+    if (inScope) {
+      const injectedNow = await ensureContentScriptInTab(tabId, "tabs:onUpdated:complete");
+      window.__updProbe.push({ injectedNow, tabId });
+      if (tabId === activeCaptureTabId) await notifyActiveTargetTab("tabs:onUpdated:complete");
+    }
+  }
 });
 
 browser.tabs.onActivated.addListener(async (activeInfo) => {
   if (activeInfo && typeof activeInfo.tabId === "number") {
     if (tabScopeWatchEnabled) {
       addTabToSelectionDraft(activeInfo.tabId, "tabs:onActivated").catch(() => {});
+      if (isRecording && recordingScopeEnforced && !isTabIdInRecordingSelection(activeInfo.tabId)) {
+        extendRecordingScopeForWatch(activeInfo.tabId).catch(() => {});
+      }
     }
-    try {
-      const tab = await browser.tabs.get(activeInfo.tabId);
-      rememberUsableWebTab(tab, "tabs:onActivated");
-    } catch (_) {}
   }
   bgLog("tabs:onActivated", { resumeOnFocus: !!settings.resumeOnFocus, isRecording, isPaused });
   if (isRecording && settings.activeTabOnly) {
