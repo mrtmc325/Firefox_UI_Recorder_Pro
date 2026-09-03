@@ -11,6 +11,7 @@ const PAGES = {
 <label><input id="agree" type="checkbox" name="agree"> I agree</label>
 <button id="submit" type="submit" aria-label="Submit form">Submit</button>
 <button id="secondary" type="button" data-testid="secondary-btn" onclick="document.getElementById('out').textContent='secondary clicked'">Secondary action</button>
+<button id="tick" type="button" onclick="window.__n=(window.__n||0)+1;document.getElementById('out').textContent='tick '+window.__n">Tick</button>
 </form><div id="out" aria-live="polite"></div>
 <button id="nav" onclick="location.href='page2.html'">Go to page 2</button>
 <iframe id="frame" src="frame.html" width="600" height="160" title="child frame"></iframe></body></html>`,

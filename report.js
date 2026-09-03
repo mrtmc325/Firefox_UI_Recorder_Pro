@@ -1753,6 +1753,63 @@ function normalizeImportedReport(rawReport) {
   return imported;
 }
 
+// Free-tier caps (no active license): a merged or imported report may not exceed the free limits either.
+// Reports recorded while licensed are left intact if the install is demoted later.
+const FREE_TIER_CAPS = Object.freeze({ maxBurstsPerReport: 3, maxScreenshotsPerReport: 10 });
+
+async function isLicensedInstall() {
+  try {
+    const stored = await browser.storage.local.get(["__uiRecorderLicense"]);
+    const lic = stored && stored.__uiRecorderLicense;
+    return !!(lic && typeof lic === "object" && lic.status === "active");
+  } catch (_) {
+    return false;
+  }
+}
+
+function applyFreeTierCaps(reportLike) {
+  const events = Array.isArray(reportLike && reportLike.events) ? reportLike.events : [];
+  const keptRuns = new Set();
+  const droppedRuns = new Set();
+  let shots = 0;
+  let droppedShots = 0;
+  const kept = [];
+  for (const ev of events) {
+    if (!ev || typeof ev !== "object") continue;
+    const runId = Number(ev.burstRunId);
+    if (Number.isFinite(runId)) {
+      if (!keptRuns.has(runId)) {
+        if (keptRuns.size >= FREE_TIER_CAPS.maxBurstsPerReport) { droppedRuns.add(runId); continue; }
+        keptRuns.add(runId);
+      }
+      kept.push(ev);
+      continue;
+    }
+    if (ev.screenshot || (ev.screenshotRef && typeof ev.screenshotRef === "object" && ev.screenshotRef.frameId)) {
+      if (shots >= FREE_TIER_CAPS.maxScreenshotsPerReport) {
+        ev.screenshot = null;
+        ev.screenshotRef = null;
+        ev.screenshotHash = null;
+        ev.screenshotSkipped = true;
+        ev.screenshotSkipReason = "free-tier-screenshots";
+        droppedShots += 1;
+      } else {
+        shots += 1;
+      }
+    }
+    kept.push(ev);
+  }
+  if (reportLike && typeof reportLike === "object") reportLike.events = kept;
+  return { droppedBursts: droppedRuns.size, droppedScreenshots: droppedShots };
+}
+
+function describeFreeTierCaps(result) {
+  const parts = [];
+  if (result.droppedBursts) parts.push(`${result.droppedBursts} GIF burst(s) beyond the free limit of ${FREE_TIER_CAPS.maxBurstsPerReport}`);
+  if (result.droppedScreenshots) parts.push(`${result.droppedScreenshots} screenshot(s) beyond the free limit of ${FREE_TIER_CAPS.maxScreenshotsPerReport}`);
+  return parts.length ? ` Free tier: dropped ${parts.join(" and ")}. Activate a license from the popup to lift the caps.` : "";
+}
+
 function mergeReports(baseReport, incomingReport) {
   const merged = cloneJson(baseReport || {});
   if (!Array.isArray(merged.events)) merged.events = [];
@@ -13532,8 +13589,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       ? ` Skipped ${skippedAssetCount} bundle asset(s) that failed validation or size limits.`
       : "";
 
+    const licensedInstall = await isLicensedInstall();
+    let freeTierNote = "";
     if (mode === "merge" && hasReport) {
       const merged = mergeReports(report, importedReport);
+      if (!licensedInstall) freeTierNote = describeFreeTierCaps(applyFreeTierCaps(merged));
       const backup = { ...report };
       Object.keys(report).forEach((key) => { delete report[key]; });
       Object.assign(report, merged);
@@ -13545,11 +13605,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         throw err;
       }
       refreshMeta();
-      setImportStatus(`Merged ${importedReport.events.length} steps into current report.${skippedNote}`, false);
+      setImportStatus(`Merged ${importedReport.events.length} steps into current report.${skippedNote}${freeTierNote}`, false);
       render();
       return;
     }
 
+    if (!licensedInstall) freeTierNote = describeFreeTierCaps(applyFreeTierCaps(importedReport));
     reports.unshift(importedReport);
     let retentionLimit = 3;
     try {
@@ -13563,7 +13624,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       ? ` Retention keeps the ${retentionLimit} most recent reports; ${removedReportCount} older report(s) removed.`
       : "";
     await saveReports(reports);
-    setImportStatus(`Imported report with ${importedReport.events.length} steps.${skippedNote}${retentionNote}`, false);
+    setImportStatus(`Imported report with ${importedReport.events.length} steps.${skippedNote}${retentionNote}${freeTierNote}`, false);
     const url = new URL(location.href);
     url.searchParams.set("idx", "0");
     if (isPrint) url.searchParams.set("print", "1");

@@ -1,0 +1,29 @@
+# systemd unit for a plain Linux host: copy license-server/ to /opt/license-server, put the .env at
+# /etc/license-server.env (root:root 0600), then: systemctl enable --now license-server
+[Unit]
+Description=UI Recorder Pro license server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/license-server/server.mjs
+WorkingDirectory=/opt/license-server
+EnvironmentFile=/etc/license-server.env
+Environment=LICENSE_DB_PATH=/var/lib/license-server/license.db
+DynamicUser=yes
+StateDirectory=license-server
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

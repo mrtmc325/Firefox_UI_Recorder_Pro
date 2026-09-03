@@ -26,9 +26,14 @@ UI Workflow Recorder Pro captures what you do on a page (clicks, inputs, changes
 - Report editor with reorder, undo, tags, section notes, annotations, templates, and cross-report search.
 - Export as a self-contained HTML bundle (optionally signed), Markdown runbook, Playwright test scaffold, raw ZIP for re-editing, or section media ZIP; import raw ZIP bundles back.
 
+**Free and paid**
+- Free to use with generous limits (GIF clips up to 5 seconds and 3 per report, 10 screenshots per report).
+- A paid license lifts the limits; activate by email in the popup — no license key to copy.
+
 **Private by design**
 - Everything is stored locally in Firefox. No telemetry, no accounts, no remote code.
 - Optional cloud narration and audio transcription use your own OpenAI API key, only when you click them, after Firefox asks for permission. The key lives in the report tab's session storage and is never exported.
+- Free installs make no network calls at all. A paid license sends only your purchase email and a random install id to the license server to activate and to check the license every 48 hours.
 
 Source code and documentation: https://github.com/mrtmc325/Firefox_UI_Recorder_Pro
 
@@ -52,8 +57,8 @@ Paste the contents of `PRIVACY.md`. AMO requires a privacy policy because the ex
 ## Data collection disclosure (Firefox data-collection permissions)
 Declared in `manifest.json`: required `none`; optional `websiteContent` (only requested for the OpenAI features).
 
-## Release notes for 1.22.0
-Verification, hardening, and cleanup release. Fixes report-editor saves, popup Start permissions, and recording across page navigations; masks sensitive fields in screenshots; scrubs secret URL parameters; removes dead code. Full details in CHANGELOG.md.
+## Release notes for 1.23.0
+Adds a free tier with usage caps and optional email-based license activation (owner-hosted server; free installs never call home). Full details in CHANGELOG.md.
 
 ## Assets in this folder
 - `icon-128.png`, `icon-64.png` — listing icon (rasterized from `icons/icon.svg`).

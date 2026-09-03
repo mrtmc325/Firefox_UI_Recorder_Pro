@@ -150,6 +150,11 @@ if (secure && browser.storage.session) {
 | iframe redaction rects use wrong coordinates | Medium | Low | T2C.5 — each frame runs a token-authenticated postMessage handshake (child posts `FRAME_HELLO`, parent replies with `FRAME_OFFSET_ASSIGN` using its own known offset + `iframe.getBoundingClientRect()`). Rects are translated to top-frame coords at source; token is a per-boot random from background delivered only via GET_STATE. Text redaction remains a belt on top. |
 | API key exposure | High | Low | Session-only storage, never persisted/exported/logged; user can clear via key prompt |
 
+## Licensing (v1.23.0)
+
+- Free installs are capped locally and never call home: GIF bursts stop at 5 s and 3 per report (`FREE_TIER` in background.js; re-applied on import/merge by `applyFreeTierCaps` in report.js), step screenshots capped at 10 per report.
+- Activation is an email lookup against the owner's license server (`license-server/`, Node stdlib + `node:sqlite`). The extension sends the email, a random install id, and its version over HTTPS with an HMAC request preamble; the server returns an activation id. Seats are enforced server-side by revoking the oldest active device when the count is exceeded. Licensed installs re-validate every 48 h and fall back to free after 10 consecutive failures. `LICENSE_*` runtime messages are popup-only (sender-gated). The client secret ships in a public extension, so the preamble is an abuse deterrent, not the enforcement boundary.
+
 ## Alternatives considered
 
 - **MV3 service worker** vs persistent MV2 background page: MV2 retained — the burst loop, in-memory event list, and spool pumps need a long-lived context; Firefox MV3 worker lifetime would force a re-architecture (state externalization, alarm-driven loops) for no user-visible gain.

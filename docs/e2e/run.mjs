@@ -16,9 +16,14 @@ try {
   const pop = await ff.openExt(`${EXT}/popup.html`); await ff.viewport(pop, 420, 1200); await sleep(600);
   // Host permission must come from a user gesture; the popup opened as a tab cannot start a recording
   // (START_RECORDING is popup-only by design), so grant here and start through the keyboard command.
-  await ff.evalIn(pop, `(() => { const b = document.createElement('button'); b.id = 'e2e-grant'; b.textContent = 'grant'; document.body.prepend(b); b.addEventListener('click', () => { window.__grant = browser.permissions.request({ origins: ['http://*/*', 'https://*/*'] }); }); return true; })()`);
-  await ff.click(pop, '#e2e-grant'); await sleep(400);
-  check('host permission granted from a user gesture', (await ff.evalIn(pop, 'window.__grant')) === true);
+  // This harness exercises masking and features, not licensing: seed an active license so the free-tier
+  // screenshot cap (verified separately in license.mjs) does not clamp the stop screenshot here.
+  try {
+    await ff.evalIn(pop, `browser.storage.local.set({ __uiRecorderInstallId: "e2e00000-0000-4000-8000-000000000000", __uiRecorderLicense: { status: "active", email: "e2e@example.test", activationId: "${"a".repeat(64)}", activatedAt: Date.now(), lastValidatedAt: Date.now(), lastCheckAt: Date.now(), failures: 0, lastError: "" } })`);
+    await ff.evalIn(pop, `browser.runtime.getBackgroundPage().then(bg => bg.loadLicenseState()).then(() => true)`);
+  } catch (e) { console.log("  note: license seed skipped (" + e.message + ")"); }
+  await ff.grantHostPermissions();
+  check('host permissions granted (Marionette)', /granted/.test(await ff.grantHostPermissions()));
   const pwRect = await ff.evalIn(page, `(() => { const r = document.getElementById('pw').getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height, dpr: window.devicePixelRatio, viewportWidth: window.innerWidth }; })()`);
   await ff.selectTabByUrlPrefix(site.url);
   check('toggle-recording command fired', (await ff.fireCommand('toggle-recording')).ok === true);
@@ -76,7 +81,10 @@ try {
   await ff.click(rep, '#report-rename'); await sleep(1500); await openAll();
   check('rename persists to the report list', /E2E Renamed/.test(await ff.evalIn(rep, `document.querySelector('#report-select option:checked').textContent`)));
   await ff.evalIn(rep, `(() => { const inp = document.querySelector('#steps input.step-tag-input'); if (inp) inp.id = 'e2e-tag'; return !!inp; })()`);
-  await ff.type(rep, '#e2e-tag', 'smoke'); await ff.key(rep, 'Enter'); await sleep(1200);
+  await ff.type(rep, '#e2e-tag', 'smoke'); await sleep(200);
+  // Commit by moving focus off the input (native blur), which is what the input's commit handler listens for.
+  await ff.evalIn(rep, `document.getElementById('e2e-tag').blur()`);
+  await ff.click(rep, '#report-select'); await sleep(1500);
   check('tag saved and filter chip rendered', (await ff.evalIn(rep, `[...document.querySelectorAll('#tag-filter-chips button')].map(c => c.textContent.trim())`)).includes('smoke'));
   const order = () => ff.evalIn(rep, `browser.storage.local.get(['reports']).then(s => s.reports[0].events.slice(0, 2).map(e => e.type))`);
   const before = await order();

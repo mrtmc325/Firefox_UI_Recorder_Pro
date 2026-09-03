@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+## v1.23.0 - 2026-09-03
+
+### Added — licensing (free tier + email activation, owner-hosted server)
+- Free installs are capped and never contact any server: GIF bursts stop at 5 s and are limited to 3 per report (enforced on record and again on import/merge), and step screenshots are limited to 10 per report.
+- A popup **License** group activates a purchase by email over HTTPS: the extension calls the owner's license server, which checks the email against its database and, if licensed, returns an activation for this install. No keys are handed to users.
+- Seats are enforced server-side: when active devices exceed the purchased seat count, the oldest device is demoted to the free tier at its next check-in. Licensed installs re-validate every 48 hours and fall back to free after 10 consecutive failed check-ins (so the license cannot be used offline indefinitely).
+- Transport is TLS with a signed request preamble (HMAC over timestamp, nonce, method, path, and body hash) plus a client header; the server answers anything else with an empty 404. The preamble ships in a public extension, so it is a scanner/abuse deterrent — seats and revocation are the real enforcement.
+- New self-hosted **license server** under `license-server/` (Node.js standard library only, `node:sqlite` storage): activation/validation API, a password-protected admin UI to add purchases, set seats, view activations, revoke devices, and read an audit log, plus a CLI, Docker/systemd deploy files, tests, and `sbom/license-server.cdx.json`. Excluded from the AMO package.
+
 ## v1.22.0 - 2026-09-03
 
 ### Added (store readiness)

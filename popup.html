@@ -257,6 +257,28 @@
       </div>
     </details>
 
+    <details class="settings-group settings-group-license">
+      <summary class="settings-summary">
+        <span class="settings-summary-title">License</span>
+        <span class="settings-summary-meta" id="license-tier-chip">Free</span>
+      </summary>
+      <div class="settings-group-body">
+        <div class="hint" id="license-summary">Free tier: GIF bursts up to 5 s and 3 per report; 10 screenshots per report.</div>
+        <div class="hint" id="license-usage"></div>
+        <label class="row" for="license-email" style="display:block">
+          <span class="hint">Purchase email</span>
+          <input id="license-email" type="email" autocomplete="email" spellcheck="false" placeholder="name@company.example" />
+        </label>
+        <div class="action-row">
+          <button id="license-activate" class="btn primary" type="button">Activate</button>
+          <button id="license-check" class="btn ghost" type="button">Check now</button>
+          <button id="license-deactivate" class="btn ghost" type="button">Deactivate</button>
+        </div>
+        <div class="hint" id="license-status" role="status" aria-live="polite"></div>
+        <div class="hint">Activating sends the email, a random install id, and the extension version to the license server over HTTPS; licensed installs check in every 48 hours. Free installs never contact it.</div>
+      </div>
+    </details>
+
     <details class="settings-group settings-group-help">
       <summary class="settings-summary">
         <span class="settings-summary-title">Help</span>
