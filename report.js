@@ -5743,13 +5743,16 @@ body{
     ${preset.bg};
   line-height:1.35;
 }
+/* Accent bars as inner pills (a thick left border curves with the card radius). Individual rules below
+   may override position; ::before only needs a positioned ancestor. */
+.brand,.preview-banner,.viewer-overlay,.viewer-cc-bar,.click-burst-export-card{position:relative}
+.brand::before,.preview-banner::before,.viewer-overlay::before,.viewer-cc-bar::before,.click-burst-export-card::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:4px;border-radius:0 3px 3px 0;background:var(--accent);pointer-events:none}
 .brand{
   display:flex;
   align-items:center;
   gap:10px;
   margin-bottom:10px;
   border:1px solid var(--edge);
-  box-shadow:inset 4px 0 0 var(--accent);
   border-radius:14px;
   padding:8px 10px;
   background:linear-gradient(180deg,var(--panel),var(--paper));
@@ -5775,7 +5778,6 @@ body{
   margin:0 0 8px;
   padding:6px 8px;
   border:1px dashed var(--edge);
-  box-shadow:inset 3px 0 0 var(--accent);
   border-radius:10px;
   color:var(--muted);
   background:linear-gradient(180deg,var(--paper),var(--panel));
@@ -5935,7 +5937,6 @@ body{
   min-height:56px;
   padding:9px 12px;
   border:1px solid color-mix(in srgb, var(--edge) 65%, transparent);
-  box-shadow:inset 4px 0 0 var(--accent);
   border-radius:12px;
   background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 90%, transparent), color-mix(in srgb, var(--paper) 90%, transparent));
   backdrop-filter:blur(3px);
@@ -6077,7 +6078,7 @@ body{
   border:1px solid var(--edge);
   border-radius:12px;
   background:linear-gradient(180deg,var(--paper),var(--panel));
-  box-shadow:inset 4px 0 0 var(--accent),0 6px 14px rgba(15,23,42,0.12);
+  box-shadow:0 6px 14px rgba(15,23,42,0.12);
 }
 .viewer-cc-body{
   padding:8px;
@@ -6399,7 +6400,6 @@ body{
   box-sizing:border-box;
   margin:0 auto;
   border:1px solid var(--edge);
-  box-shadow:inset 4px 0 0 var(--accent);
   border-radius:10px;
   padding:8px;
   background:linear-gradient(180deg,var(--panel),var(--paper));
